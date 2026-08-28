@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/release/v1/release-manifest.schema.json",
+  "title": "Commit-bound release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "commit", "sourceRepository", "images", "composeDigest", "checks", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sourceRepository": { "type": "string", "minLength": 1 },
+    "images": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["service", "reference", "digest"], "properties": { "service": { "type": "string" }, "reference": { "type": "string" }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } } },
+    "composeDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "checks": { "type": "array", "items": { "type": "string" } },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -80,6 +80,12 @@ test("production-style auth rejection is fail-closed", async () => {
       });
       assert.equal(response.status, 401);
       assert.equal((await response.json()).error.code, "AUTH_REQUIRED");
+      const forwarded = await fetch(`http://127.0.0.1:${address.port}/api/v1/goals`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "auth-forwarded", "x-pai-verified": "1", "x-pai-owner-id": "owner-from-gateway", "x-pai-session-id": "session-db-id", "x-pai-auth-time": "1700000000000" },
+        body: JSON.stringify({ intent: "forwarded request", source: { kind: "web" } }),
+      });
+      assert.equal(forwarded.status, 202);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       db.close();

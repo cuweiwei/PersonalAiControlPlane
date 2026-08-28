@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node --experimental-strip-types apps/orchestrator/src/index.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "check": "node --experimental-strip-types scripts/check.mjs"
+    "check": "node --experimental-strip-types scripts/check.mjs",
+    "release:artifact": "node scripts/release-artifact.mjs"
   }
 }

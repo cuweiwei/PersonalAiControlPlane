@@ -67,14 +67,21 @@ function idempotencyKey(req: IncomingMessage): string {
 }
 
 function ownerId(req: IncomingMessage, allowUnauthenticated: boolean): string {
-  if (!allowUnauthenticated) {
+  if (allowUnauthenticated) {
+    const supplied = req.headers["x-pai-dev-owner-id"];
+    return typeof supplied === "string" && supplied.length > 0 && supplied.length <= 200 ? supplied : "local-owner";
+  }
+  const marker = req.headers["x-pai-verified"];
+  const owner = req.headers["x-pai-owner-id"];
+  const session = req.headers["x-pai-session-id"];
+  const authTime = req.headers["x-pai-auth-time"];
+  if (marker !== "1" || typeof owner !== "string" || owner.length === 0 || owner.length > 200 || typeof session !== "string" || session.length === 0 || typeof authTime !== "string" || !Number.isFinite(Number(authTime))) {
     const error = new Error("authenticated Identity Gateway session required") as AppError;
     error.code = "AUTH_REQUIRED";
     error.status = 401;
     throw error;
   }
-  const supplied = req.headers["x-pai-dev-owner-id"];
-  return typeof supplied === "string" && supplied.length > 0 && supplied.length <= 200 ? supplied : "local-owner";
+  return owner;
 }
 
 function publicTask(row: Record<string, unknown>): Record<string, unknown> {

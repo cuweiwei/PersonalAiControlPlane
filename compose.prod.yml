@@ -1,0 +1,42 @@
+name: personal-ai-control-plane
+
+services:
+  pai-identity-gateway:
+    image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["node", "--experimental-strip-types", "apps/identity-gateway/src/index.ts"]
+    environment:
+      NODE_ENV: production
+      PAI_IDENTITY_PORT: "9084"
+      PAI_IDENTITY_DB_PATH: /var/lib/pai/identity.db
+      PAI_CANONICAL_ORIGIN: ${PAI_CANONICAL_ORIGIN:?PAI_CANONICAL_ORIGIN is required}
+      PAI_WEBAUTHN_RP_ID: ${PAI_WEBAUTHN_RP_ID:?PAI_WEBAUTHN_RP_ID is required}
+    volumes:
+      - ${PAI_IDENTITY_DATA_ROOT:?PAI_IDENTITY_DATA_ROOT must be project-scoped}/data:/var/lib/pai
+    ports:
+      - "127.0.0.1:9084:9084"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9084/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  pai-orchestrator:
+    image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      NODE_ENV: production
+      PAI_PORT: "9085"
+      PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator.db
+      PAI_ORCHESTRATOR_LOCK_PATH: /var/lib/pai/orchestrator.lock
+    volumes:
+      - ${PAI_ORCHESTRATOR_DATA_ROOT:?PAI_ORCHESTRATOR_DATA_ROOT must be project-scoped}/data:/var/lib/pai
+    ports:
+      - "127.0.0.1:9085:9085"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9085/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
