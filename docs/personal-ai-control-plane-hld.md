@@ -6,6 +6,8 @@ Date: 2026-08-28
 
 Scope: Brownfield target architecture; no implementation is authorized by this document
 
+Detailed design: [Personal AI Control Plane — Detailed Design](personal-ai-control-plane-detailed-design.md)
+
 ## 1. Executive decision
 
 The Personal AI Control Plane will be a new, independently versioned product and repository. It will not absorb AIHomePlatform, ContextHub, Hermes Agent, or their data.

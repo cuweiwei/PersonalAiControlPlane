@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/worker/v1/envelope.schema.json",
+  "title": "WorkerEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "messageId", "connectionId", "sequence", "workerId", "sentAt", "nonce", "type", "payload", "signature"],
+  "properties": {
+    "protocolVersion": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+    "messageId": {"type": "string", "minLength": 1},
+    "connectionId": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 0},
+    "workerId": {"type": "string", "minLength": 1},
+    "sentAt": {"type": "string", "format": "date-time"},
+    "nonce": {"type": "string", "minLength": 16},
+    "type": {"enum": ["worker.hello", "worker.heartbeat", "job.accept", "job.reject", "job.event", "job.checkpoint", "job.result", "capability.update"]},
+    "payload": {"type": "object"},
+    "signature": {"type": "string", "minLength": 16}
+  }
+}

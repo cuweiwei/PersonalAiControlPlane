@@ -1,0 +1,14 @@
+{
+  "name": "personal-ai-control-plane",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types apps/orchestrator/src/index.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "node --experimental-strip-types scripts/check.mjs"
+  }
+}

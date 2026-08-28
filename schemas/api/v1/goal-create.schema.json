@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/api/v1/goal-create.schema.json",
+  "title": "GoalCreate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["intent", "source"],
+  "properties": {
+    "intent": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["web", "hermes", "proactive", "self-extension", "schedule"]},
+        "correlationId": {"type": "string", "minLength": 1, "maxLength": 200}
+      }
+    },
+    "scope": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 200}, "maxItems": 50},
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deadline": {"type": ["string", "null"]},
+        "maxDurationMs": {"type": ["number", "null"], "minimum": 0},
+        "maxTokens": {"type": ["number", "null"], "minimum": 0},
+        "maxMonetaryMicros": {"type": "number", "minimum": 0},
+        "allowedWorkers": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "allowDeployment": {"type": "boolean"}
+      }
+    },
+    "memoryRequirement": {"enum": ["required", "preferred", "none"]}
+  }
+}
