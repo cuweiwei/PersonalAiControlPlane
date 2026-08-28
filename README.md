@@ -20,6 +20,6 @@ npm start
 
 The development server listens on `127.0.0.1:9085` and permits local unauthenticated goal admission. Production mode fails closed until the Identity Gateway is connected.
 
-Implemented in this slice: goal admission/idempotency, plan DAG validation and activation, SQLite migrations, task transitions, lease/fencing schema, transactional outbox claim/retry, audit-chain verification, pure hard-stop policy evaluation, health endpoints, and restart-safe tests.
+Implemented in this slice: goal admission/idempotency, plan DAG validation and activation, SQLite migrations, task transitions, lease/fencing schema, transactional outbox claim/retry, audit-chain verification, pure hard-stop policy evaluation, health endpoints, restart-safe tests, and an EdDSA action-grant contract with exact task/attempt/plan/fence binding and one-time replay checks.
 
-Not enabled yet: Passkey/Identity Gateway, real LLM planner, enrolled workers, Codex/Local LLM providers, ContextHub/Hermes/AIHomePlatform adapters, production Compose, and NAS deployment. Those remain separate implementation and evidence gates described in the [Detailed Design](docs/personal-ai-control-plane-detailed-design.md).
+Not enabled yet: the WebAuthn/Passkey Identity Gateway (including sessions and step-up), real LLM planner, enrolled workers, Codex/Local LLM providers, ContextHub/Hermes/AIHomePlatform adapters, production Compose, and NAS deployment. The action-grant contract is a local prerequisite, not a production authentication implementation. Remaining work stays behind the separate implementation and evidence gates described in the [Detailed Design](docs/personal-ai-control-plane-detailed-design.md).

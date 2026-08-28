@@ -13,6 +13,7 @@ const required = [
   "packages/contracts/src/index.ts",
   "packages/crypto/src/index.ts",
   "packages/policy/src/index.ts",
+  "packages/identity/src/index.ts",
   "schemas/api/v1/goal-create.schema.json",
   "schemas/plan/v1/plan.schema.json",
   "schemas/worker/v1/envelope.schema.json",
@@ -31,6 +32,7 @@ const schemas = [
   "schemas/plan/v1/plan.schema.json",
   "schemas/worker/v1/envelope.schema.json",
   "schemas/config/v1/system.schema.json",
+  "schemas/identity/v1/action-grant.schema.json",
 ];
 for (const relative of schemas) {
   const schema = JSON.parse(readFileSync(resolve(root, relative), "utf8"));
