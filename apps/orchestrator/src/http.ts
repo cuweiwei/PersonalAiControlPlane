@@ -13,6 +13,7 @@ type AppOptions = {
   db: OrchestratorDatabase;
   engine: TaskEngine;
   allowUnauthenticated: boolean;
+  identityReady?: boolean;
   metrics?: CounterRegistry;
   approvalService?: ApprovalService;
   scheduleService?: ScheduleService;
@@ -129,14 +130,16 @@ function health(options: AppOptions, kind: "live" | "ready" | "ops"): Record<str
   const dbCheck = options.db.one<{ value: number }>("SELECT 1 AS value");
   const migration = options.db.one<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations");
   const auditChain = options.engine.verifyAuditChain();
-  const ready = dbCheck?.value === 1 && migration?.version === 4 && auditChain;
+  const identityReady = options.allowUnauthenticated || options.identityReady === true;
+  const ready = dbCheck?.value === 1 && migration?.version === 4 && auditChain && identityReady;
   if (kind === "live") return { status: "ok" };
-  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", schemaVersion: migration?.version ?? null };
+  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", schemaVersion: migration?.version ?? null };
   return {
     status: ready ? "ok" : "degraded",
     evidenceLevel: "implemented_local",
     database: dbCheck?.value === 1 ? "ok" : "error",
     auditChain: auditChain ? "ok" : "error",
+    identity: identityReady ? "ok" : "not_ready",
     schemaVersion: migration?.version ?? null,
     authMode: options.allowUnauthenticated ? "development" : "identity-gateway",
     providers: "not_configured",

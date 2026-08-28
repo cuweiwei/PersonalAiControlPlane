@@ -101,6 +101,9 @@ test("production-style auth rejection is fail-closed", async () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind");
     try {
+      const readiness = await fetch(`http://127.0.0.1:${address.port}/health/ready`);
+      assert.equal(readiness.status, 503);
+      assert.equal((await readiness.json()).identity, "not_ready");
       const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/goals`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "auth-test" },
