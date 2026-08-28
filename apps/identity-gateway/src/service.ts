@@ -111,8 +111,8 @@ export class IdentityService {
   consumeChallenge(id: string, challenge: string, now = this.clock()): boolean {
     const row = this.db.one<{ challenge_hash: string; expires_at: number; consumed_at: number | null }>("SELECT challenge_hash, expires_at, consumed_at FROM auth_challenges WHERE id = ?", id);
     if (!row || row.consumed_at !== null || row.expires_at <= now || !safeEqualText(row.challenge_hash, sha256(challenge))) return false;
-    this.db.run("UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL", now, id);
-    return true;
+    const result = this.db.connection.prepare("UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL AND expires_at > ? AND challenge_hash = ?").run(now, id, now, row.challenge_hash);
+    return Number(result.changes) === 1;
   }
 
   registerCredential(userId: string, credentialId: string, publicKeyCose: string, signCount = 0, transports: string[] = []): string {
@@ -230,11 +230,13 @@ export class IdentityService {
   }
 
   consumeRecoveryCode(userId: string, code: string): boolean {
-    const row = this.db.one<{ id: string; code_hash: string }>("SELECT id, code_hash FROM recovery_codes WHERE user_id = ? AND used_at IS NULL AND code_hash = ?", userId, sha256(code));
-    if (!row || !safeEqualText(row.code_hash, sha256(code))) return false;
-    this.db.run("UPDATE recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL", this.clock(), row.id);
-    this.revokeAllSessions(userId);
-    return true;
+    const codeHash = sha256(code);
+    return this.db.transaction(() => {
+      const result = this.db.connection.prepare("UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL AND code_hash = ?").run(this.clock(), userId, codeHash);
+      if (Number(result.changes) !== 1) return false;
+      this.revokeAllSessions(userId);
+      return true;
+    });
   }
 
   consumeGrantJti(jti: string, audience: string, expSeconds: number, nowSeconds = Math.floor(this.clock() / 1000)): boolean {

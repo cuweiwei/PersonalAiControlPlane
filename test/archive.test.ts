@@ -46,6 +46,8 @@ test("artifact store writes content-addressed immutable bytes and credential bro
   const artifact = store.put(Buffer.from("artifact"), { maxBytes: 100, mediaType: "text/plain" });
   assert.equal(store.has(artifact.digest), true);
   assert.equal(readFileSync(artifact.path, "utf8"), "artifact");
+  assert.deepEqual(store.sweep([artifact.digest], 0, Date.now() + 1_000), [artifact.digest]);
+  assert.equal(store.has(artifact.digest), false);
   assert.throws(() => store.put(Buffer.alloc(101), { maxBytes: 100, mediaType: "application/octet-stream" }), /size limit/);
   const broker = new CredentialBroker((handle) => ({ available: true, withSecret: <T>(callback: (secret: string) => T) => callback("secret-value") }));
   const view = broker.register({ alias: "test", storageClass: "device-vault", adapter: "test", purpose: "unit", scopes: ["read"], health: "HEALTHY", expiresAt: null });
@@ -55,4 +57,17 @@ test("artifact store writes content-addressed immutable bytes and credential bro
   assert.equal(broker.withLeaseSecret(lease.id, (secret) => secret.length, 1_700_000_000_001), 12);
   lease.release();
   assert.throws(() => broker.withLeaseSecret(lease.id, () => "nope", 1_700_000_000_001), /expired/);
+});
+
+test("archive exports checksummed metadata and blocks replay after explicit future block", () => {
+  const db = new ArchiveDatabase(":memory:");
+  const service = new ArchiveService(db, () => 1_700_000_000_000);
+  const inserted = service.ingest(envelope(), { globalDays: null });
+  const exported = service.exportConversation(inserted.conversationId);
+  assert.match(exported.manifestHash, /^sha256:/);
+  assert.equal(exported.messages.length, 1);
+  const tombstone = service.requestPurge(inserted.conversationId, "owner", "block", true);
+  assert.equal(service.purge(tombstone).status, "VERIFIED");
+  assert.throws(() => service.ingest(envelope("new"), { globalDays: null }), /blocked/);
+  db.close();
 });

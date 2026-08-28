@@ -177,6 +177,45 @@ export class TaskEngine {
     return this.db.all<StoredTaskRow>("SELECT * FROM tasks WHERE goal_id = ? ORDER BY created_at, id", goalId);
   }
 
+  listPlans(goalId: string): Record<string, unknown>[] {
+    return this.db.all("SELECT goal_id, revision, digest, created_at, plan_json FROM plans WHERE goal_id = ? ORDER BY revision", goalId).map((row) => ({ goalId: row.goal_id, revision: row.revision, digest: row.digest, createdAt: nowIso(Number(row.created_at)), plan: JSON.parse(String(row.plan_json)) }));
+  }
+
+  retryGoal(goalId: string, actor: string, idempotencyKey: string): { status: number; body: GoalRecord; replayed: boolean } {
+    const route = `POST /api/v1/goals/${goalId}/retry`;
+    const hash = requestHash({ goalId, actor });
+    const existing = this.db.one<{ request_hash: string; response_status: number; response_json: string }>("SELECT request_hash, response_status, response_json FROM idempotency_records WHERE actor_id = ? AND route = ? AND key = ?", actor, route, idempotencyKey);
+    if (existing) {
+      if (existing.request_hash !== hash) throw this.domainError("IDEMPOTENCY_CONFLICT", false);
+      return { status: existing.response_status, body: JSON.parse(existing.response_json), replayed: true };
+    }
+    const goal = this.getGoal(goalId);
+    if (!goal) throw this.domainError("GOAL_NOT_FOUND", false);
+    if (goal.status !== "FAILED") throw this.domainError("STATE_CONFLICT", false);
+    const failedTasks = this.db.all<{ id: string; error_json: string | null }>("SELECT id, error_json FROM tasks WHERE goal_id = ? AND state = 'FAILED'", goalId);
+    if (failedTasks.length === 0) throw this.domainError("STATE_CONFLICT", false);
+    for (const task of failedTasks) {
+      const errorClass = task.error_json ? (JSON.parse(task.error_json) as { class?: string }).class : undefined;
+      if (["POLICY", "UNCERTAIN_SIDE_EFFECT", "PERMANENT"].includes(errorClass ?? "")) throw this.domainError("RETRY_REQUIRES_RECONCILIATION_OR_APPROVAL", false);
+    }
+    const now = this.clock();
+    this.db.transaction(() => {
+      this.db.run("UPDATE goals SET status = 'ACTIVE', state_version = state_version + 1, updated_at = ? WHERE id = ? AND status = 'FAILED'", now, goalId);
+      for (const task of failedTasks) {
+        const current = this.db.one<{ state_version: number; plan_revision: number }>("SELECT state_version, plan_revision FROM tasks WHERE id = ?", task.id)!;
+        this.db.run("UPDATE tasks SET state = 'READY', state_version = state_version + 1, ready_at = ?, error_json = NULL, updated_at = ? WHERE id = ? AND state = 'FAILED'", now, now, task.id);
+        const sequence = Number(this.db.one<{ sequence: number }>("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM task_events WHERE task_id = ?", task.id)?.sequence ?? 1);
+        const plan = this.db.one<{ digest: string }>("SELECT digest FROM plans WHERE goal_id = ? AND revision = ?", goalId, current.plan_revision);
+        this.db.run("INSERT INTO task_events(task_id, sequence, type, previous_state, new_state, actor, plan_digest, policy_version, payload_json, occurred_at) SELECT ?, ?, 'STATE_TRANSITION', 'FAILED', 'READY', ?, ?, g.policy_version, ?, ? FROM goals g WHERE g.id = ?", task.id, sequence, actor, plan?.digest ?? null, JSON.stringify({ reason: "explicit retry" }), now, goalId);
+        this.db.run("INSERT INTO outbox(id, topic, aggregate_type, aggregate_id, aggregate_version, dedupe_key, payload_json, available_at) VALUES (?, 'task.ready', 'task', ?, ?, ?, ?, ?)", uuidv7(now), task.id, current.state_version + 1, `task.ready:${task.id}:${current.state_version + 1}`, JSON.stringify({ taskId: task.id, goalId }), now);
+      }
+      const response = this.getGoal(goalId)!;
+      this.db.run("INSERT INTO idempotency_records(actor_id, route, key, request_hash, response_status, response_json, created_at) VALUES (?, ?, ?, ?, 202, ?, ?)", actor, route, idempotencyKey, hash, JSON.stringify(response), now);
+      this.appendAudit("goal.retry.requested", `goal:${goalId}`, actor, "ALLOW", goal.policyVersion, { taskCount: failedTasks.length });
+    });
+    return { status: 202, body: this.getGoal(goalId)!, replayed: false };
+  }
+
   listTaskEvents(taskId: string): Record<string, unknown>[] {
     return this.db.all("SELECT * FROM task_events WHERE task_id = ? ORDER BY sequence", taskId);
   }

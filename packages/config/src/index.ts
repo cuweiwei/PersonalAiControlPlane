@@ -41,6 +41,11 @@ export function parseSystemConfig(value: unknown): SystemConfig {
   if (!["development", "production"].includes(deployment.environment as string)) throw new Error("config.deployment.environment is invalid");
   if (!["development", "passkey"].includes(deployment.identityMode as string)) throw new Error("config.deployment.identityMode is invalid");
   const canonicalOrigin = stringField(deployment.canonicalOrigin, "config.deployment.canonicalOrigin", true);
+  if (canonicalOrigin) {
+    let origin: URL;
+    try { origin = new URL(canonicalOrigin); } catch { throw new Error("config.deployment.canonicalOrigin must be a valid origin"); }
+    if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("config.deployment.canonicalOrigin must be an HTTPS origin without a path");
+  }
   if (deployment.environment === "production" && (!canonicalOrigin || deployment.identityMode !== "passkey")) throw new Error("production requires canonical origin and Passkey identity mode");
   if (deployment.environment === "production" && [database.orchestratorPath, database.identityPath, database.archivePath, storage.artifactRoot].some((path) => typeof path !== "string" || path.startsWith("./"))) throw new Error("production paths must be explicit persistent paths");
   if (codex.forcedLoginMethod !== "chatgpt" || codex.allowApiKeyFallback !== false) throw new Error("Codex must use ChatGPT login without API-key fallback");

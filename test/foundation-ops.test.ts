@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createConsistentFileBackup, markRestoreDrill, verifyBackupManifest } from "../packages/backup/src/index.ts";
+import { createConsistentFileBackup, createSqliteBackup, markRestoreDrill, verifyBackupManifest } from "../packages/backup/src/index.ts";
+import { OrchestratorDatabase } from "../apps/orchestrator/src/db.ts";
 import { isCheckpointCompatible, validateCheckpointManifest, type CheckpointManifest } from "../packages/checkpoints/src/index.ts";
 import { configDigest, parseSystemConfig, startupGates, type SystemConfig } from "../packages/config/src/index.ts";
 import { ComputeBroker, QuotaTracker } from "../packages/compute/src/index.ts";
@@ -30,6 +31,8 @@ test("observability redacts secrets and keeps metric labels bounded", () => {
   const counters = new CounterRegistry();
   assert.equal(counters.increment("test", { outcome: "ok" }), 1);
   assert.deepEqual(counters.snapshot(), { "test{outcome=ok}": 1 });
+  assert.equal(counters.prometheus(), 'test{outcome="ok"} 1\n');
+  assert.throws(() => counters.increment("test", { taskId: "x".repeat(101) }), /metric increment/);
 });
 
 test("checkpoint manifest validates portable references and compatibility", () => {
@@ -47,6 +50,12 @@ test("backup manifest requires an explicit restore drill", () => {
   const manifest = createConsistentFileBackup(source, destination, { schemaVersionObserved: 1, migrationChecksums: ["m1"], artifactDigests: [] });
   assert.equal(verifyBackupManifest(manifest).valid, false);
   assert.equal(verifyBackupManifest(markRestoreDrill(manifest, true)).valid, true);
+  const sqliteSource = join(root, "orchestrator.db"); const sqliteDestination = join(root, "snapshots", "orchestrator.db");
+  const database = new OrchestratorDatabase(sqliteSource);
+  database.run("INSERT INTO goals(id, owner_id, source_json, intent, scope_json, constraints_json, memory_requirement, status, state_version, policy_version, created_at, updated_at) VALUES ('g', 'o', '{}', 'backup', '[]', '{}', 'none', 'PENDING', 0, 1, 1, 1)");
+  database.close();
+  const sqliteManifest = createSqliteBackup(sqliteSource, sqliteDestination, { schemaVersionObserved: 4, migrationChecksums: ["orchestrator-control-surfaces-v4"], artifactDigests: [] });
+  assert.equal(verifyBackupManifest(markRestoreDrill(sqliteManifest, true)).valid, true);
 });
 
 test("quota observations override optimistic state on explicit limit errors", () => {

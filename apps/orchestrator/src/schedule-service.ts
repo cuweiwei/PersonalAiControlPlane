@@ -11,12 +11,24 @@ export class ScheduleService {
   private readonly clock: () => number;
   constructor(db: OrchestratorDatabase, clock: () => number = Date.now) { this.db = db; this.clock = clock; }
   create(input: { name: string; timezone: string; recurrence: IntervalRecurrence; nextRunAt: number; misfirePolicy: "SKIP" | "RUN_ONCE"; goalTemplate: Record<string, unknown> }): ScheduleRecord {
-    if (!input.name || !validTimezone(input.timezone) || input.recurrence.kind !== "interval" || !Number.isInteger(input.recurrence.everyMs) || input.recurrence.everyMs < 1_000 || !Number.isInteger(input.recurrence.templateRevision) || input.nextRunAt < this.clock()) throw new Error("schedule is invalid");
+    if (!input.name || !validTimezone(input.timezone) || input.recurrence.kind !== "interval" || !Number.isInteger(input.recurrence.everyMs) || input.recurrence.everyMs < 1_000 || !Number.isInteger(input.recurrence.templateRevision) || !["SKIP", "RUN_ONCE"].includes(input.misfirePolicy) || !Number.isInteger(input.nextRunAt) || input.nextRunAt < this.clock()) throw new Error("schedule is invalid");
     const id = uuidv7(this.clock());
     this.db.run("INSERT INTO schedules(id, name, status, timezone, recurrence, next_run_at, misfire_policy, goal_template_json, created_at, updated_at) VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)", id, input.name, input.timezone, JSON.stringify(input.recurrence), input.nextRunAt, input.misfirePolicy, JSON.stringify(input.goalTemplate), this.clock(), this.clock());
     return this.get(id)!;
   }
-  pause(id: string): ScheduleRecord { this.db.run("UPDATE schedules SET status = 'PAUSED', state_version = state_version + 1, updated_at = ? WHERE id = ? AND status = 'ACTIVE'", this.clock(), id); return this.get(id)!; }
+  update(id: string, input: { timezone?: string; recurrence?: IntervalRecurrence; nextRunAt?: number | null; misfirePolicy?: "SKIP" | "RUN_ONCE"; goalTemplate?: Record<string, unknown>; expectedStateVersion: number }): ScheduleRecord {
+    const current = this.get(id);
+    if (!current || !Number.isInteger(input.expectedStateVersion) || current.stateVersion !== input.expectedStateVersion) throw new Error("schedule version conflict");
+    const timezone = input.timezone ?? current.timezone;
+    const recurrence = input.recurrence ?? current.recurrence;
+    const nextRunAt = input.nextRunAt === undefined ? current.nextRunAt : input.nextRunAt;
+    const misfirePolicy = input.misfirePolicy ?? current.misfirePolicy;
+    if (!validTimezone(timezone) || recurrence.kind !== "interval" || !Number.isInteger(recurrence.everyMs) || recurrence.everyMs < 1_000 || !Number.isInteger(recurrence.templateRevision) || !["SKIP", "RUN_ONCE"].includes(misfirePolicy) || nextRunAt !== null && (!Number.isInteger(nextRunAt) || nextRunAt < this.clock())) throw new Error("schedule is invalid");
+    const result = this.db.connection.prepare("UPDATE schedules SET timezone = ?, recurrence = ?, next_run_at = ?, misfire_policy = ?, goal_template_json = ?, state_version = state_version + 1, updated_at = ? WHERE id = ? AND state_version = ?").run(timezone, JSON.stringify(recurrence), nextRunAt, misfirePolicy, JSON.stringify(input.goalTemplate ?? current.goalTemplate), this.clock(), id, input.expectedStateVersion);
+    if (Number(result.changes) !== 1) throw new Error("schedule version conflict");
+    return this.get(id)!;
+  }
+  pause(id: string): ScheduleRecord { const result = this.db.connection.prepare("UPDATE schedules SET status = 'PAUSED', state_version = state_version + 1, updated_at = ? WHERE id = ? AND status = 'ACTIVE'").run(this.clock(), id); if (Number(result.changes) !== 1) { const current = this.get(id); if (!current) throw new Error("schedule not found"); } return this.get(id)!; }
   manualRun(id: string, createGoal: (template: Record<string, unknown>, dedupeKey: string) => string): string {
     const schedule = this.get(id); if (!schedule || schedule.status === "DISABLED") throw new Error("schedule is unavailable");
     return this.fire(schedule, this.clock(), createGoal);

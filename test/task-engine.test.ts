@@ -152,3 +152,18 @@ test("plan activation rejects dependency cycles before writing", () => {
   assert.equal(db.one("SELECT COUNT(*) AS count FROM plans")?.count, 0);
   db.close();
 });
+
+test("recoverable failed goals can be explicitly retried with durable idempotency", () => {
+  const db = new OrchestratorDatabase(":memory:");
+  const engine = new TaskEngine(db, () => 1_700_000_000_000);
+  const goal = engine.createGoal({ intent: "retry me", source: { kind: "web" } }, "owner", "retry-goal");
+  const planService = new PlanService(db, () => 1_700_000_000_000);
+  planService.activate(goal.body.goalId as string, { schemaVersion: 1, goalId: goal.body.goalId as string, revision: 1, intent: "retry me", acceptanceCriteria: [{ id: "done", description: "done", verificationTaskId: "task" }], tasks: [{ taskId: "task", type: "test", title: "test", required: true, sideEffectClass: "READ_ONLY" }] });
+  engine.transitionTask("task", "FAILED", { type: "STATE_TRANSITION", actor: "worker", reason: "temporary" }, "ESTIMATING");
+  db.run("UPDATE goals SET status = 'FAILED' WHERE id = ?", goal.body.goalId);
+  const retried = engine.retryGoal(goal.body.goalId as string, "owner", "retry-1");
+  assert.equal(retried.body.status, "ACTIVE");
+  assert.equal(engine.listTasks(goal.body.goalId as string)[0].state, "READY");
+  assert.equal(engine.retryGoal(goal.body.goalId as string, "owner", "retry-1").replayed, true);
+  db.close();
+});

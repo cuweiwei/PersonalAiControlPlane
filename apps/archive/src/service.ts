@@ -15,6 +15,7 @@ export type NormalizedEnvelope = {
 };
 
 export type IngestResult = { status: "INSERTED" | "DUPLICATE" | "CONFLICT"; conversationId: string; messageId?: string };
+export type ArchiveExport = { schemaVersion: 1; conversationId: string; generatedAt: string; messages: Array<{ id: string; externalId: string; revision: string; checksum: string; sentAt: string | null; provenance: Record<string, JsonValue>; expiresAt: number | null }>; manifestHash: string };
 
 function expiry(sentAt: number | null, policy: RetentionPolicy, envelope: NormalizedEnvelope, now: number): number | null {
   let days: number | null | undefined = policy.ownerOverrideDays;
@@ -37,11 +38,17 @@ export class ArchiveService {
   constructor(db: ArchiveDatabase, clock: () => number = Date.now) { this.db = db; this.clock = clock; }
 
   ingest(envelope: NormalizedEnvelope, policy: RetentionPolicy): IngestResult {
-    if (envelope.schemaVersion !== 1 || !envelope.source || !envelope.externalAccountHandle || !envelope.conversation.externalId || !envelope.message.externalId || !envelope.message.revision || !envelope.message.content?.format) throw new Error("normalized envelope is invalid");
+    if (envelope.schemaVersion !== 1 || !envelope.source || !envelope.externalAccountHandle || !envelope.conversation?.externalId || !envelope.message?.externalId || !envelope.message.revision || !envelope.message.content?.format || typeof envelope.message.content.text !== "string" || !envelope.message.role) throw new Error("normalized envelope is invalid");
+    if (envelope.message.sentAt !== null && (!envelope.message.sentAt || !Number.isFinite(Date.parse(envelope.message.sentAt)))) throw new Error("message sentAt is invalid");
+    for (const attachment of envelope.message.attachments ?? []) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(attachment.contentHash) || !attachment.mediaType || !Number.isInteger(attachment.size) || attachment.size < 0 || !attachment.artifactRef) throw new Error("attachment metadata is invalid");
+    }
     const { checksum: _checksum, ...unsignedEnvelope } = envelope;
     const expectedChecksum = sha256(canonicalJson(unsignedEnvelope as never));
     if (envelope.checksum !== expectedChecksum) throw new Error("normalized envelope checksum mismatch");
     const now = this.clock();
+    const blocked = this.db.one("SELECT id FROM conversation_tombstones WHERE target_type = 'conversation' AND target_id IN (SELECT id FROM conversations WHERE source = ? AND external_account_handle = ? AND external_thread_id = ?) AND block_future = 1 AND status IN ('PURGING', 'VERIFIED')", envelope.source, envelope.externalAccountHandle, envelope.conversation.externalId);
+    if (blocked) throw new Error("conversation is blocked for future ingestion");
     return this.db.transaction(() => {
       let conversation = this.db.one<{ id: string }>("SELECT id FROM conversations WHERE source = ? AND external_account_handle = ? AND external_thread_id = ?", envelope.source, envelope.externalAccountHandle, envelope.conversation.externalId);
       const conversationId = conversation?.id ?? uuidv7(now);
@@ -65,8 +72,25 @@ export class ArchiveService {
 
   requestPurge(conversationId: string, requestedBy: string, reason: string, blockFuture = false): string {
     const now = this.clock();
+    if (!conversationId || !requestedBy || !reason || !this.db.one("SELECT id FROM conversations WHERE id = ?", conversationId)) throw new Error("conversation is unavailable");
     const id = uuidv7(now);
     this.db.run("INSERT INTO conversation_tombstones(id, target_type, target_id, requested_by, requested_at, reason, block_future, status) VALUES (?, 'conversation', ?, ?, ?, ?, ?, 'REQUESTED')", id, conversationId, requestedBy, now, reason, blockFuture ? 1 : 0);
+    return id;
+  }
+
+  exportConversation(conversationId: string): ArchiveExport {
+    const now = this.clock();
+    if (!this.db.one("SELECT id FROM conversations WHERE id = ?", conversationId)) throw new Error("conversation is unavailable");
+    const rows = this.db.all<Record<string, unknown>>("SELECT id, external_message_id, revision, checksum, sent_at, provenance_json, expires_at FROM messages WHERE conversation_id = ? ORDER BY sent_at, id", conversationId);
+    const messages = rows.map((row) => ({ id: String(row.id), externalId: String(row.external_message_id), revision: String(row.revision), checksum: String(row.checksum), sentAt: row.sent_at === null ? null : new Date(Number(row.sent_at)).toISOString(), provenance: JSON.parse(String(row.provenance_json)), expiresAt: row.expires_at === null ? null : Number(row.expires_at) }));
+    const unsigned = { schemaVersion: 1 as const, conversationId, generatedAt: new Date(now).toISOString(), messages };
+    return { ...unsigned, manifestHash: sha256(canonicalJson(unsigned as never)) };
+  }
+
+  recordExtraction(input: { conversationId: string; messageStartId?: string | null; messageEndId?: string | null; extractorVersion: string; inputDigest: string; candidateIds?: string[]; evidence?: Record<string, JsonValue> }): string {
+    if (!input.conversationId || !input.extractorVersion || !/^sha256:[0-9a-f]{64}$/.test(input.inputDigest)) throw new Error("extraction input is invalid");
+    const id = uuidv7(this.clock());
+    this.db.run("INSERT INTO extractions(id, conversation_id, message_start_id, message_end_id, extractor_version, input_digest, status, candidate_ids_json, evidence_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)", id, input.conversationId, input.messageStartId ?? null, input.messageEndId ?? null, input.extractorVersion, input.inputDigest, JSON.stringify(input.candidateIds ?? []), JSON.stringify(input.evidence ?? {}), this.clock(), this.clock());
     return id;
   }
 

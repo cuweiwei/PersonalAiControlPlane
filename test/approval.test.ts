@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ApprovalService, type ApprovalBounds } from "../apps/orchestrator/src/approval-service.ts";
 import { OrchestratorDatabase } from "../apps/orchestrator/src/db.ts";
+import { TaskEngine } from "../apps/orchestrator/src/task-engine.ts";
 
 const scope: ApprovalBounds = { actions: ["read"], resources: ["repo"], capabilityIds: ["cap"], workers: ["worker"], filesystemRoots: ["/repo"], networkDestinations: ["none"], recipients: ["owner"], mergeMode: "none", deploymentMode: "none", budget: { tokens: 100 } };
 
@@ -14,7 +15,20 @@ test("approval request is immutable until a single approve/reject decision", () 
   const grant = approval.approve(request.id, "owner", now, "signed-grant", scope);
   assert.equal(grant.requestId, request.id);
   assert.equal(approval.getRequest(request.id)?.status, "APPROVED");
+  assert.equal(approval.revokeGrant(grant.id, "owner"), true);
+  assert.equal(approval.revokeGrant(grant.id, "owner"), false);
+  assert.equal(new TaskEngine(db, () => now).verifyAuditChain(), true);
   assert.throws(() => approval.approve(request.id, "owner", now, "signed-grant-2", scope), /not open/);
+  db.close();
+});
+
+test("approval bounds cannot be widened by the decision", () => {
+  const db = new OrchestratorDatabase(":memory:");
+  const now = 1_700_000_000_000;
+  const approval = new ApprovalService(db, () => now);
+  db.run("INSERT INTO goals(id, owner_id, source_json, intent, scope_json, constraints_json, memory_requirement, status, state_version, policy_version, created_at, updated_at) VALUES ('g', 'o', '{}', 'x', '[]', '{}', 'none', 'ACTIVE', 0, 1, ?, ?)", now, now);
+  const request = approval.createRequest({ goalId: "g", planDigest: "sha256:p", policyVersion: 1, requiredScope: scope, expiresAt: now + 60_000 });
+  assert.throws(() => approval.approve(request.id, "owner", now, "signed", { ...scope, actions: ["read", "write"] }), /broader/);
   db.close();
 });
 

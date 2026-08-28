@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, fsyncSync, mkdirSync, openSync, renameSync, closeSync, writeFileSync } from "node:fs";
+import { existsSync, fsyncSync, mkdirSync, openSync, renameSync, closeSync, unlinkSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type ArtifactPutOptions = { expectedDigest?: string; maxBytes: number; mediaType: string };
@@ -38,5 +38,18 @@ export class ContentAddressedArtifactStore {
     if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return false;
     const hex = digest.slice(7);
     return existsSync(join(this.root, "sha256", hex.slice(0, 2), hex.slice(2, 4), hex));
+  }
+
+  sweep(unreferencedDigests: readonly string[], olderThanMs: number, now = Date.now()): string[] {
+    if (!Number.isInteger(olderThanMs) || olderThanMs < 0) throw new Error("artifact grace period is invalid");
+    const removed: string[] = [];
+    for (const digest of unreferencedDigests) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(digest)) continue;
+      const hex = digest.slice(7); const target = join(this.root, "sha256", hex.slice(0, 2), hex.slice(2, 4), hex);
+      if (!existsSync(target)) continue;
+      if (now - statSync(target).mtimeMs < olderThanMs) continue;
+      unlinkSync(target); removed.push(digest);
+    }
+    return removed;
   }
 }

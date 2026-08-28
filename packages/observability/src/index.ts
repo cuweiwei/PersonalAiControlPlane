@@ -20,6 +20,23 @@ export function logDigest(event: SafeLogEvent): string { return sha256(canonical
 
 export class CounterRegistry {
   private readonly counters = new Map<string, number>();
-  increment(name: string, labels: Record<string, string> = {}, amount = 1): number { if (!name || amount < 0) throw new Error("metric increment is invalid"); const key = `${name}{${Object.entries(labels).sort().map(([k, v]) => `${k}=${v}`).join(",")}}`; const value = (this.counters.get(key) ?? 0) + amount; this.counters.set(key, value); return value; }
+  increment(name: string, labels: Record<string, string> = {}, amount = 1): number {
+    const entries = Object.entries(labels);
+    if (!/^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(name) || entries.length > 8 || entries.some(([key, value]) => !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key) || !/^[A-Za-z0-9_.:/-]{0,100}$/.test(value)) || !Number.isFinite(amount) || amount < 0) throw new Error("metric increment is invalid");
+    const key = `${name}{${entries.sort().map(([k, v]) => `${k}=${v}`).join(",")}}`; const value = (this.counters.get(key) ?? 0) + amount; this.counters.set(key, value); return value;
+  }
   snapshot(): Record<string, number> { return Object.fromEntries(this.counters); }
+  prometheus(): string {
+    return [...this.counters.entries()].map(([key, value]) => {
+      const match = /^(?<name>[a-zA-Z_:][a-zA-Z0-9_:]*)\{(?<labels>.*)\}$/.exec(key);
+      if (!match?.groups) return `${key} ${value}`;
+      const labels = match.groups.labels ? match.groups.labels.split(",").filter(Boolean).map((pair) => {
+        const separator = pair.indexOf("=");
+        const label = separator < 0 ? pair : pair.slice(0, separator);
+        const raw = separator < 0 ? "" : pair.slice(separator + 1);
+        return `${label}="${raw.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n")}"`;
+      }).join(",") : "";
+      return `${match.groups.name}${labels ? `{${labels}}` : ""} ${value}`;
+    }).join("\n") + (this.counters.size ? "\n" : "");
+  }
 }
