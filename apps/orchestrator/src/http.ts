@@ -116,7 +116,7 @@ function health(options: AppOptions, kind: "live" | "ready" | "ops"): Record<str
   const dbCheck = options.db.one<{ value: number }>("SELECT 1 AS value");
   const migration = options.db.one<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations");
   const auditChain = options.engine.verifyAuditChain();
-  const ready = dbCheck?.value === 1 && migration?.version === 3 && auditChain;
+  const ready = dbCheck?.value === 1 && migration?.version === 4 && auditChain;
   if (kind === "live") return { status: "ok" };
   if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", schemaVersion: migration?.version ?? null };
   return {

@@ -174,6 +174,243 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 `;
 
+const EXTENDED_SCHEMA = `
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  attempt_id TEXT NOT NULL REFERENCES attempts(id),
+  schema_version INTEGER NOT NULL,
+  artifact_hash TEXT,
+  portable INTEGER NOT NULL DEFAULT 0 CHECK (portable IN (0, 1)),
+  provider_kind TEXT,
+  resume_reference_ref TEXT,
+  next_action TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES goals(id),
+  task_id TEXT REFERENCES tasks(id),
+  plan_digest TEXT NOT NULL,
+  policy_version INTEGER NOT NULL,
+  required_scope_json TEXT NOT NULL,
+  risk_json TEXT NOT NULL DEFAULT '{}',
+  channel_limits_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL CHECK (status IN ('OPEN', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED')),
+  expires_at INTEGER NOT NULL,
+  correlation_id TEXT,
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER,
+  decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS approval_requests_status_idx ON approval_requests(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS approval_grants (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES approval_requests(id),
+  signed_grant_digest TEXT NOT NULL,
+  bounded_scope_json TEXT NOT NULL,
+  approver TEXT NOT NULL,
+  auth_time INTEGER NOT NULL,
+  issued_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'DISABLED')),
+  timezone TEXT NOT NULL,
+  recurrence TEXT NOT NULL,
+  next_run_at INTEGER,
+  misfire_policy TEXT NOT NULL,
+  goal_template_json TEXT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedule_firings (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL REFERENCES schedules(id),
+  intended_run_at INTEGER NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  goal_id TEXT REFERENCES goals(id),
+  disposition TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workers (
+  id TEXT PRIMARY KEY,
+  identity_subject TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  trust_state TEXT NOT NULL,
+  protocol_min TEXT NOT NULL,
+  protocol_max TEXT NOT NULL,
+  last_heartbeat_at INTEGER,
+  stale_at INTEGER,
+  wake_policy_json TEXT NOT NULL DEFAULT '{}',
+  drain_state TEXT NOT NULL DEFAULT 'RUNNABLE',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS capabilities (
+  id TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  kind TEXT NOT NULL,
+  version TEXT NOT NULL,
+  descriptor_hash TEXT NOT NULL,
+  descriptor_json TEXT NOT NULL,
+  discovered_state TEXT NOT NULL,
+  grant_state TEXT NOT NULL,
+  health TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(worker_id, kind, version, descriptor_hash)
+);
+
+CREATE TABLE IF NOT EXISTS resource_reservations (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  attempt_id TEXT REFERENCES attempts(id),
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  amount_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('HELD', 'RELEASED', 'COMMITTED', 'EXPIRED')),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  released_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS resource_reservations_live_idx ON resource_reservations(resource_type, resource_id, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS providers (
+  id TEXT PRIMARY KEY,
+  class TEXT NOT NULL,
+  adapter TEXT NOT NULL,
+  worker_id TEXT REFERENCES workers(id),
+  status TEXT NOT NULL,
+  descriptor_json TEXT NOT NULL DEFAULT '{}',
+  last_probe_at INTEGER,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quota_observations (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES providers(id),
+  account_handle TEXT NOT NULL,
+  window TEXT NOT NULL,
+  used_json TEXT NOT NULL,
+  remaining_json TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  source TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  recovery_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS credential_handles (
+  id TEXT PRIMARY KEY,
+  alias TEXT NOT NULL UNIQUE,
+  storage_class TEXT NOT NULL,
+  adapter TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  scopes_json TEXT NOT NULL DEFAULT '[]',
+  health TEXT NOT NULL,
+  expires_at INTEGER,
+  last_verified_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_runs (
+  id TEXT PRIMARY KEY,
+  connector TEXT NOT NULL,
+  source_account_handle TEXT NOT NULL,
+  cursor_ref TEXT,
+  state TEXT NOT NULL,
+  counters_json TEXT NOT NULL DEFAULT '{}',
+  error_class TEXT,
+  next_retry_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS proactive_triggers (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  evidence_json TEXT NOT NULL,
+  disposition TEXT NOT NULL,
+  goal_id TEXT,
+  notification_id TEXT,
+  observed_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS capability_proposals (
+  id TEXT PRIMARY KEY,
+  blocked_goal_id TEXT REFERENCES goals(id),
+  blocked_task_id TEXT REFERENCES tasks(id),
+  target_repository TEXT NOT NULL,
+  contract_json TEXT NOT NULL,
+  permission_json TEXT NOT NULL,
+  estimate_json TEXT NOT NULL,
+  risk_json TEXT NOT NULL,
+  test_json TEXT NOT NULL,
+  release_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artifact_references (
+  owner_type TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  released_at INTEGER,
+  PRIMARY KEY(owner_type, owner_id, artifact_hash)
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT REFERENCES goals(id),
+  task_id TEXT REFERENCES tasks(id),
+  approval_id TEXT REFERENCES approval_requests(id),
+  channel TEXT NOT NULL,
+  recipient_handle TEXT NOT NULL,
+  template TEXT NOT NULL,
+  status TEXT NOT NULL,
+  provider_correlation TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reconciliation_records (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  attempt_id TEXT REFERENCES attempts(id),
+  provider TEXT NOT NULL,
+  operation_kind TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  external_operation_id TEXT,
+  request_digest TEXT NOT NULL,
+  expected_resource_json TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_observed_state TEXT NOT NULL,
+  reconciliation_strategy TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('OPEN', 'CONFIRMED', 'ABSENT', 'UNKNOWN', 'FAILED')),
+  last_observed_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS reconciliation_open_idx ON reconciliation_records(status, last_observed_at);
+`;
+
 export type SqlRow = Record<string, unknown>;
 
 export class OrchestratorDatabase {
@@ -221,6 +458,13 @@ export class OrchestratorDatabase {
         this.connection.prepare(
           "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(3, ?, ?)",
         ).run("outbox-claim-token-v3", Date.now());
+      }
+      const fourthMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 4").get();
+      if (!fourthMigration) {
+        this.connection.exec(EXTENDED_SCHEMA);
+        this.connection.prepare(
+          "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(4, ?, ?)",
+        ).run("orchestrator-control-surfaces-v4", Date.now());
       }
       this.connection.exec("COMMIT");
     } catch (error) {
