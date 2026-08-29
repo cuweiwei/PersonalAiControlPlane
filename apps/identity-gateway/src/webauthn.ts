@@ -205,7 +205,7 @@ export class PasskeyRpAdapter {
     const issued = await this.identity.authenticateWithPasskeyAsync(challengeId, challenge, assertion, async ({ assertion: current, credentialId, publicKeyCose, signCount }) => {
       try {
         const credential = { id: credentialId, publicKey: decodeBase64Url(publicKeyCose), counter: signCount, transports: this.identity.activeCredentials().find((item) => item.credentialId === credentialId)?.transports as never };
-        const verification = await verifyAuthenticationResponse({ response: current as AuthenticationResponseJSON, expectedChallenge: challenge, expectedOrigin: this.expectedOrigin, expectedRPID: this.rpId, credential, requireUserVerification: true });
+        const verification = await verifyAuthenticationResponse({ response, expectedChallenge: challenge, expectedOrigin: this.expectedOrigin, expectedRPID: this.rpId, credential, requireUserVerification: true });
         return { valid: verification.verified, signCount: verification.authenticationInfo?.newCounter };
       } catch {
         return { valid: false };
