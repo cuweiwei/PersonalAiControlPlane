@@ -4,7 +4,8 @@ services:
   pai-identity-gateway:
     image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
     restart: unless-stopped
-    user: "1000:1000"
+    # Synology bind roots grant write access to the non-root ContainerManager UID.
+    user: "106808:106808"
     command: ["node", "--experimental-strip-types", "apps/identity-gateway/src/index.ts"]
     environment:
       NODE_ENV: production
@@ -25,7 +26,8 @@ services:
   pai-orchestrator:
     image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
     restart: unless-stopped
-    user: "1000:1000"
+    # Keep the orchestrator non-root while matching the NAS ContainerManager ACL.
+    user: "106808:106808"
     environment:
       NODE_ENV: production
       PAI_PORT: "9085"
