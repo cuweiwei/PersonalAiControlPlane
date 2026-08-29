@@ -47,7 +47,12 @@ test("wired adapter reports production readiness and serves the owner entry page
     assert.equal((await ready.json()).passkey, "ready");
     const page = await fetch(`http://127.0.0.1:${address.port}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Owner Passkey/);
+    const pageHtml = await page.text();
+    assert.match(pageHtml, /Owner Passkey/);
+    assert.match(pageHtml, /challenge: bytes\(options\.challenge\)/);
+    assert.match(pageHtml, /user: \{ \.\.\.options\.user, id: bytes\(options\.user\.id\) \}/);
+    assert.match(pageHtml, /allowCredentials: options\.allowCredentials\?\.map/);
+    assert.doesNotMatch(pageHtml, /publicKey:start\.options/);
     const status = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/status`);
     assert.equal(status.status, 200);
     assert.equal((await status.json()).registrationAllowed, true);
