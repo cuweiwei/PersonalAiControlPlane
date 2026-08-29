@@ -26,8 +26,8 @@ if (!/^[A-Za-z][A-Za-z0-9-]{1,62}$/.test(deploymentProjectId)) throw new Error("
 if (!existsSync(composePath)) throw new Error(`missing ${composePath}`);
 if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) throw new Error("RELEASE_IMAGE_DIGEST must be an immutable digest");
 if (!imageReference.includes(`:sha-${commit}`) && !imageReference.includes(`@${imageDigest}`)) throw new Error("image reference must be commit-bound or digest-pinned");
-const composeDigest = `sha256:${createHash("sha256").update(readFileSync(composePath)).digest("hex")}`;
-const manifest = { schemaVersion: 1, serviceId, repository, commitSha: commit, imageDigest, composePath, composeSha256: composeDigest, deploymentProjectId, health: { path: "/health", readinessPath: "/health/ready" } };
+const composeSha256 = createHash("sha256").update(readFileSync(composePath)).digest("hex");
+const manifest = { schemaVersion: 1, serviceId, repository, commitSha: commit, imageDigest, composePath, composeSha256, deploymentProjectId, health: { path: "/health", readinessPath: "/health/ready" } };
 mkdirSync(outputDirectory, { recursive: true });
 writeFileSync(join(outputDirectory, `release-manifest-${commit}.json`), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 console.log(JSON.stringify(manifest));
