@@ -55,6 +55,6 @@ The root-owned production environment must contain matching non-secret configura
 
 The AIHomePlatform-owned private edge calls `GET /api/v1/auth/forward` as its authentication subrequest before forwarding a browser request to the portal or another protected human UI. The gateway reads only the `pai_session` cookie and ignores any incoming `x-pai-*` identity headers.
 
-- Valid session: `204 No Content` with gateway-generated `x-pai-verified`, `x-pai-owner-id`, `x-pai-session-id`, `x-pai-auth-time`, and `x-pai-request-id` response headers.
+- Valid session: `204 No Content` with gateway-generated `x-pai-verified`, `x-pai-owner-id`, `x-pai-session-id`, `x-pai-auth-time`, and `x-pai-request-id` response headers. `x-pai-session-id` is the non-secret database row ID; the raw `pai_session` cookie value is never forwarded upstream.
 - Missing, expired, or revoked session: `401 AUTH_REQUIRED`.
 - The edge must copy only those response headers to the upstream request and must strip the same headers supplied by the original client. It must not expose the session header set to the browser or use a static owner token.

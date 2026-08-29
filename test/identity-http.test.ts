@@ -58,7 +58,8 @@ test("forward-auth validates the session cookie and emits only gateway-owned ide
     assert.equal(forwarded.status, 204);
     assert.equal(forwarded.headers.get("x-pai-verified"), "1");
     assert.equal(forwarded.headers.get("x-pai-owner-id"), userId);
-    assert.equal(forwarded.headers.get("x-pai-session-id"), issued.sessionId);
+    assert.equal(forwarded.headers.get("x-pai-session-id"), issued.view.id);
+    assert.notEqual(forwarded.headers.get("x-pai-session-id"), issued.sessionId);
     assert.equal(forwarded.headers.get("x-pai-auth-time"), String(issued.view.authTime));
     assert.match(forwarded.headers.get("x-pai-request-id") ?? "", /^[0-9a-f-]{36}$/);
     const rejected = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/forward`);

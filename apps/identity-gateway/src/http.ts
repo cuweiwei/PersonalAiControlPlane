@@ -90,7 +90,7 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
           const rawSessionId = sessionId(request);
           const view = rawSessionId ? options.identity.verifySession(rawSessionId) : undefined;
           if (!rawSessionId || !view) return json(response, 401, { error: { code: "AUTH_REQUIRED", message: "Authenticated Identity Gateway session required", retryable: false } });
-          const headers = options.identity.buildForwardAuthHeaders({ ownerId: view.userId, sessionId: rawSessionId, authTime: view.authTime, requestId: randomUUID() });
+          const headers = options.identity.buildForwardAuthHeaders({ ownerId: view.userId, sessionId: view.id, authTime: view.authTime, requestId: randomUUID() });
           response.writeHead(204, { "cache-control": "no-store", ...headers });
           response.end();
           return;
