@@ -59,6 +59,21 @@ function safeSecretEqual(input: string, expected: string): boolean {
   return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }
 
+function registrationFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (/credential ID was not base64url-encoded/i.test(message)) return "CREDENTIAL_ID_ENCODING";
+  if (/unexpected registration response origin/i.test(message)) return "ORIGIN_MISMATCH";
+  if (/unexpected registration response challenge|custom challenge verifier returned false/i.test(message)) return "CHALLENGE_MISMATCH";
+  if (/rp id|rpId|relying party/i.test(message)) return "RP_ID_MISMATCH";
+  if (/user verification was required/i.test(message)) return "USER_VERIFICATION_REQUIRED";
+  if (/user presence was required/i.test(message)) return "USER_PRESENCE_REQUIRED";
+  if (/no public key|missing numeric alg|unexpected public key alg/i.test(message)) return "PUBLIC_KEY_INVALID";
+  if (/no aaguid/i.test(message)) return "AAGUID_MISSING";
+  if (/attestation|unsupported attestation|none attestation/i.test(message)) return "ATTESTATION_INVALID";
+  if (/client data|credential type|missing credential ID/i.test(message)) return "CLIENT_DATA_INVALID";
+  return "VERIFICATION_REJECTED";
+}
+
 export class PasskeyRpAdapter {
   private readonly db: IdentityDatabase;
   private readonly identity: IdentityService;
@@ -147,13 +162,13 @@ export class PasskeyRpAdapter {
     let verification;
     try {
       verification = await verifyRegistrationResponse({ response, expectedChallenge, expectedOrigin: this.expectedOrigin, expectedRPID: this.rpId, requireUserVerification: true });
-    } catch {
+    } catch (error) {
       this.identity.abandonUser(userId);
-      throw new IdentityAuthError("PASSKEY_REGISTRATION_FAILED", "Passkey verification failed", 400);
+      throw new IdentityAuthError("PASSKEY_REGISTRATION_FAILED", `Passkey verification failed (${registrationFailureCode(error)})`, 400);
     }
     if (!verification.verified || !verification.registrationInfo) {
       this.identity.abandonUser(userId);
-      throw new IdentityAuthError("PASSKEY_REGISTRATION_FAILED", "Passkey verification failed", 400);
+      throw new IdentityAuthError("PASSKEY_REGISTRATION_FAILED", "Passkey verification failed (ATTESTATION_REJECTED)", 400);
     }
     const credential = verification.registrationInfo.credential;
     const recoveryCodes = Array.from({ length: 8 }, () => randomBytes(9).toString("base64url"));
