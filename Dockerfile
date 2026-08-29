@@ -2,6 +2,8 @@ FROM node:22.19.0-bookworm-slim
 
 WORKDIR /app
 COPY package.json ./
+COPY package-lock.json ./
+RUN npm ci --omit=dev
 COPY apps ./apps
 COPY packages ./packages
 COPY schemas ./schemas

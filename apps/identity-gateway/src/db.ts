@@ -15,6 +15,13 @@ CREATE TABLE IF NOT EXISTS identity_users (
   disabled_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS identity_profiles (
+  user_id TEXT PRIMARY KEY REFERENCES identity_users(id),
+  login TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS passkey_credentials (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES identity_users(id),
@@ -39,6 +46,18 @@ CREATE TABLE IF NOT EXISTS auth_challenges (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS auth_challenges_expiry_idx ON auth_challenges(expires_at, consumed_at);
+
+CREATE TABLE IF NOT EXISTS registration_intents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE REFERENCES identity_users(id),
+  challenge_id TEXT NOT NULL UNIQUE REFERENCES auth_challenges(id),
+  login TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS registration_intents_expiry_idx ON registration_intents(expires_at, consumed_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,

@@ -51,6 +51,14 @@ export type PasskeyVerifier = (input: {
   signCount: number;
 }) => { valid: boolean; signCount?: number };
 
+export type AsyncPasskeyVerifier = (input: {
+  assertion: PasskeyAssertion;
+  challenge: string;
+  credentialId: string;
+  publicKeyCose: string;
+  signCount: number;
+}) => { valid: boolean; signCount?: number } | Promise<{ valid: boolean; signCount?: number }>;
+
 export type ForwardAuthIdentity = {
   ownerId: string;
   sessionId: string;
@@ -85,6 +93,25 @@ export class IdentityService {
     const now = this.clock();
     this.db.run("INSERT INTO identity_users(id, created_at) VALUES (?, ?)", userId, now);
     return userId;
+  }
+
+  abandonUser(userId: string): void {
+    this.db.transaction(() => {
+      this.db.run("UPDATE identity_users SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL", this.clock(), userId);
+      this.db.run("UPDATE registration_intents SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL", this.clock(), userId);
+    });
+  }
+
+  userCount(): number {
+    const row = this.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM identity_users WHERE disabled_at IS NULL");
+    return Number(row?.count ?? 0);
+  }
+
+  activeCredentials(userId?: string): Array<{ credentialId: string; publicKeyCose: string; signCount: number; transports: string[] }> {
+    const rows = userId
+      ? this.db.all<{ credential_id: string; public_key_cose: string; sign_count: number; transports_json: string }>("SELECT credential_id, public_key_cose, sign_count, transports_json FROM passkey_credentials WHERE user_id = ? AND revoked_at IS NULL", userId)
+      : this.db.all<{ credential_id: string; public_key_cose: string; sign_count: number; transports_json: string }>("SELECT credential_id, public_key_cose, sign_count, transports_json FROM passkey_credentials WHERE revoked_at IS NULL");
+    return rows.map((row) => ({ credentialId: row.credential_id, publicKeyCose: row.public_key_cose, signCount: row.sign_count, transports: JSON.parse(row.transports_json) as string[] }));
   }
 
   issueChallenge(kind: ChallengeKind, userId: string | null, ttlMs = 120_000, sessionId: string | null = null): IssuedChallenge {
@@ -140,12 +167,12 @@ export class IdentityService {
     ttlMs = 8 * 60 * 60 * 1000,
   ): IssuedSession | undefined {
     const challengeRow = this.db.one<{ user_id: string | null; expires_at: number }>("SELECT user_id, expires_at FROM auth_challenges WHERE id = ? AND kind = 'authentication'", challengeId);
-    if (!challengeRow?.user_id || !this.consumeChallenge(challengeId, challenge)) return undefined;
+    if (!challengeRow || !this.consumeChallenge(challengeId, challenge)) return undefined;
     const credential = this.db.one<{ user_id: string; credential_id: string; public_key_cose: string; sign_count: number; revoked_at: number | null }>(
       "SELECT user_id, credential_id, public_key_cose, sign_count, revoked_at FROM passkey_credentials WHERE credential_id = ?",
       assertion.credentialId,
     );
-    if (!credential || credential.user_id !== challengeRow.user_id || credential.revoked_at !== null) return undefined;
+    if (!credential || (challengeRow.user_id !== null && credential.user_id !== challengeRow.user_id) || credential.revoked_at !== null) return undefined;
     let result: { valid: boolean; signCount?: number };
     try {
       result = verifier({ assertion, challenge, credentialId: credential.credential_id, publicKeyCose: credential.public_key_cose, signCount: credential.sign_count });
@@ -154,7 +181,28 @@ export class IdentityService {
     }
     if (!result.valid || result.signCount !== undefined && result.signCount < credential.sign_count) return undefined;
     this.db.run("UPDATE passkey_credentials SET sign_count = ?, last_used_at = ? WHERE credential_id = ?", result.signCount ?? credential.sign_count, this.clock(), credential.credential_id);
-    return this.issueSession(challengeRow.user_id, this.clock(), ttlMs);
+    return this.issueSession(credential.user_id, this.clock(), ttlMs);
+  }
+
+  async authenticateWithPasskeyAsync(
+    challengeId: string,
+    challenge: string,
+    assertion: PasskeyAssertion,
+    verifier: AsyncPasskeyVerifier,
+    ttlMs = 8 * 60 * 60 * 1000,
+  ): Promise<IssuedSession | undefined> {
+    const challengeRow = this.db.one<{ user_id: string | null; expires_at: number }>("SELECT user_id, expires_at FROM auth_challenges WHERE id = ? AND kind = 'authentication'", challengeId);
+    if (!challengeRow || !this.consumeChallenge(challengeId, challenge)) return undefined;
+    const credential = this.db.one<{ user_id: string; credential_id: string; public_key_cose: string; sign_count: number; revoked_at: number | null }>(
+      "SELECT user_id, credential_id, public_key_cose, sign_count, revoked_at FROM passkey_credentials WHERE credential_id = ?",
+      assertion.credentialId,
+    );
+    if (!credential || (challengeRow.user_id !== null && credential.user_id !== challengeRow.user_id) || credential.revoked_at !== null) return undefined;
+    let result: { valid: boolean; signCount?: number };
+    try { result = await verifier({ assertion, challenge, credentialId: credential.credential_id, publicKeyCose: credential.public_key_cose, signCount: credential.sign_count }); } catch { return undefined; }
+    if (!result.valid || result.signCount !== undefined && result.signCount < credential.sign_count) return undefined;
+    this.db.run("UPDATE passkey_credentials SET sign_count = ?, last_used_at = ? WHERE credential_id = ?", result.signCount ?? credential.sign_count, this.clock(), credential.credential_id);
+    return this.issueSession(credential.user_id, this.clock(), ttlMs);
   }
 
   issueSession(userId: string, authTime = this.clock(), ttlMs = 8 * 60 * 60 * 1000, rotatedFrom: string | null = null): IssuedSession {

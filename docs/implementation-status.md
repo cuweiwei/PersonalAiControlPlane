@@ -7,7 +7,7 @@ This document is the implementation companion to the [Detailed Design](personal-
 | Detailed-design slice | Local contract | Evidence |
 | --- | --- | --- |
 | Foundation | SQLite authorities, migrations, goal admission, idempotency, plan DAG validation, task state transitions, outbox, audit chain, restart behavior | `test/task-engine.test.ts`, `test/outbox.test.ts`, `test/fault-injection.test.ts` |
-| Identity boundary | One-time challenges, credential counters, secure sessions, rotation/revocation, CSRF, fresh step-up, recovery-code revocation, forward-auth header sanitization | `test/identity-gateway.test.ts`, `test/identity-http.test.ts` |
+| Identity boundary | WebAuthn RP registration/authentication, one-time hashed challenges, credential counters, secure sessions, rotation/revocation, CSRF, fresh step-up, recovery-code revocation, forward-auth header sanitization | `test/identity-gateway.test.ts`, `test/identity-http.test.ts`, `test/identity-webauthn.test.ts` |
 | Action grants | Ed25519 compact JWS, exact task/attempt/plan/policy/fence bindings, bounded lifetime, key rotation, one-time JTI replay protection | `test/identity.test.ts` |
 | Approval and execution safety | Immutable approval decisions, expiry/revocation, lease fencing/reaping, reconciliation records, retry containment | `test/approval.test.ts`, `test/reconciliation.test.ts`, `test/fault-injection.test.ts` |
 | Scheduling and proactive control | Eligibility filtering, route ranking, backoff, timezone-aware interval firing, trigger dedupe, separated capability proposal gates | `test/scheduler.test.ts`, `test/proactive-schedule.test.ts` |
@@ -23,7 +23,7 @@ The following remain disabled even though their contracts and gates are implemen
 
 | Gate | Missing evidence | Disabled behavior |
 | --- | --- | --- |
-| `DD-01` | Canonical tailnet origin, RP ID, migration and real WebAuthn RP adapter | Identity routes report not-ready/not-wired; production auth rejects missing forward-auth headers |
+| `DD-01` | Production owner enrollment, migration of any existing AIHomePlatform credentials, and live browser verification on the configured canonical tailnet origin | RP adapter and owner page are implemented; production registration remains blocked until the root-owned bootstrap token, canonical origin/RP ID, and live Passkey evidence are present |
 | `DD-02` / `DD-03` | Per-device CUA isolation and safe wake/sleep proof | No CUA, wake, or automatic sleep grant |
 | `DD-04` | Live local-model inventory and benchmark quality floors | No local-model provider is registered or selected |
 | `DD-05` | Supported external AI connector contracts and deletion semantics | Typed adapters stay disabled; no external side effect is attempted |
@@ -40,3 +40,13 @@ npm run release:artifact -- --commit <full-commit-sha> --image-digest sha256:<64
 ```
 
 Production promotion additionally requires an immutable CI-published image, staging upload and gateway validation, deployment-gateway status, loopback/tailnet health, and expected protected-API `401` behavior. Missing gateway registration or external owner evidence is a hard stop, not a reason to bypass the boundary.
+
+## Production owner enrollment
+
+The Identity Gateway's browser entry point is the same HTTPS origin configured as `PAI_CANONICAL_ORIGIN`. With the NAS Tailscale route used by this project, that is normally:
+
+```text
+https://gnest.taila77e5f.ts.net:9084/
+```
+
+The root-owned production environment must contain matching non-secret configuration (`PAI_CANONICAL_ORIGIN=https://gnest.taila77e5f.ts.net:9084`, `PAI_WEBAUTHN_RP_ID=gnest.taila77e5f.ts.net`) and a one-time `PAI_BOOTSTRAP_TOKEN`. The token is entered only in the browser enrollment form, then removed or rotated by the owner after the first credential is registered. The gateway stores only a hash of each challenge and recovery code; it never logs the token or raw challenge.

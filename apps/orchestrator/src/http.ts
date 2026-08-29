@@ -14,6 +14,7 @@ type AppOptions = {
   engine: TaskEngine;
   allowUnauthenticated: boolean;
   identityReady?: boolean;
+  identityReadyProbe?: () => Promise<boolean>;
   metrics?: CounterRegistry;
   approvalService?: ApprovalService;
   scheduleService?: ScheduleService;
@@ -126,11 +127,11 @@ function publicEvent(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function health(options: AppOptions, kind: "live" | "ready" | "ops"): Record<string, unknown> {
+async function health(options: AppOptions, kind: "live" | "ready" | "ops"): Promise<Record<string, unknown>> {
   const dbCheck = options.db.one<{ value: number }>("SELECT 1 AS value");
   const migration = options.db.one<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations");
   const auditChain = options.engine.verifyAuditChain();
-  const identityReady = options.allowUnauthenticated || options.identityReady === true;
+  const identityReady = kind === "live" ? true : await resolveIdentityReady(options);
   const ready = dbCheck?.value === 1 && migration?.version === 4 && auditChain && identityReady;
   if (kind === "live") return { status: "ok" };
   if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", schemaVersion: migration?.version ?? null };
@@ -148,6 +149,12 @@ function health(options: AppOptions, kind: "live" | "ready" | "ops"): Record<str
   };
 }
 
+async function resolveIdentityReady(options: AppOptions): Promise<boolean> {
+  if (options.allowUnauthenticated || options.identityReady === true) return true;
+  if (!options.identityReadyProbe) return false;
+  try { return await options.identityReadyProbe(); } catch { return false; }
+}
+
 export function createHttpServer(options: AppOptions) {
   const metrics = options.metrics ?? new CounterRegistry();
   const approvals = options.approvalService ?? new ApprovalService(options.db);
@@ -162,12 +169,12 @@ export function createHttpServer(options: AppOptions) {
       if (method === "GET" && parts.length === 2 && parts[0] === "health") {
         const kind = parts[1] as "live" | "ready" | "ops";
         if (!["live", "ready", "ops"].includes(kind)) throw Object.assign(new Error("not found"), { status: 404, code: "NOT_FOUND" });
-        const body = health(options, kind);
+        const body = await health(options, kind);
         writeJson(response, kind === "ready" && body.status !== "ok" ? 503 : 200, body);
         return;
       }
       if (method === "GET" && parts.length === 1 && parts[0] === "health") {
-        writeJson(response, 200, health(options, "ready"));
+        writeJson(response, 200, await health(options, "ready"));
         return;
       }
       if (method === "GET" && parts.length === 1 && parts[0] === "metrics") {
