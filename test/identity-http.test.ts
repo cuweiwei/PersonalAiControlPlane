@@ -3,6 +3,7 @@ import test from "node:test";
 import { IdentityDatabase } from "../apps/identity-gateway/src/db.ts";
 import { createIdentityHttpServer } from "../apps/identity-gateway/src/http.ts";
 import { IdentityService } from "../apps/identity-gateway/src/service.ts";
+import { PasskeyRpAdapter } from "../apps/identity-gateway/src/webauthn.ts";
 
 test("identity gateway health is ready only when the configured Passkey boundary is present", async () => {
   const db = new IdentityDatabase(":memory:");
@@ -39,5 +40,32 @@ test("configured Passkey without a wired RP adapter remains not ready in product
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     db.close();
     if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous;
+  }
+});
+
+test("forward-auth validates the session cookie and emits only gateway-owned identity headers", async () => {
+  const db = new IdentityDatabase(":memory:");
+  const identity = new IdentityService(db);
+  const userId = identity.createUser("owner-1");
+  const adapter = new PasskeyRpAdapter({ db, identity, rpName: "Personal AI Control Plane", rpId: "pai.example.test", expectedOrigin: "https://pai.example.test" });
+  const issued = identity.issueSession(userId);
+  const server = createIdentityHttpServer({ db, identity, passkeyConfigured: true, passkeyAdapterReady: true, passkeyAdapter: adapter, canonicalOrigin: "https://pai.example.test" });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind");
+  try {
+    const forwarded = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/forward`, { headers: { cookie: `pai_session=${issued.sessionId}`, "x-pai-owner-id": "spoofed-owner" } });
+    assert.equal(forwarded.status, 204);
+    assert.equal(forwarded.headers.get("x-pai-verified"), "1");
+    assert.equal(forwarded.headers.get("x-pai-owner-id"), userId);
+    assert.equal(forwarded.headers.get("x-pai-session-id"), issued.sessionId);
+    assert.equal(forwarded.headers.get("x-pai-auth-time"), String(issued.view.authTime));
+    assert.match(forwarded.headers.get("x-pai-request-id") ?? "", /^[0-9a-f-]{36}$/);
+    const rejected = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/forward`);
+    assert.equal(rejected.status, 401);
+    assert.equal((await rejected.json()).error.code, "AUTH_REQUIRED");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    db.close();
   }
 });

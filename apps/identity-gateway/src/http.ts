@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { IdentityDatabase } from "./db.ts";
 import { IdentityService } from "./service.ts";
@@ -85,6 +86,15 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
         if (!options.passkeyAdapter) return json(response, 501, { error: { code: "NOT_IMPLEMENTED", message: "WebAuthn RP adapter is not wired", retryable: false } });
         if (request.method !== "GET" && options.canonicalOrigin && request.headers.origin && request.headers.origin !== options.canonicalOrigin) throw new IdentityAuthError("ORIGIN_REJECTED", "Request origin is not allowed", 403);
         if (request.method === "GET" && path === "/api/v1/auth/status") return json(response, 200, options.passkeyAdapter.status());
+        if (request.method === "GET" && path === "/api/v1/auth/forward") {
+          const rawSessionId = sessionId(request);
+          const view = rawSessionId ? options.identity.verifySession(rawSessionId) : undefined;
+          if (!rawSessionId || !view) return json(response, 401, { error: { code: "AUTH_REQUIRED", message: "Authenticated Identity Gateway session required", retryable: false } });
+          const headers = options.identity.buildForwardAuthHeaders({ ownerId: view.userId, sessionId: rawSessionId, authTime: view.authTime, requestId: randomUUID() });
+          response.writeHead(204, { "cache-control": "no-store", ...headers });
+          response.end();
+          return;
+        }
         if (request.method === "POST" && path === "/api/v1/auth/register/options") return json(response, 200, await options.passkeyAdapter.registrationOptions(await readJson(request)));
         if (request.method === "POST" && path === "/api/v1/auth/register/finish") {
           const result = await options.passkeyAdapter.finishRegistration(await readJson(request) as never);
