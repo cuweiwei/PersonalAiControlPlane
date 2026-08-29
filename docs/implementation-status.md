@@ -43,10 +43,10 @@ Production promotion additionally requires an immutable CI-published image, stag
 
 ## Production owner enrollment
 
-The Identity Gateway's browser entry point is the same HTTPS origin configured as `PAI_CANONICAL_ORIGIN`. With the NAS Tailscale route used by this project, that is normally:
+The Identity Gateway's browser entry point is the same HTTPS origin configured as `PAI_CANONICAL_ORIGIN`. The URL must include the port when the Tailscale route uses a non-default HTTPS port; for example:
 
 ```text
 https://gnest.taila77e5f.ts.net:9084/
 ```
 
-The root-owned production environment must contain matching non-secret configuration (`PAI_CANONICAL_ORIGIN=https://gnest.taila77e5f.ts.net:9084`, `PAI_WEBAUTHN_RP_ID=gnest.taila77e5f.ts.net`) and a one-time `PAI_BOOTSTRAP_TOKEN`. The token is entered only in the browser enrollment form, then removed or rotated by the owner after the first credential is registered. The gateway stores only a hash of each challenge and recovery code; it never logs the token or raw challenge.
+The root-owned production environment must contain matching non-secret configuration (for the example route, `PAI_CANONICAL_ORIGIN=https://gnest.taila77e5f.ts.net:9084` and `PAI_WEBAUTHN_RP_ID=gnest.taila77e5f.ts.net`) and a one-time `PAI_BOOTSTRAP_TOKEN`. The token is entered only in the browser enrollment form, then removed or rotated by the owner after the first credential is registered. The gateway stores only a hash of each challenge and recovery code; it never logs the token or raw challenge.
