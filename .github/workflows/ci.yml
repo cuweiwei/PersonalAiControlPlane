@@ -30,9 +30,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Generate release manifest
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
+          RELEASE_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: npm run release:artifact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aihome-release-${{ github.sha }}
+          path: release-artifacts/release-manifest-${{ github.sha }}.json
+          if-no-files-found: error
