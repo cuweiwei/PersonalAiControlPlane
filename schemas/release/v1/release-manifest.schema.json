@@ -12,7 +12,7 @@
     "commitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "imageDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "composePath": { "type": "string", "pattern": "^(?!/)(?!.*\\.\\.)(?!.*\\\\).+\\.ya?ml$" },
-    "composeSha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "composeSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "deploymentProjectId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9-]{1,62}$" },
     "health": {
       "type": "object",
