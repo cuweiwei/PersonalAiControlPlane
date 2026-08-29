@@ -4,14 +4,24 @@
   "title": "Commit-bound release evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "commit", "sourceRepository", "images", "composeDigest", "checks", "createdAt"],
+  "required": ["schemaVersion", "serviceId", "repository", "commitSha", "imageDigest", "composePath", "composeSha256", "deploymentProjectId", "health"],
   "properties": {
     "schemaVersion": { "const": 1 },
-    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "sourceRepository": { "type": "string", "minLength": 1 },
-    "images": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["service", "reference", "digest"], "properties": { "service": { "type": "string" }, "reference": { "type": "string" }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } } } },
-    "composeDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "checks": { "type": "array", "items": { "type": "string" } },
-    "createdAt": { "type": "string", "format": "date-time" }
+    "serviceId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$" },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "commitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "imageDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "composePath": { "type": "string", "pattern": "^(?!/)(?!.*\\.\\.)(?!.*\\\\).+\\.ya?ml$" },
+    "composeSha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "deploymentProjectId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9-]{1,62}$" },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]*$" },
+        "readinessPath": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]*$" }
+      }
+    }
   }
 }

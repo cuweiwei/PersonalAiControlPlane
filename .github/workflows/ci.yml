@@ -41,6 +41,8 @@ jobs:
         env:
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_SERVICE_ID: personal-ai-control-plane
+          RELEASE_DEPLOYMENT_PROJECT_ID: PersonalAiControlPlane
           RELEASE_IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
           RELEASE_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: npm run release:artifact
