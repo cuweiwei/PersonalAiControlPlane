@@ -134,13 +134,13 @@ export class PasskeyRpAdapter {
     const userId = this.identity.createUser();
     const issued = this.identity.issueChallenge("registration", userId, 120_000);
     try {
-      const options = await generateRegistrationOptions({
-        rpName: this.rpName,
-        rpID: this.rpId,
-        userID: Buffer.from(userId, "utf8"),
-        userName: login,
-        userDisplayName: displayName,
-        challenge: issued.challenge,
+        const options = await generateRegistrationOptions({
+          rpName: this.rpName,
+          rpID: this.rpId,
+          userID: Buffer.from(userId, "utf8"),
+          userName: login,
+          userDisplayName: displayName,
+          challenge: decodeBase64Url(issued.challenge),
         attestationType: "none",
         authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
       });
@@ -189,7 +189,7 @@ export class PasskeyRpAdapter {
     const issued = this.identity.issueChallenge("authentication", profile?.user_id ?? null, 120_000);
     const options = await generateAuthenticationOptions({
       rpID: this.rpId,
-      challenge: issued.challenge,
+      challenge: decodeBase64Url(issued.challenge),
       userVerification: "required",
       allowCredentials: credentials.map((credential) => ({ id: credential.credentialId, transports: credential.transports as never })),
     });

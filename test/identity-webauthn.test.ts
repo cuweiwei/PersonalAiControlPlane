@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { sha256 } from "../packages/crypto/src/index.ts";
 import { IdentityDatabase } from "../apps/identity-gateway/src/db.ts";
 import { createIdentityHttpServer } from "../apps/identity-gateway/src/http.ts";
 import { IdentityService } from "../apps/identity-gateway/src/service.ts";
@@ -23,7 +24,7 @@ test("WebAuthn RP adapter keeps registration behind the bootstrap boundary and s
     assert.equal(started.options.user.name, "owner@local");
     const challenge = db.one<{ challenge_hash: string }>("SELECT challenge_hash FROM auth_challenges WHERE id = ?", started.challengeId);
     assert.ok(challenge?.challenge_hash);
-    assert.notEqual(challenge?.challenge_hash, started.options.challenge);
+    assert.equal(sha256(Buffer.from(started.options.challenge, "base64url").toString("base64url")), challenge?.challenge_hash);
     assert.equal(adapter.status().registrationAllowed, true);
     db.run("INSERT INTO identity_profiles(user_id, login, display_name, created_at) VALUES (?, ?, ?, ?)", started.userId, "owner@local", "Owner", 1_700_000_000_000);
     identity.registerCredential(started.userId, "credential-1", Buffer.from([1, 2, 3]).toString("base64url"));
@@ -31,6 +32,8 @@ test("WebAuthn RP adapter keeps registration behind the bootstrap boundary and s
     const login = await adapter.authenticationOptions("owner@local");
     assert.equal(login.options.rpId, "pai.example.test");
     assert.equal(login.options.allowCredentials?.[0]?.id, "credential-1");
+    const loginChallenge = db.one<{ challenge_hash: string }>("SELECT challenge_hash FROM auth_challenges WHERE id = ?", login.challengeId);
+    assert.equal(sha256(Buffer.from(login.options.challenge, "base64url").toString("base64url")), loginChallenge?.challenge_hash);
   } finally { db.close(); }
 });
 
