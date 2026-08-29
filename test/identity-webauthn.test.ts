@@ -68,6 +68,8 @@ test("wired adapter reports production readiness and serves the owner entry page
     assert.match(pageHtml, /challenge: bytes\(options\.challenge\)/);
     assert.match(pageHtml, /user: \{ \.\.\.options\.user, id: bytes\(options\.user\.id\) \}/);
     assert.match(pageHtml, /allowCredentials: options\.allowCredentials\?\.map/);
+    assert.match(pageHtml, /const rawId = b64\(credential\.rawId\); return \{ id: rawId, rawId/);
+    assert.match(pageHtml, /clientExtensionResults: credential\.getClientExtensionResults/);
     assert.doesNotMatch(pageHtml, /publicKey:start\.options/);
     const status = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/status`);
     assert.equal(status.status, 200);
