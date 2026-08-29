@@ -87,7 +87,7 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
           const result = await options.passkeyAdapter.finishRegistration(await readJson(request) as never);
           return json(response, 200, { verified: true, userId: result.userId, recoveryCodes: result.recoveryCodes }, { "set-cookie": result.session.cookie });
         }
-        if (request.method === "POST" && path === "/api/v1/auth/login/options") return json(response, 200, await options.passkeyAdapter.authenticationOptions());
+        if (request.method === "POST" && path === "/api/v1/auth/login/options") return json(response, 200, await options.passkeyAdapter.authenticationOptions((await readJson(request)).login));
         if (request.method === "POST" && path === "/api/v1/auth/login/finish") {
           const result = await options.passkeyAdapter.finishAuthentication(await readJson(request) as never);
           return json(response, 200, { authenticated: true, userId: result.userId, csrfToken: result.session.csrfToken }, { "set-cookie": result.session.cookie });

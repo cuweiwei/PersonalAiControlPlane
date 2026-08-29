@@ -138,10 +138,12 @@ export class PasskeyRpAdapter {
     return { userId, recoveryCodes, session: this.identity.issueSession(userId) };
   }
 
-  async authenticationOptions() {
-    const credentials = this.identity.activeCredentials();
+  async authenticationOptions(loginInput?: unknown) {
+    const login = requiredText(loginInput ?? "owner@local", "login");
+    const profile = this.db.one<{ user_id: string }>("SELECT user_id FROM identity_profiles WHERE login = ?", login);
+    const credentials = profile ? this.identity.activeCredentials(profile.user_id) : [];
     if (credentials.length === 0) throw new IdentityAuthError("AUTHENTICATION_FAILED", "Account or Passkey was not accepted", 401);
-    const issued = this.identity.issueChallenge("authentication", null, 120_000);
+    const issued = this.identity.issueChallenge("authentication", profile?.user_id ?? null, 120_000);
     const options = await generateAuthenticationOptions({
       rpID: this.rpId,
       challenge: issued.challenge,

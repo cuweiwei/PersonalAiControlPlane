@@ -13,7 +13,7 @@ function adapterFixture() {
 }
 
 test("WebAuthn RP adapter keeps registration behind the bootstrap boundary and stores only challenge hashes", async () => {
-  const { db, adapter } = adapterFixture();
+  const { db, identity, adapter } = adapterFixture();
   try {
     assert.deepEqual(adapter.status(), { configured: true, registrationAllowed: true, userCount: 0, rpId: "pai.example.test", origin: "https://pai.example.test", bootstrapConfigured: true });
     await assert.rejects(() => adapter.registrationOptions({ bootstrapToken: "wrong", login: "owner@local", displayName: "Owner" }), (error: unknown) => error instanceof IdentityAuthError && error.code === "INVALID_BOOTSTRAP_TOKEN");
@@ -25,6 +25,11 @@ test("WebAuthn RP adapter keeps registration behind the bootstrap boundary and s
     assert.ok(challenge?.challenge_hash);
     assert.notEqual(challenge?.challenge_hash, started.options.challenge);
     assert.equal(adapter.status().registrationAllowed, false);
+    db.run("INSERT INTO identity_profiles(user_id, login, display_name, created_at) VALUES (?, ?, ?, ?)", started.userId, "owner@local", "Owner", 1_700_000_000_000);
+    identity.registerCredential(started.userId, "credential-1", Buffer.from([1, 2, 3]).toString("base64url"));
+    const login = await adapter.authenticationOptions("owner@local");
+    assert.equal(login.options.rpId, "pai.example.test");
+    assert.equal(login.options.allowCredentials?.[0]?.id, "credential-1");
   } finally { db.close(); }
 });
 
