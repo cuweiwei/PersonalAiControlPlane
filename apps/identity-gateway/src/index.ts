@@ -15,7 +15,7 @@ const rpId = process.env.PAI_WEBAUTHN_RP_ID;
 const passkeyAdapter = passkeyConfigured && canonicalOrigin && rpId
   ? new PasskeyRpAdapter({ db, identity, rpName: process.env.PAI_WEBAUTHN_RP_NAME ?? "Personal AI Control Plane", rpId, expectedOrigin: canonicalOrigin, bootstrapToken: process.env.PAI_BOOTSTRAP_TOKEN })
   : undefined;
-const server = createIdentityHttpServer({ db, identity, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined, passkeyAdapter, canonicalOrigin });
+const server = createIdentityHttpServer({ db, identity, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined, passkeyAdapter, canonicalOrigin, actionGrantRequired: true });
 const shutdown = () => server.close(() => db.close());
 process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);
 server.listen(port, bindHost, () => console.log(JSON.stringify({ event: "identity.started", port, dbPath, bindHost, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined })));

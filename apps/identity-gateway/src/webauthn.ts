@@ -196,6 +196,20 @@ export class PasskeyRpAdapter {
     return { options, challengeId: issued.id };
   }
 
+  async stepUpOptions(rawSessionId: string) {
+    const issued = this.identity.issueStepUpChallenge(rawSessionId);
+    if (!issued || !issued.userId) throw new IdentityAuthError("AUTHENTICATION_REQUIRED", "An active owner session is required", 401);
+    const credentials = this.identity.activeCredentials(issued.userId);
+    if (credentials.length === 0) throw new IdentityAuthError("AUTHENTICATION_FAILED", "Account or Passkey was not accepted", 401);
+    const options = await generateAuthenticationOptions({
+      rpID: this.rpId,
+      challenge: decodeBase64Url(issued.challenge),
+      userVerification: "required",
+      allowCredentials: credentials.map((credential) => ({ id: credential.credentialId, transports: credential.transports as never })),
+    });
+    return { options, challengeId: issued.id };
+  }
+
   async finishAuthentication(input: { challengeId: unknown; response: unknown }): Promise<PasskeySessionResult> {
     const challengeId = requiredText(input.challengeId, "challengeId");
     const response = input.response as AuthenticationResponseJSON;
@@ -213,5 +227,32 @@ export class PasskeyRpAdapter {
     });
     if (!issued) throw new IdentityAuthError("AUTHENTICATION_FAILED", "Account or Passkey was not accepted", 401);
     return { userId: issued.view.userId, session: issued };
+  }
+
+  async finishStepUp(rawSessionId: string, input: { challengeId: unknown; response: unknown }): Promise<PasskeySessionResult> {
+    const challengeId = requiredText(input.challengeId, "challengeId");
+    const response = input.response as AuthenticationResponseJSON;
+    if (!response || typeof response.id !== "string" || !response.response?.clientDataJSON) throw new IdentityAuthError("INVALID_WEBAUTHN_RESPONSE", "WebAuthn response is invalid", 400);
+    const challenge = clientDataChallenge(response.response.clientDataJSON, "webauthn.get");
+    const assertion = { credentialId: response.id, clientDataJson: response.response.clientDataJSON, authenticatorData: response.response.authenticatorData, signature: response.response.signature };
+    const issued = await this.identity.stepUpWithPasskeyAsync(rawSessionId, challengeId, challenge, assertion, async ({ credentialId, publicKeyCose, signCount }) => {
+      try {
+        const credential = { id: credentialId, publicKey: decodeBase64Url(publicKeyCose), counter: signCount, transports: this.identity.activeCredentials().find((item) => item.credentialId === credentialId)?.transports as never };
+        const verification = await verifyAuthenticationResponse({ response, expectedChallenge: challenge, expectedOrigin: this.expectedOrigin, expectedRPID: this.rpId, credential, requireUserVerification: true });
+        return { valid: verification.verified, signCount: verification.authenticationInfo?.newCounter };
+      } catch {
+        return { valid: false };
+      }
+    });
+    if (!issued) throw new IdentityAuthError("STEP_UP_FAILED", "Passkey step-up was not accepted", 401);
+    return { userId: issued.view.userId, session: issued };
+  }
+
+  recoverWithCode(loginInput: unknown, codeInput: unknown): PasskeySessionResult {
+    const login = requiredText(loginInput, "login");
+    const code = requiredText(codeInput, "recoveryCode");
+    const profile = this.db.one<{ user_id: string }>("SELECT user_id FROM identity_profiles WHERE login = ?", login);
+    if (!profile || !this.identity.consumeRecoveryCode(profile.user_id, code)) throw new IdentityAuthError("RECOVERY_FAILED", "Account or recovery code was not accepted", 401);
+    return { userId: profile.user_id, session: this.identity.issueSession(profile.user_id) };
   }
 }

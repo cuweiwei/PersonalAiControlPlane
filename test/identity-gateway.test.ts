@@ -65,3 +65,19 @@ test("forward-auth headers are generated only by the gateway and incoming spoofe
   assert.equal(identity.isVerifiedForwardAuth(headers), true);
   db.close();
 });
+
+test("Passkey step-up is bound to one session and rotates it on success", async () => {
+  const { db, identity, userId } = setup();
+  identity.registerCredential(userId, "credential-1", "cose-public-key", 4, ["internal"]);
+  const session = identity.issueSession(userId);
+  const otherSession = identity.issueSession(userId);
+  const challenge = identity.issueStepUpChallenge(session.sessionId);
+  assert.ok(challenge);
+  const assertion = { credentialId: "credential-1", clientDataJson: "{}", authenticatorData: "data", signature: "sig" };
+  assert.equal(await identity.stepUpWithPasskeyAsync(otherSession.sessionId, challenge.id, challenge.challenge, assertion, () => ({ valid: true, signCount: 5 })), undefined);
+  const steppedUp = await identity.stepUpWithPasskeyAsync(session.sessionId, challenge.id, challenge.challenge, assertion, () => ({ valid: true, signCount: 5 }));
+  assert.ok(steppedUp);
+  assert.equal(identity.verifySession(session.sessionId), undefined);
+  assert.equal(identity.verifySession(steppedUp.sessionId)?.userId, userId);
+  db.close();
+});

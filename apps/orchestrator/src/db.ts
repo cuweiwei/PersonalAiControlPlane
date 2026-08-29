@@ -411,6 +411,22 @@ CREATE TABLE IF NOT EXISTS reconciliation_records (
 CREATE INDEX IF NOT EXISTS reconciliation_open_idx ON reconciliation_records(status, last_observed_at);
 `;
 
+const OWNER_MANAGEMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS worker_enrollment_requests (
+  id TEXT PRIMARY KEY,
+  public_key_pem TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  device_summary_json TEXT NOT NULL,
+  challenge_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER,
+  decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS worker_enrollment_status_idx ON worker_enrollment_requests(status, expires_at);
+`;
+
 export type SqlRow = Record<string, unknown>;
 
 export class OrchestratorDatabase {
@@ -465,6 +481,26 @@ export class OrchestratorDatabase {
         this.connection.prepare(
           "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(4, ?, ?)",
         ).run("orchestrator-control-surfaces-v4", Date.now());
+      }
+      const fifthMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 5").get();
+      if (!fifthMigration) {
+        const outboxColumns = this.connection.prepare("PRAGMA table_info(outbox)").all() as Array<{ name: string }>;
+        if (!outboxColumns.some((column) => column.name === "dead_lettered_at")) {
+          this.connection.exec("ALTER TABLE outbox ADD COLUMN dead_lettered_at INTEGER");
+        }
+        if (!outboxColumns.some((column) => column.name === "dead_letter_reason")) {
+          this.connection.exec("ALTER TABLE outbox ADD COLUMN dead_letter_reason TEXT");
+        }
+        this.connection.prepare(
+          "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(5, ?, ?)",
+        ).run("outbox-dead-letter-v5", Date.now());
+      }
+      const sixthMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 6").get();
+      if (!sixthMigration) {
+        this.connection.exec(OWNER_MANAGEMENT_SCHEMA);
+        this.connection.prepare(
+          "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(6, ?, ?)",
+        ).run("owner-management-surfaces-v6", Date.now());
       }
       this.connection.exec("COMMIT");
     } catch (error) {

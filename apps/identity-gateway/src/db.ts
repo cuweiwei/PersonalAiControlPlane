@@ -100,6 +100,37 @@ CREATE TABLE IF NOT EXISTS signing_keys (
   revoked_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS workload_identities (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL UNIQUE,
+  public_key_pem TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'ROTATING', 'REVOKED', 'EXPIRED')),
+  issued_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  rotated_at INTEGER,
+  revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS workload_request_nonces (
+  workload_id TEXT NOT NULL REFERENCES workload_identities(id),
+  nonce TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER NOT NULL,
+  PRIMARY KEY(workload_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS workload_request_nonces_expiry_idx ON workload_request_nonces(expires_at);
+
+CREATE TABLE IF NOT EXISTS workload_idempotency (
+  workload_id TEXT NOT NULL REFERENCES workload_identities(id),
+  key TEXT NOT NULL,
+  request_digest TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY(workload_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS step_up_requests (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES identity_users(id),
@@ -145,6 +176,8 @@ export class IdentityDatabase {
       this.connection.exec(IDENTITY_SCHEMA);
       const migration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 1").get();
       if (!migration) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(1, ?, ?)").run("identity-schema-v1", Date.now());
+      const secondMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 2").get();
+      if (!secondMigration) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(2, ?, ?)").run("identity-workloads-v2", Date.now());
       this.connection.exec("COMMIT");
     } catch (error) {
       this.connection.exec("ROLLBACK");

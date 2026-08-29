@@ -38,6 +38,15 @@ export function signWorkerEnvelope(frame: Omit<WorkerEnvelope, "signature">, pri
   return { ...frame, signature };
 }
 
+export async function signWorkerEnvelopeWithSigner(
+  frame: Omit<WorkerEnvelope, "signature">,
+  signer: (payload: Buffer) => Buffer | Promise<Buffer>,
+): Promise<WorkerEnvelope> {
+  const signature = await signer(Buffer.from(frameForSigning(frame), "utf8"));
+  if (!Buffer.isBuffer(signature) || signature.length === 0) throw new Error("worker signer returned an invalid signature");
+  return { ...frame, signature: signature.toString("base64url") };
+}
+
 export class WorkerConnectionVerifier {
   private readonly seenMessageIds = new Set<string>();
   private lastSequence = -1;
@@ -178,7 +187,7 @@ export type ShellProfile = {
 
 export function validateShellInvocation(profile: ShellProfile, executable: string, args: readonly string[], cwd: string, environment: Record<string, string>): { valid: true } | { valid: false; reason: string } {
   if (!profile.name || !profile.allowedExecutables.includes(executable)) return { valid: false, reason: "executable-not-allowed" };
-  if (["sudo", "su", "doas", "docker", "nsenter", "mount", "umount", "chroot"].includes(executable)) return { valid: false, reason: "privilege-or-host-boundary-command" };
+  if (["sudo", "su", "doas", "docker", "nsenter", "mount", "umount", "chroot"].includes(basename(executable).toLowerCase())) return { valid: false, reason: "privilege-or-host-boundary-command" };
   if (args.some((arg) => /[;&|`$<>\n\r]/.test(arg))) return { valid: false, reason: "shell-metacharacter-rejected" };
   if (!resolvePathWithinRoots(cwd, profile.roots)) return { valid: false, reason: "working-root-outside-profile" };
   if (Object.keys(environment).some((key) => !profile.allowedEnvironment.includes(key))) return { valid: false, reason: "environment-key-not-allowed" };

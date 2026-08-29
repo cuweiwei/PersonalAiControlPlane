@@ -191,8 +191,40 @@ export class IdentityService {
     verifier: AsyncPasskeyVerifier,
     ttlMs = 8 * 60 * 60 * 1000,
   ): Promise<IssuedSession | undefined> {
-    const challengeRow = this.db.one<{ user_id: string | null; expires_at: number }>("SELECT user_id, expires_at FROM auth_challenges WHERE id = ? AND kind = 'authentication'", challengeId);
-    if (!challengeRow || !this.consumeChallenge(challengeId, challenge)) return undefined;
+    const userId = await this.verifyPasskeyChallengeAsync("authentication", challengeId, challenge, assertion, verifier);
+    return userId ? this.issueSession(userId, this.clock(), ttlMs) : undefined;
+  }
+
+  issueStepUpChallenge(rawSessionId: string, ttlMs = 120_000): IssuedChallenge | undefined {
+    const session = this.verifySession(rawSessionId);
+    return session ? this.issueChallenge("step_up", session.userId, ttlMs, session.id) : undefined;
+  }
+
+  async stepUpWithPasskeyAsync(
+    rawSessionId: string,
+    challengeId: string,
+    challenge: string,
+    assertion: PasskeyAssertion,
+    verifier: AsyncPasskeyVerifier,
+    ttlMs = 8 * 60 * 60 * 1000,
+  ): Promise<IssuedSession | undefined> {
+    const session = this.verifySession(rawSessionId);
+    if (!session) return undefined;
+    const userId = await this.verifyPasskeyChallengeAsync("step_up", challengeId, challenge, assertion, verifier, session.id);
+    if (userId !== session.userId) return undefined;
+    return this.rotateSession(rawSessionId, this.clock(), ttlMs);
+  }
+
+  private async verifyPasskeyChallengeAsync(
+    kind: "authentication" | "step_up",
+    challengeId: string,
+    challenge: string,
+    assertion: PasskeyAssertion,
+    verifier: AsyncPasskeyVerifier,
+    expectedSessionId: string | null = null,
+  ): Promise<string | undefined> {
+    const challengeRow = this.db.one<{ user_id: string | null; session_id: string | null }>("SELECT user_id, session_id FROM auth_challenges WHERE id = ? AND kind = ?", challengeId, kind);
+    if (!challengeRow || challengeRow.user_id === null || expectedSessionId !== null && challengeRow.session_id !== expectedSessionId || !this.consumeChallenge(challengeId, challenge)) return undefined;
     const credential = this.db.one<{ user_id: string; credential_id: string; public_key_cose: string; sign_count: number; revoked_at: number | null }>(
       "SELECT user_id, credential_id, public_key_cose, sign_count, revoked_at FROM passkey_credentials WHERE credential_id = ?",
       assertion.credentialId,
@@ -202,7 +234,7 @@ export class IdentityService {
     try { result = await verifier({ assertion, challenge, credentialId: credential.credential_id, publicKeyCose: credential.public_key_cose, signCount: credential.sign_count }); } catch { return undefined; }
     if (!result.valid || result.signCount !== undefined && result.signCount < credential.sign_count) return undefined;
     this.db.run("UPDATE passkey_credentials SET sign_count = ?, last_used_at = ? WHERE credential_id = ?", result.signCount ?? credential.sign_count, this.clock(), credential.credential_id);
-    return this.issueSession(credential.user_id, this.clock(), ttlMs);
+    return credential.user_id;
   }
 
   issueSession(userId: string, authTime = this.clock(), ttlMs = 8 * 60 * 60 * 1000, rotatedFrom: string | null = null): IssuedSession {
@@ -263,6 +295,14 @@ export class IdentityService {
     if (!session) return false;
     const row = this.db.one<{ csrf_hash: string }>("SELECT csrf_hash FROM sessions WHERE id = ? AND revoked_at IS NULL", session.id);
     return Boolean(row && safeEqualText(row.csrf_hash, sha256(csrfToken)));
+  }
+
+  refreshCsrf(rawSessionId: string): string | undefined {
+    const session = this.verifySession(rawSessionId);
+    if (!session) return undefined;
+    const csrfToken = randomSecret();
+    this.db.run("UPDATE sessions SET csrf_hash = ? WHERE id = ? AND revoked_at IS NULL", sha256(csrfToken), session.id);
+    return csrfToken;
   }
 
   hasFreshStepUp(session: SessionView, maxAgeMs: number, now = this.clock()): boolean {

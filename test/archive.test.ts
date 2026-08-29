@@ -71,3 +71,28 @@ test("archive exports checksummed metadata and blocks replay after explicit futu
   assert.throws(() => service.ingest(envelope("new"), { globalDays: null }), /blocked/);
   db.close();
 });
+
+test("archive purge verifies attachment bytes through the artifact authority before completion", () => {
+  const root = mkdtempSync(join(tmpdir(), "pai-archive-purge-"));
+  const store = new ContentAddressedArtifactStore(root);
+  const artifact = store.put(Buffer.from("attachment"), { maxBytes: 100, mediaType: "text/plain" });
+  const base = envelope();
+  const { checksum: _checksum, ...unsigned } = base;
+  unsigned.message.attachments = [{ contentHash: artifact.digest, mediaType: "text/plain", size: artifact.size, artifactRef: artifact.digest }];
+  const attached: NormalizedEnvelope = { ...unsigned, checksum: sha256(canonicalJson(unsigned as never)) };
+  const db = new ArchiveDatabase(":memory:");
+  const withoutArtifactAuthority = new ArchiveService(db, () => 1_700_000_000_000);
+  const inserted = withoutArtifactAuthority.ingest(attached, { globalDays: null });
+  assert.equal(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM artifact_references")?.count, 1);
+  const tombstone = withoutArtifactAuthority.requestPurge(inserted.conversationId, "owner", "requested");
+  assert.equal(withoutArtifactAuthority.purge(tombstone).status, "FAILED");
+  assert.equal(store.has(artifact.digest), true);
+
+  const withArtifactAuthority = new ArchiveService(db, () => 1_700_000_000_001, (digests) => {
+    const removed = store.sweep(digests, 0, Date.now() + 1_000);
+    return { removed, remaining: digests.filter((digest) => store.has(digest)) };
+  });
+  assert.equal(withArtifactAuthority.purge(tombstone).status, "VERIFIED");
+  assert.equal(store.has(artifact.digest), false);
+  db.close();
+});

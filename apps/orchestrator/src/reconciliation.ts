@@ -61,9 +61,9 @@ export class ReconciliationService {
   observe(id: string, state: string, status: ReconciliationStatus = "UNKNOWN", externalOperationId?: string | null): ReconciliationRecord {
     const current = this.get(id);
     if (!current) throw new Error("reconciliation record not found");
-    if (current.status !== "OPEN") return current;
+    if (!["OPEN", "UNKNOWN"].includes(current.status)) return current;
     const now = this.clock();
-    this.db.run("UPDATE reconciliation_records SET last_observed_state = ?, status = ?, external_operation_id = COALESCE(?, external_operation_id), last_observed_at = ?, resolved_at = CASE WHEN ? IN ('CONFIRMED', 'ABSENT', 'FAILED') THEN ? ELSE resolved_at END WHERE id = ? AND status = 'OPEN'", state, status, externalOperationId ?? null, now, status, now, id);
+    this.db.run("UPDATE reconciliation_records SET last_observed_state = ?, status = ?, external_operation_id = COALESCE(?, external_operation_id), last_observed_at = ?, resolved_at = CASE WHEN ? IN ('CONFIRMED', 'ABSENT', 'FAILED') THEN ? ELSE resolved_at END WHERE id = ? AND status IN ('OPEN', 'UNKNOWN')", state, status, externalOperationId ?? null, now, status, now, id);
     return this.get(id)!;
   }
 

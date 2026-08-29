@@ -19,6 +19,7 @@ const composePath = setting("compose", "RELEASE_COMPOSE_PATH", "compose.prod.yml
 const outputDirectory = resolve(setting("output", "RELEASE_OUTPUT_DIR", "release-artifacts"));
 const imageReference = setting("image", "RELEASE_IMAGE_REFERENCE");
 const imageDigest = setting("digest", "RELEASE_IMAGE_DIGEST");
+const additionalImagesJson = setting("additional-images", "RELEASE_ADDITIONAL_IMAGES_JSON", "[]");
 if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("RELEASE_COMMIT must be a full 40-character commit SHA");
 if (!repository) throw new Error("RELEASE_REPOSITORY is required");
 if (!/^[a-z][a-z0-9-]{1,62}$/.test(serviceId)) throw new Error("RELEASE_SERVICE_ID must be a valid platform service ID");
@@ -26,8 +27,19 @@ if (!/^[A-Za-z][A-Za-z0-9-]{1,62}$/.test(deploymentProjectId)) throw new Error("
 if (!existsSync(composePath)) throw new Error(`missing ${composePath}`);
 if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) throw new Error("RELEASE_IMAGE_DIGEST must be an immutable digest");
 if (!imageReference.includes(`:sha-${commit}`) && !imageReference.includes(`@${imageDigest}`)) throw new Error("image reference must be commit-bound or digest-pinned");
+let additionalImages;
+try { additionalImages = JSON.parse(additionalImagesJson); } catch { throw new Error("RELEASE_ADDITIONAL_IMAGES_JSON must be valid JSON"); }
+if (!Array.isArray(additionalImages)) throw new Error("RELEASE_ADDITIONAL_IMAGES_JSON must be an array");
+const images = [{ serviceId, imageReference, imageDigest }, ...additionalImages];
+const serviceIds = new Set();
+for (const image of images) {
+  if (!image || typeof image !== "object" || !/^[a-z][a-z0-9-]{1,62}$/.test(image.serviceId) || typeof image.imageReference !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image.imageDigest)) throw new Error("release images must contain valid serviceId, imageReference, and imageDigest values");
+  if (!image.imageReference.includes(`:sha-${commit}`) && !image.imageReference.includes(`@${image.imageDigest}`)) throw new Error(`image ${image.serviceId} must be commit-bound or digest-pinned`);
+  if (serviceIds.has(image.serviceId)) throw new Error(`duplicate release image serviceId: ${image.serviceId}`);
+  serviceIds.add(image.serviceId);
+}
 const composeSha256 = createHash("sha256").update(readFileSync(composePath)).digest("hex");
-const manifest = { schemaVersion: 1, serviceId, repository, commitSha: commit, imageDigest, composePath, composeSha256, deploymentProjectId, health: { path: "/health", readinessPath: "/health/ready" } };
+const manifest = { schemaVersion: 1, serviceId, repository, commitSha: commit, imageDigest, images, composePath, composeSha256, deploymentProjectId, health: { path: "/health", readinessPath: "/health/ready" } };
 mkdirSync(outputDirectory, { recursive: true });
 writeFileSync(join(outputDirectory, `release-manifest-${commit}.json`), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 console.log(JSON.stringify(manifest));

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { IdentityDatabase } from "./db.ts";
 import { IdentityService } from "./service.ts";
 import { IdentityAuthError, PasskeyRpAdapter } from "./webauthn.ts";
+import { parseActionGrantIssueInput, WorkloadActionGrantService } from "./grants.ts";
 
 type IdentityHttpOptions = {
   db: IdentityDatabase;
@@ -11,6 +12,8 @@ type IdentityHttpOptions = {
   passkeyAdapterReady?: boolean;
   passkeyAdapter?: PasskeyRpAdapter;
   canonicalOrigin?: string;
+  actionGrantService?: WorkloadActionGrantService;
+  actionGrantRequired?: boolean;
 };
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
@@ -20,6 +23,7 @@ function json(response: ServerResponse, status: number, body: unknown, headers: 
 
 function errorBody(error: unknown): { error: { code: string; message: string; retryable: boolean } } {
   if (error instanceof IdentityAuthError) return { error: { code: error.code, message: error.message, retryable: error.status >= 500 } };
+  if (error instanceof Error && /^[A-Z0-9_]{3,100}$/.test(error.message)) return { error: { code: error.message, message: "Workload authorization request failed", retryable: ["SIGNING_KEY_UNAVAILABLE"].includes(error.message) } };
   return { error: { code: "INTERNAL_ERROR", message: "Identity request failed", retryable: true } };
 }
 
@@ -50,6 +54,15 @@ function sessionId(request: IncomingMessage): string | undefined {
   return match?.slice("pai_session=".length) || undefined;
 }
 
+function csrfToken(request: IncomingMessage): string | undefined {
+  const value = request.headers["x-pai-csrf-token"];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function requireOrigin(request: IncomingMessage, canonicalOrigin?: string): void {
+  if (canonicalOrigin && request.headers.origin !== canonicalOrigin) throw new IdentityAuthError("ORIGIN_REJECTED", "Request origin is not allowed", 403);
+}
+
 function html(response: ServerResponse): void {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
   response.end(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Personal AI Control Plane · Passkey</title><style>
@@ -77,19 +90,49 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
       if (request.method === "GET" && path === "/health/ready") {
         const schema = options.db.one<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations");
         const adapterReady = options.passkeyAdapterReady === true;
-        const ready = schema?.version === 1 && (process.env.NODE_ENV !== "production" ? true : options.passkeyConfigured && adapterReady);
-        return json(response, ready ? 200 : 503, { status: ready ? "ok" : "not_ready", schemaVersion: schema?.version ?? null, passkey: !options.passkeyConfigured ? "disabled" : adapterReady ? "ready" : "not_wired" });
+        const grantReady = options.actionGrantService !== undefined;
+        const ready = schema?.version === 2 && (process.env.NODE_ENV !== "production" ? true : options.passkeyConfigured && adapterReady && (!options.actionGrantRequired || grantReady));
+        return json(response, ready ? 200 : 503, { status: ready ? "ok" : "not_ready", schemaVersion: schema?.version ?? null, passkey: !options.passkeyConfigured ? "disabled" : adapterReady ? "ready" : "not_wired", actionGrants: grantReady ? "ready" : "not_wired" });
+      }
+      if (request.method === "GET" && path === "/api/v1/action-grant-keys") {
+        if (!options.actionGrantService) return json(response, 503, { error: { code: "SIGNING_KEY_UNAVAILABLE", message: "Action-grant signing authority is unavailable", retryable: true } });
+        return json(response, 200, { keys: options.actionGrantService.verificationKeys() });
+      }
+      if (request.method === "POST" && path === "/api/v1/workloads/action-grants") {
+        if (!options.actionGrantService) return json(response, 503, { error: { code: "SIGNING_KEY_UNAVAILABLE", message: "Action-grant signing authority is unavailable", retryable: true } });
+        const body = parseActionGrantIssueInput(await readJson(request));
+        const workloadId = request.headers["x-pai-workload-id"];
+        const timestamp = Number(request.headers["x-pai-workload-timestamp"]);
+        const nonce = request.headers["x-pai-workload-nonce"];
+        const signature = request.headers["x-pai-workload-signature"];
+        const key = request.headers["idempotency-key"];
+        if ([workloadId, nonce, signature, key].some((value) => typeof value !== "string")) throw new Error("WORKLOAD_PROOF_INVALID");
+        const issued = await options.actionGrantService.issue({ workloadId: workloadId as string, timestamp, nonce: nonce as string, signature: signature as string, idempotencyKey: key as string, method: "POST", path: "/api/v1/workloads/action-grants" }, body);
+        return json(response, 201, issued, issued.replayed ? { "x-idempotent-replay": "true" } : {});
       }
       if (request.method === "GET" && path === "/" && options.passkeyAdapter) return html(response);
       if (path.startsWith("/api/v1/auth/")) {
         if (!options.passkeyConfigured) return json(response, 503, { error: { code: "PASSKEY_NOT_CONFIGURED", message: "Passkey origin/RP configuration is missing", retryable: false } });
         if (!options.passkeyAdapter) return json(response, 501, { error: { code: "NOT_IMPLEMENTED", message: "WebAuthn RP adapter is not wired", retryable: false } });
-        if (request.method !== "GET" && options.canonicalOrigin && request.headers.origin && request.headers.origin !== options.canonicalOrigin) throw new IdentityAuthError("ORIGIN_REJECTED", "Request origin is not allowed", 403);
+        if (request.method !== "GET") requireOrigin(request, options.canonicalOrigin);
         if (request.method === "GET" && path === "/api/v1/auth/status") return json(response, 200, options.passkeyAdapter.status());
+        if (request.method === "GET" && path === "/api/v1/auth/csrf") {
+          const raw = sessionId(request);
+          const token = raw ? options.identity.refreshCsrf(raw) : undefined;
+          if (!token) return json(response, 401, { error: { code: "AUTH_REQUIRED", message: "Authenticated Identity Gateway session required", retryable: false } });
+          return json(response, 200, { csrfToken: token });
+        }
         if (request.method === "GET" && path === "/api/v1/auth/forward") {
           const rawSessionId = sessionId(request);
           const view = rawSessionId ? options.identity.verifySession(rawSessionId) : undefined;
           if (!rawSessionId || !view) return json(response, 401, { error: { code: "AUTH_REQUIRED", message: "Authenticated Identity Gateway session required", retryable: false } });
+          const forwardedMethod = request.headers["x-forwarded-method"];
+          if (typeof forwardedMethod !== "string" || !/^[A-Z]+$/.test(forwardedMethod)) throw new IdentityAuthError("FORWARD_CONTEXT_REQUIRED", "Forward-auth requires the original request method", 400);
+          if (!["GET", "HEAD", "OPTIONS"].includes(forwardedMethod)) {
+            requireOrigin(request, options.canonicalOrigin);
+            const csrf = csrfToken(request);
+            if (!csrf || !options.identity.verifyCsrf(rawSessionId, csrf)) throw new IdentityAuthError("CSRF_REJECTED", "Session CSRF verification failed", 403);
+          }
           const headers = options.identity.buildForwardAuthHeaders({ ownerId: view.userId, sessionId: view.id, authTime: view.authTime, requestId: randomUUID() });
           response.writeHead(204, { "cache-control": "no-store", ...headers });
           response.end();
@@ -98,12 +141,28 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
         if (request.method === "POST" && path === "/api/v1/auth/register/options") return json(response, 200, await options.passkeyAdapter.registrationOptions(await readJson(request)));
         if (request.method === "POST" && path === "/api/v1/auth/register/finish") {
           const result = await options.passkeyAdapter.finishRegistration(await readJson(request) as never);
-          return json(response, 200, { verified: true, userId: result.userId, recoveryCodes: result.recoveryCodes }, { "set-cookie": result.session.cookie });
+          return json(response, 200, { verified: true, userId: result.userId, recoveryCodes: result.recoveryCodes, csrfToken: result.session.csrfToken }, { "set-cookie": result.session.cookie });
         }
         if (request.method === "POST" && path === "/api/v1/auth/login/options") return json(response, 200, await options.passkeyAdapter.authenticationOptions((await readJson(request)).login));
         if (request.method === "POST" && path === "/api/v1/auth/login/finish") {
           const result = await options.passkeyAdapter.finishAuthentication(await readJson(request) as never);
           return json(response, 200, { authenticated: true, userId: result.userId, csrfToken: result.session.csrfToken }, { "set-cookie": result.session.cookie });
+        }
+        if (request.method === "POST" && path === "/api/v1/auth/step-up/options") {
+          const raw = sessionId(request); const csrf = csrfToken(request);
+          if (!raw || !csrf || !options.identity.verifyCsrf(raw, csrf)) throw new IdentityAuthError("CSRF_REJECTED", "Session CSRF verification failed", 403);
+          return json(response, 200, await options.passkeyAdapter.stepUpOptions(raw));
+        }
+        if (request.method === "POST" && path === "/api/v1/auth/step-up/finish") {
+          const raw = sessionId(request); const csrf = csrfToken(request);
+          if (!raw || !csrf || !options.identity.verifyCsrf(raw, csrf)) throw new IdentityAuthError("CSRF_REJECTED", "Session CSRF verification failed", 403);
+          const result = await options.passkeyAdapter.finishStepUp(raw, await readJson(request) as never);
+          return json(response, 200, { authenticated: true, steppedUp: true, userId: result.userId, authTime: result.session.view.authTime, csrfToken: result.session.csrfToken }, { "set-cookie": result.session.cookie });
+        }
+        if (request.method === "POST" && path === "/api/v1/auth/recovery") {
+          const input = await readJson(request);
+          const result = options.passkeyAdapter.recoverWithCode(input.login, input.recoveryCode);
+          return json(response, 200, { authenticated: true, recovered: true, userId: result.userId, csrfToken: result.session.csrfToken }, { "set-cookie": result.session.cookie });
         }
         if (request.method === "GET" && path === "/api/v1/auth/me") {
           const raw = sessionId(request);
@@ -113,14 +172,27 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
           return json(response, 200, { authenticated: true, user: { id: view.userId, login: profile?.login ?? null, displayName: profile?.display_name ?? null, authTime: view.authTime, expiresAt: view.expiresAt } });
         }
         if (request.method === "POST" && path === "/api/v1/auth/logout") {
-          const raw = sessionId(request); const revoked = raw ? options.identity.revokeSession(raw) : false;
+          const raw = sessionId(request); const csrf = csrfToken(request);
+          if (!raw || !csrf || !options.identity.verifyCsrf(raw, csrf)) throw new IdentityAuthError("CSRF_REJECTED", "Session CSRF verification failed", 403);
+          const revoked = options.identity.revokeSession(raw);
           return json(response, 200, { authenticated: false, revoked }, { "set-cookie": "pai_session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict" });
         }
         return json(response, 404, { error: { code: "NOT_FOUND", message: "not found", retryable: false } });
       }
       return json(response, 404, { error: { code: "NOT_FOUND", message: "not found", retryable: false } });
     } catch (error) {
-      const status = error instanceof IdentityAuthError ? error.status : 500;
+      const code = error instanceof Error ? error.message : "";
+      const status = error instanceof IdentityAuthError
+        ? error.status
+        : ["WORKLOAD_PROOF_INVALID", "WORKLOAD_SIGNATURE_INVALID", "WORKLOAD_IDENTITY_UNAVAILABLE"].includes(code)
+          ? 401
+          : ["WORKLOAD_REQUEST_REPLAY", "IDEMPOTENCY_CONFLICT", "IDEMPOTENCY_RECORD_EXPIRED"].includes(code)
+            ? 409
+            : code === "SIGNING_KEY_UNAVAILABLE"
+              ? 503
+              : /^INVALID_|^UNKNOWN_/.test(code)
+                ? 400
+                : 500;
       if (!response.headersSent) json(response, status, errorBody(error)); else response.destroy();
     }
   });

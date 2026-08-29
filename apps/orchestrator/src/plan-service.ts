@@ -52,6 +52,8 @@ export function validatePlan(plan: PlanInput): PlanValidation {
       errors.push("acceptance criteria require id, description, and verificationTaskId");
     } else if (!taskMap.has(criterion.verificationTaskId)) {
       errors.push(`acceptance criterion ${criterion.id} references missing verification task ${criterion.verificationTaskId}`);
+    } else if (taskMap.get(criterion.verificationTaskId)?.required !== true) {
+      errors.push(`acceptance criterion ${criterion.id} verification task must be required`);
     }
   }
 

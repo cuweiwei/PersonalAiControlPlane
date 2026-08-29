@@ -45,6 +45,7 @@ test("filesystem and shell profiles reject traversal and host-boundary commands"
   assert.equal(resolvePathWithinRoots(join(root, "repo", "..", "outside"), [join(root, "repo")]), undefined);
   const profile = { name: "test", allowedExecutables: ["git"], allowedEnvironment: ["LANG"], roots: [join(root, "repo")], maxRuntimeMs: 10_000, maxOutputBytes: 100_000, network: "none" as const };
   assert.deepEqual(validateShellInvocation(profile, "sudo", [], join(root, "repo"), {}), { valid: false, reason: "executable-not-allowed" });
+  assert.deepEqual(validateShellInvocation({ ...profile, allowedExecutables: ["/usr/bin/sudo"] }, "/usr/bin/sudo", ["-n", "true"], join(root, "repo"), {}), { valid: false, reason: "privilege-or-host-boundary-command" });
   assert.deepEqual(validateShellInvocation(profile, "git", ["status;rm"], join(root, "repo"), {}), { valid: false, reason: "shell-metacharacter-rejected" });
   assert.deepEqual(validateShellInvocation(profile, "git", ["status"], join(root, "repo"), { PATH: "/tmp" }), { valid: false, reason: "environment-key-not-allowed" });
 });

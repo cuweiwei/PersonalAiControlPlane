@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS conversation_tombstones (
   target_type TEXT NOT NULL,
   target_id TEXT NOT NULL,
   requested_by TEXT NOT NULL,
+  idempotency_key TEXT,
   requested_at INTEGER NOT NULL,
   reason TEXT NOT NULL,
   cutoff_external_message_id TEXT,
@@ -91,6 +92,19 @@ CREATE TABLE IF NOT EXISTS conversation_tombstones (
   completed_at INTEGER,
   purge_manifest_hash TEXT,
   status TEXT NOT NULL CHECK(status IN ('REQUESTED', 'PURGING', 'VERIFIED', 'FAILED'))
+);
+CREATE TABLE IF NOT EXISTS conversation_exports (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id),
+  requested_by TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('REQUESTED', 'RUNNING', 'COMPLETED', 'FAILED')),
+  artifact_hash TEXT,
+  manifest_json TEXT,
+  error_code TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(requested_by, idempotency_key)
 );
 CREATE TABLE IF NOT EXISTS artifact_references (
   owner_type TEXT NOT NULL,
@@ -109,7 +123,9 @@ CREATE TABLE IF NOT EXISTS archive_outbox (
   payload_json TEXT NOT NULL,
   available_at INTEGER NOT NULL,
   claimed_until INTEGER,
+  claim_token TEXT,
   delivered_at INTEGER,
+  dead_lettered_at INTEGER,
   attempt_count INTEGER NOT NULL DEFAULT 0,
   last_error TEXT
 );
@@ -136,6 +152,15 @@ export class ArchiveDatabase {
     try {
       this.connection.exec(ARCHIVE_SCHEMA);
       if (!this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 1").get()) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(1, ?, ?)").run("archive-schema-v1", Date.now());
+      if (!this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 2").get()) {
+        const outboxColumns = this.connection.prepare("PRAGMA table_info(archive_outbox)").all() as Array<{ name: string }>;
+        if (!outboxColumns.some((column) => column.name === "claim_token")) this.connection.exec("ALTER TABLE archive_outbox ADD COLUMN claim_token TEXT");
+        if (!outboxColumns.some((column) => column.name === "dead_lettered_at")) this.connection.exec("ALTER TABLE archive_outbox ADD COLUMN dead_lettered_at INTEGER");
+        const tombstoneColumns = this.connection.prepare("PRAGMA table_info(conversation_tombstones)").all() as Array<{ name: string }>;
+        if (!tombstoneColumns.some((column) => column.name === "idempotency_key")) this.connection.exec("ALTER TABLE conversation_tombstones ADD COLUMN idempotency_key TEXT");
+        this.connection.exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_tombstones_idempotency_idx ON conversation_tombstones(requested_by, idempotency_key) WHERE idempotency_key IS NOT NULL");
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(2, ?, ?)").run("archive-durable-jobs-v2", Date.now());
+      }
       this.connection.exec("COMMIT");
     } catch (error) {
       this.connection.exec("ROLLBACK");

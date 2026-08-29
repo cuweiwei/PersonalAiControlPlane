@@ -5,3 +5,4 @@ data/
 *.db-wal
 .DS_Store
 release-artifacts/
+dist/

@@ -74,6 +74,12 @@ type StoredTaskRow = {
   updated_at: number;
 };
 
+export type AttemptBinding = {
+  attemptId: string;
+  leaseId: string;
+  fencingToken: number;
+};
+
 function requestHash(input: unknown): string {
   return createHash("sha256").update(canonicalJson(input as never)).digest("hex");
 }
@@ -171,6 +177,20 @@ export class TaskEngine {
   getGoal(id: string): GoalRecord | undefined {
     const row = this.db.one<StoredGoalRow>("SELECT * FROM goals WHERE id = ?", id);
     return row ? this.goalFromRow(row) : undefined;
+  }
+
+  beginPlanning(goalId: string): GoalRecord {
+    const current = this.getGoal(goalId);
+    if (!current) throw this.domainError("GOAL_NOT_FOUND", false);
+    if (current.activePlanRevision !== null || current.status === "PLANNING") return current;
+    const now = this.clock();
+    const changed = this.db.connection.prepare(
+      "UPDATE goals SET status = 'PLANNING', state_version = state_version + 1, updated_at = ? WHERE id = ? AND status = 'PENDING'",
+    ).run(now, goalId);
+    if (Number(changed.changes) !== 1) {
+      throw this.domainError("STATE_CONFLICT", false);
+    }
+    return this.getGoal(goalId)!;
   }
 
   listTasks(goalId: string): StoredTaskRow[] {
@@ -315,6 +335,7 @@ export class TaskEngine {
     target: TaskState,
     event: TaskEvent,
     expectedState?: TaskState,
+    attemptBinding?: AttemptBinding,
   ): StoredTaskRow {
     const current = this.db.one<StoredTaskRow>("SELECT * FROM tasks WHERE id = ?", taskId);
     if (!current) throw this.domainError("TASK_NOT_FOUND", false);
@@ -334,6 +355,23 @@ export class TaskEngine {
       if (!planGuard || (planGuard.active_plan_revision !== null && planGuard.active_plan_revision !== planGuard.plan_revision)) {
         throw this.domainError("STALE_PLAN", false);
       }
+      const attemptOwned = ["DISPATCHED", "RUNNING", "RESUMING"].includes(latest.state);
+      if (attemptOwned && !attemptBinding) throw this.domainError("ATTEMPT_BINDING_REQUIRED", false);
+      if (attemptBinding) {
+        const binding = this.db.one<{ attempt_state: string; lease_expires_at: number; released_at: number | null }>(
+          `SELECT a.state AS attempt_state, l.expires_at AS lease_expires_at, l.released_at
+           FROM attempts a JOIN leases l ON l.id = a.lease_id
+           WHERE a.id = ? AND a.task_id = ? AND a.lease_id = ? AND a.fencing_token = ?
+             AND l.attempt_id = a.id AND l.task_id = a.task_id AND l.fencing_token = a.fencing_token`,
+          attemptBinding.attemptId,
+          taskId,
+          attemptBinding.leaseId,
+          attemptBinding.fencingToken,
+        );
+        if (!binding || binding.released_at !== null || binding.lease_expires_at <= occurredAt) {
+          throw this.domainError("STALE_FENCE", false);
+        }
+      }
       const nextVersion = latest.state_version + 1;
       const sequenceRow = this.db.one<{ sequence: number }>(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM task_events WHERE task_id = ?",
@@ -341,7 +379,12 @@ export class TaskEngine {
       );
       const sequence = Number(sequenceRow?.sequence ?? 1);
       this.db.run(
-        "UPDATE tasks SET state = ?, state_version = ?, updated_at = ?, ready_at = CASE WHEN ? = 'READY' THEN ? ELSE ready_at END, cancel_requested_at = CASE WHEN ? = 'CANCELLED' THEN ? ELSE cancel_requested_at END WHERE id = ?",
+        `UPDATE tasks SET state = ?, state_version = ?, updated_at = ?,
+         ready_at = CASE WHEN ? = 'READY' THEN ? ELSE ready_at END,
+         cancel_requested_at = CASE WHEN ? = 'CANCELLED' THEN ? ELSE cancel_requested_at END,
+         result_json = CASE WHEN ? IN ('VERIFYING', 'COMPLETED') THEN ? ELSE result_json END,
+         error_json = CASE WHEN ? = 'FAILED' THEN ? ELSE error_json END
+         WHERE id = ?`,
         target,
         nextVersion,
         occurredAt,
@@ -349,12 +392,50 @@ export class TaskEngine {
         occurredAt,
         target,
         occurredAt,
+        target,
+        JSON.stringify(event.evidence ?? {}),
+        target,
+        JSON.stringify({ reason: event.reason ?? "task failed", evidence: event.evidence ?? {} }),
         taskId,
       );
+      if (attemptBinding) {
+        const attemptState = target === "RUNNING" || target === "RESUMING"
+          ? "RUNNING"
+          : target === "VERIFYING"
+            ? "SUCCEEDED"
+            : target === "READY"
+              ? "RETRYABLE"
+              : ["FAILED", "CANCELLED"].includes(target)
+                ? target
+                : null;
+        if (attemptState) {
+          this.db.run(
+            `UPDATE attempts SET state = ?, started_at = CASE WHEN ? = 'RUNNING' THEN COALESCE(started_at, ?) ELSE started_at END,
+             ended_at = CASE WHEN ? IN ('SUCCEEDED', 'RETRYABLE', 'FAILED', 'CANCELLED') THEN ? ELSE ended_at END,
+             result_class = CASE WHEN ? = 'SUCCEEDED' THEN 'SUCCESS' ELSE result_class END
+             WHERE id = ?`,
+            attemptState,
+            attemptState,
+            occurredAt,
+            attemptState,
+            occurredAt,
+            attemptState,
+            attemptBinding.attemptId,
+          );
+        }
+        if (["VERIFYING", "WAITING_RECONCILIATION", "READY", "FAILED", "CANCELLED"].includes(target)) {
+          this.db.run(
+            "UPDATE leases SET released_at = ? WHERE id = ? AND fencing_token = ? AND released_at IS NULL",
+            occurredAt,
+            attemptBinding.leaseId,
+            attemptBinding.fencingToken,
+          );
+        }
+      }
       this.db.run(
         `INSERT INTO task_events
-         (task_id, sequence, type, previous_state, new_state, actor, plan_digest, policy_version, payload_json, occurred_at)
-         SELECT ?, ?, ?, ?, ?, ?, p.digest, g.policy_version, ?, ?
+         (task_id, sequence, type, previous_state, new_state, actor, attempt_id, plan_digest, policy_version, payload_json, occurred_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, p.digest, g.policy_version, ?, ?
          FROM tasks t JOIN goals g ON g.id = t.goal_id
          LEFT JOIN plans p ON p.goal_id = t.goal_id AND p.revision = t.plan_revision
          WHERE t.id = ?`,
@@ -364,6 +445,7 @@ export class TaskEngine {
         latest.state,
         target,
         event.actor,
+        attemptBinding?.attemptId ?? null,
         JSON.stringify({ reason: event.reason, evidence: event.evidence ?? {} }),
         occurredAt,
         taskId,

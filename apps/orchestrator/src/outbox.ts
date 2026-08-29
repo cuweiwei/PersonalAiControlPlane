@@ -37,16 +37,24 @@ export class OutboxStore {
   }
 
   claim(limit = 20, leaseMs = 30_000): OutboxRecord[] {
+    return this.claimForTopics([], limit, leaseMs);
+  }
+
+  claimForTopics(topics: readonly string[], limit = 20, leaseMs = 30_000): OutboxRecord[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("outbox claim limit must be 1..100");
+    if (topics.some((topic) => typeof topic !== "string" || topic.length === 0)) throw new Error("outbox topics are invalid");
     const now = this.clock();
     return this.db.transaction(() => {
+      const topicClause = topics.length > 0 ? ` AND topic IN (${topics.map(() => "?").join(", ")})` : "";
       const rows = this.db.all<StoredOutboxRow>(
         `SELECT * FROM outbox
-         WHERE delivered_at IS NULL AND available_at <= ?
+         WHERE delivered_at IS NULL AND dead_lettered_at IS NULL AND available_at <= ?
            AND (claimed_until IS NULL OR claimed_until <= ?)
+           ${topicClause}
          ORDER BY available_at, id LIMIT ?`,
         now,
         now,
+        ...topics,
         limit,
       );
       const claims = new Map<string, string>();
@@ -71,13 +79,28 @@ export class OutboxStore {
     if (Number(changed.changes) !== 1) throw new Error("OUTBOX_NOT_PENDING");
   }
 
-  markFailed(id: string, claimToken: string, safeError: string, retryAfterMs = 1_000): void {
+  markFailed(id: string, claimToken: string, safeError: string, retryAfterMs = 1_000, maxAttempts = 10): "RETRY" | "DEAD_LETTER" {
     const now = this.clock();
     const message = safeError.slice(0, 500);
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new Error("outbox max attempts must be positive");
+    const current = this.db.one<{ attempt_count: number }>(
+      "SELECT attempt_count FROM outbox WHERE id = ? AND claim_token = ? AND delivered_at IS NULL AND dead_lettered_at IS NULL",
+      id,
+      claimToken,
+    );
+    if (!current) throw new Error("OUTBOX_NOT_PENDING");
+    if (current.attempt_count >= maxAttempts) {
+      const changed = this.db.connection.prepare(
+        "UPDATE outbox SET dead_lettered_at = ?, dead_letter_reason = ?, claimed_until = NULL, claim_token = NULL, last_error = ? WHERE id = ? AND claim_token = ? AND delivered_at IS NULL AND dead_lettered_at IS NULL",
+      ).run(now, message, message, id, claimToken);
+      if (Number(changed.changes) !== 1) throw new Error("OUTBOX_NOT_PENDING");
+      return "DEAD_LETTER";
+    }
     const changed = this.db.connection.prepare(
       "UPDATE outbox SET available_at = ?, claimed_until = NULL, claim_token = NULL, last_error = ? WHERE id = ? AND claim_token = ? AND delivered_at IS NULL",
     ).run(now + Math.max(0, retryAfterMs), message, id, claimToken);
     if (Number(changed.changes) !== 1) throw new Error("OUTBOX_NOT_PENDING");
+    return "RETRY";
   }
 
   private fromRow(row: StoredOutboxRow, claimToken: string): OutboxRecord {

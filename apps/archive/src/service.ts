@@ -16,6 +16,10 @@ export type NormalizedEnvelope = {
 
 export type IngestResult = { status: "INSERTED" | "DUPLICATE" | "CONFLICT"; conversationId: string; messageId?: string };
 export type ArchiveExport = { schemaVersion: 1; conversationId: string; generatedAt: string; messages: Array<{ id: string; externalId: string; revision: string; checksum: string; sentAt: string | null; provenance: Record<string, JsonValue>; expiresAt: number | null }>; manifestHash: string };
+export type ConversationSummary = { id: string; source: string; externalAccountHandle: string; externalThreadId: string; title: string | null; scope: string[]; messageCount: number; deletionStatus: string | null; createdAt: string; updatedAt: string };
+export type ConversationDetail = ConversationSummary & { messages: Array<{ id: string; externalId: string; revision: string; role: string; sentAt: string | null; content: { format: string; text: string }; checksum: string; provenance: Record<string, JsonValue>; expiresAt: number | null; attachments: Array<{ contentHash: string; mediaType: string; size: number; artifactRef: string; expiresAt: number | null }> }> };
+export type ArtifactPurgePort = (digests: readonly string[]) => { removed: readonly string[]; remaining: readonly string[] };
+export type ArchiveJob = { id: string; kind: "EXPORT" | "PURGE"; conversationId: string; status: string; artifactHash: string | null; manifest: Record<string, unknown> | null; errorCode: string | null; createdAt: string; updatedAt: string };
 
 function expiry(sentAt: number | null, policy: RetentionPolicy, envelope: NormalizedEnvelope, now: number): number | null {
   let days: number | null | undefined = policy.ownerOverrideDays;
@@ -35,7 +39,67 @@ export function calculateRetentionExpiry(sentAt: number | null, policy: Retentio
 export class ArchiveService {
   private readonly db: ArchiveDatabase;
   private readonly clock: () => number;
-  constructor(db: ArchiveDatabase, clock: () => number = Date.now) { this.db = db; this.clock = clock; }
+  private readonly purgeArtifacts?: ArtifactPurgePort;
+  constructor(db: ArchiveDatabase, clock: () => number = Date.now, purgeArtifacts?: ArtifactPurgePort) { this.db = db; this.clock = clock; this.purgeArtifacts = purgeArtifacts; }
+
+  listConversations(limit = 100): ConversationSummary[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("conversation limit must be 1..100");
+    return this.db.all<Record<string, unknown>>(`
+      SELECT c.*, COUNT(m.id) AS message_count,
+        (SELECT status FROM conversation_tombstones t WHERE t.target_type = 'conversation' AND t.target_id = c.id ORDER BY t.requested_at DESC LIMIT 1) AS deletion_status
+      FROM conversations c
+      LEFT JOIN messages m ON m.conversation_id = c.id
+      GROUP BY c.id
+      ORDER BY c.updated_at DESC, c.id DESC
+      LIMIT ?
+    `, limit).map((row) => this.conversationSummary(row));
+  }
+
+  getConversation(conversationId: string): ConversationDetail | undefined {
+    const row = this.db.one<Record<string, unknown>>(`
+      SELECT c.*, COUNT(m.id) AS message_count,
+        (SELECT status FROM conversation_tombstones t WHERE t.target_type = 'conversation' AND t.target_id = c.id ORDER BY t.requested_at DESC LIMIT 1) AS deletion_status
+      FROM conversations c
+      LEFT JOIN messages m ON m.conversation_id = c.id
+      WHERE c.id = ?
+      GROUP BY c.id
+    `, conversationId);
+    if (!row) return undefined;
+    const messages = this.db.all<Record<string, unknown>>("SELECT * FROM messages WHERE conversation_id = ? ORDER BY sent_at, id", conversationId).map((message) => ({
+      id: String(message.id),
+      externalId: String(message.external_message_id),
+      revision: String(message.revision),
+      role: String(message.role),
+      sentAt: message.sent_at === null ? null : new Date(Number(message.sent_at)).toISOString(),
+      content: JSON.parse(String(message.normalized_content_json)) as { format: string; text: string },
+      checksum: String(message.checksum),
+      provenance: JSON.parse(String(message.provenance_json)) as Record<string, JsonValue>,
+      expiresAt: message.expires_at === null ? null : Number(message.expires_at),
+      attachments: this.db.all<Record<string, unknown>>("SELECT content_hash, media_type, size, artifact_ref, expires_at FROM attachments WHERE message_id = ? ORDER BY id", message.id).map((attachment) => ({
+        contentHash: String(attachment.content_hash),
+        mediaType: String(attachment.media_type),
+        size: Number(attachment.size),
+        artifactRef: String(attachment.artifact_ref),
+        expiresAt: attachment.expires_at === null ? null : Number(attachment.expires_at),
+      })),
+    }));
+    return { ...this.conversationSummary(row), messages };
+  }
+
+  private conversationSummary(row: Record<string, unknown>): ConversationSummary {
+    return {
+      id: String(row.id),
+      source: String(row.source),
+      externalAccountHandle: String(row.external_account_handle),
+      externalThreadId: String(row.external_thread_id),
+      title: row.title === null ? null : String(row.title),
+      scope: JSON.parse(String(row.scope_json)) as string[],
+      messageCount: Number(row.message_count),
+      deletionStatus: row.deletion_status === null ? null : String(row.deletion_status),
+      createdAt: new Date(Number(row.created_at)).toISOString(),
+      updatedAt: new Date(Number(row.updated_at)).toISOString(),
+    };
+  }
 
   ingest(envelope: NormalizedEnvelope, policy: RetentionPolicy): IngestResult {
     if (envelope.schemaVersion !== 1 || !envelope.source || !envelope.externalAccountHandle || !envelope.conversation?.externalId || !envelope.message?.externalId || !envelope.message.revision || !envelope.message.content?.format || typeof envelope.message.content.text !== "string" || !envelope.message.role) throw new Error("normalized envelope is invalid");
@@ -62,7 +126,9 @@ export class ArchiveService {
       const expiresAt = expiry(sentAt, policy, envelope, now);
       this.db.run("INSERT INTO messages(id, conversation_id, external_message_id, revision, role, sent_at, normalized_content_json, format, checksum, provenance_json, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", messageId, conversationId, envelope.message.externalId, envelope.message.revision, envelope.message.role, sentAt, JSON.stringify(envelope.message.content), envelope.message.content.format, envelope.checksum, JSON.stringify(envelope.provenance), expiresAt, now);
       for (const attachment of envelope.message.attachments ?? []) {
-        this.db.run("INSERT INTO attachments(id, message_id, content_hash, media_type, size, artifact_ref, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)", uuidv7(now), messageId, attachment.contentHash, attachment.mediaType, attachment.size, attachment.artifactRef, expiresAt);
+        const attachmentId = uuidv7(now);
+        this.db.run("INSERT INTO attachments(id, message_id, content_hash, media_type, size, artifact_ref, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)", attachmentId, messageId, attachment.contentHash, attachment.mediaType, attachment.size, attachment.artifactRef, expiresAt);
+        this.db.run("INSERT OR IGNORE INTO artifact_references(owner_type, owner_id, artifact_hash, purpose, created_at) VALUES ('conversation', ?, ?, 'attachment', ?)", conversationId, attachment.contentHash, now);
       }
       this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", now, conversationId);
       this.db.run("INSERT INTO archive_outbox(id, topic, aggregate_id, dedupe_key, payload_json, available_at) VALUES (?, 'conversation.extract.requested', ?, ?, ?, ?)", uuidv7(now), conversationId, `conversation.message:${conversationId}:${envelope.message.externalId}:${envelope.message.revision}`, JSON.stringify({ conversationId, messageId }), now);
@@ -70,12 +136,43 @@ export class ArchiveService {
     });
   }
 
-  requestPurge(conversationId: string, requestedBy: string, reason: string, blockFuture = false): string {
+  requestExport(conversationId: string, requestedBy: string, idempotencyKey: string): string {
+    if (!conversationId || !requestedBy || !idempotencyKey || !this.db.one("SELECT id FROM conversations WHERE id = ?", conversationId)) throw new Error("conversation is unavailable");
+    const blocked = this.db.one("SELECT id FROM conversation_tombstones WHERE target_id = ? AND status IN ('REQUESTED', 'PURGING', 'VERIFIED')", conversationId);
+    if (blocked) throw new Error("conversation export is blocked by deletion state");
+    const existing = this.db.one<{ id: string; conversation_id: string }>("SELECT id, conversation_id FROM conversation_exports WHERE requested_by = ? AND idempotency_key = ?", requestedBy, idempotencyKey);
+    if (existing) {
+      if (existing.conversation_id !== conversationId) throw new Error("archive idempotency conflict");
+      return existing.id;
+    }
+    const now = this.clock(); const id = uuidv7(now);
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO conversation_exports(id, conversation_id, requested_by, idempotency_key, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'REQUESTED', ?, ?)", id, conversationId, requestedBy, idempotencyKey, now, now);
+      this.db.run("INSERT INTO archive_outbox(id, topic, aggregate_id, dedupe_key, payload_json, available_at) VALUES (?, 'conversation.export.requested', ?, ?, ?, ?)", uuidv7(now), id, `conversation.export.requested:${id}`, JSON.stringify({ exportId: id, conversationId }), now);
+    });
+    return id;
+  }
+
+  requestPurge(conversationId: string, requestedBy: string, reason: string, blockFuture = false, idempotencyKey?: string): string {
     const now = this.clock();
     if (!conversationId || !requestedBy || !reason || !this.db.one("SELECT id FROM conversations WHERE id = ?", conversationId)) throw new Error("conversation is unavailable");
+    if (idempotencyKey) {
+      const existing = this.db.one<{ id: string; target_id: string }>("SELECT id, target_id FROM conversation_tombstones WHERE requested_by = ? AND idempotency_key = ?", requestedBy, idempotencyKey);
+      if (existing) { if (existing.target_id !== conversationId) throw new Error("archive idempotency conflict"); return existing.id; }
+    }
     const id = uuidv7(now);
-    this.db.run("INSERT INTO conversation_tombstones(id, target_type, target_id, requested_by, requested_at, reason, block_future, status) VALUES (?, 'conversation', ?, ?, ?, ?, ?, 'REQUESTED')", id, conversationId, requestedBy, now, reason, blockFuture ? 1 : 0);
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO conversation_tombstones(id, target_type, target_id, requested_by, idempotency_key, requested_at, reason, block_future, status) VALUES (?, 'conversation', ?, ?, ?, ?, ?, ?, 'REQUESTED')", id, conversationId, requestedBy, idempotencyKey ?? null, now, reason, blockFuture ? 1 : 0);
+      this.db.run("INSERT INTO archive_outbox(id, topic, aggregate_id, dedupe_key, payload_json, available_at) VALUES (?, 'conversation.purge.requested', ?, ?, ?, ?)", uuidv7(now), id, `conversation.purge.requested:${id}`, JSON.stringify({ tombstoneId: id, conversationId }), now);
+    });
     return id;
+  }
+
+  getJob(id: string): ArchiveJob | undefined {
+    const exported = this.db.one<Record<string, unknown>>("SELECT * FROM conversation_exports WHERE id = ?", id);
+    if (exported) return { id, kind: "EXPORT", conversationId: String(exported.conversation_id), status: String(exported.status), artifactHash: exported.artifact_hash === null ? null : String(exported.artifact_hash), manifest: exported.manifest_json === null ? null : JSON.parse(String(exported.manifest_json)), errorCode: exported.error_code === null ? null : String(exported.error_code), createdAt: new Date(Number(exported.created_at)).toISOString(), updatedAt: new Date(Number(exported.updated_at)).toISOString() };
+    const purge = this.db.one<Record<string, unknown>>("SELECT * FROM conversation_tombstones WHERE id = ?", id);
+    return purge ? { id, kind: "PURGE", conversationId: String(purge.target_id), status: String(purge.status), artifactHash: null, manifest: purge.purge_manifest_hash === null ? null : { manifestHash: String(purge.purge_manifest_hash) }, errorCode: purge.status === "FAILED" ? "PURGE_VERIFICATION_FAILED" : null, createdAt: new Date(Number(purge.requested_at)).toISOString(), updatedAt: new Date(Number(purge.completed_at ?? purge.requested_at)).toISOString() } : undefined;
   }
 
   exportConversation(conversationId: string): ArchiveExport {
@@ -98,17 +195,24 @@ export class ArchiveService {
     const tombstone = this.db.one<{ target_id: string; status: string }>("SELECT target_id, status FROM conversation_tombstones WHERE id = ?", tombstoneId);
     if (!tombstone || tombstone.status === "VERIFIED") throw new Error("purge tombstone is unavailable");
     const now = this.clock();
-    return this.db.transaction(() => {
+    const artifactDigests = this.db.transaction(() => {
       this.db.run("UPDATE conversation_tombstones SET status = 'PURGING' WHERE id = ?", tombstoneId);
-      const messageIds = this.db.all<{ id: string }>("SELECT id FROM messages WHERE conversation_id = ?", tombstone.target_id).map((row) => row.id);
+      const digests = this.db.all<{ artifact_hash: string }>("SELECT artifact_hash FROM artifact_references WHERE owner_type = 'conversation' AND owner_id = ?", tombstone.target_id).map((row) => row.artifact_hash);
       this.db.run("DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = ?)", tombstone.target_id);
       this.db.run("DELETE FROM messages WHERE conversation_id = ?", tombstone.target_id);
-      const remaining = this.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?", tombstone.target_id)?.count ?? 0;
-      const manifestHash = sha256(canonicalJson({ tombstoneId, conversationId: tombstone.target_id, deletedMessageIds: messageIds, verifiedAt: now } as never));
-      const status = remaining === 0 ? "VERIFIED" : "FAILED";
-      this.db.run("UPDATE conversation_tombstones SET status = ?, completed_at = ?, purge_manifest_hash = ? WHERE id = ?", status, now, manifestHash, tombstoneId);
-      return { status, manifestHash };
+      this.db.run("UPDATE artifact_references SET released_at = ? WHERE owner_type = 'conversation' AND owner_id = ? AND released_at IS NULL", now, tombstone.target_id);
+      return digests;
     });
+    let remainingArtifacts = artifactDigests;
+    if (artifactDigests.length === 0) remainingArtifacts = [];
+    else if (this.purgeArtifacts) {
+      try { remainingArtifacts = [...this.purgeArtifacts(artifactDigests).remaining]; } catch { remainingArtifacts = artifactDigests; }
+    }
+    const remainingMessages = Number(this.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?", tombstone.target_id)?.count ?? 0);
+    const status = remainingMessages === 0 && remainingArtifacts.length === 0 ? "VERIFIED" : "FAILED";
+    const manifestHash = sha256(canonicalJson({ tombstoneId, conversationId: tombstone.target_id, artifactDigests, remainingArtifacts, verifiedAt: now, status } as never));
+    this.db.run("UPDATE conversation_tombstones SET status = ?, completed_at = ?, purge_manifest_hash = ? WHERE id = ?", status, now, manifestHash, tombstoneId);
+    return { status, manifestHash };
   }
 
   storagePressureAction(usedBytes: number, warningBytes: number, criticalBytes: number): "NORMAL" | "REDUCE_OPTIONAL" | "STOP_OPTIONAL_WRITES" {

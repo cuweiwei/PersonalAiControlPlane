@@ -8,11 +8,18 @@
   },
   "scripts": {
     "start": "node --experimental-strip-types apps/orchestrator/src/index.ts",
+    "build:web": "vite build --config apps/control-web/vite.config.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check.mjs",
     "release:artifact": "node scripts/release-artifact.mjs"
   },
   "dependencies": {
-    "@simplewebauthn/server": "13.3.2"
+    "@simplewebauthn/server": "13.3.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
   }
 }

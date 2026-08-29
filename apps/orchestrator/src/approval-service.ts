@@ -60,6 +60,15 @@ function modeWithin(requested: string, approved: string): boolean {
   return false;
 }
 
+function validBounds(value: unknown): value is ApprovalBounds {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const bounds = value as Record<string, unknown>;
+  const arrays = ["actions", "resources", "capabilityIds", "workers", "filesystemRoots", "networkDestinations", "recipients"];
+  if (arrays.some((key) => !Array.isArray(bounds[key]) || (bounds[key] as unknown[]).some((entry) => typeof entry !== "string"))) return false;
+  if (typeof bounds.mergeMode !== "string" || typeof bounds.deploymentMode !== "string" || !bounds.budget || typeof bounds.budget !== "object" || Array.isArray(bounds.budget)) return false;
+  return Object.values(bounds.budget as Record<string, unknown>).every((entry) => typeof entry === "number" && Number.isFinite(entry) && entry >= 0);
+}
+
 function scopeWithin(requested: ApprovalBounds, approved: ApprovalBounds): boolean {
   if (!subset(requested.actions, approved.actions) || !subset(requested.resources, approved.resources) || !subset(requested.capabilityIds, approved.capabilityIds) || !subset(requested.workers, approved.workers) || !subset(requested.filesystemRoots, approved.filesystemRoots) || !subset(requested.networkDestinations, approved.networkDestinations) || !subset(requested.recipients, approved.recipients)) return false;
   if (!modeWithin(requested.mergeMode, approved.mergeMode) || !modeWithin(requested.deploymentMode, approved.deploymentMode)) return false;
@@ -87,7 +96,7 @@ export class ApprovalService {
     correlationId?: string | null;
   }): ApprovalRequest {
     const now = this.clock();
-    if (!input.goalId || !input.planDigest || !Number.isInteger(input.policyVersion) || input.policyVersion < 1 || input.expiresAt <= now) throw new Error("approval request is invalid or already expired");
+    if (!input.goalId || !input.planDigest || !Number.isInteger(input.policyVersion) || input.policyVersion < 1 || input.expiresAt <= now || !validBounds(input.requiredScope)) throw new Error("approval request is invalid or already expired");
     const id = uuidv7(now);
     this.db.transaction(() => {
       this.db.run(
@@ -112,14 +121,14 @@ export class ApprovalService {
     return this.getRequest(id)!;
   }
 
-  approve(requestId: string, approver: string, authTime: number, signedGrant: string, boundedScope: ApprovalBounds): ApprovalGrant {
+  approve(requestId: string, approver: string, authTime: number, boundedScope: ApprovalBounds): ApprovalGrant {
     const now = this.clock();
     const request = this.getRequest(requestId);
     if (!request) throw new Error("approval request not found");
     if (request.status !== "OPEN" || request.expiresAt <= now) throw new Error("approval request is not open");
-    if (!approver || !Number.isFinite(authTime) || authTime > now || now - authTime > 5 * 60_000 || !signedGrant || !scopeWithin(request.requiredScope, boundedScope)) throw new Error("approval decision is incomplete or broader than requested");
+    if (!approver || !Number.isFinite(authTime) || authTime > now || now - authTime > 5 * 60_000 || !validBounds(boundedScope) || !scopeWithin(request.requiredScope, boundedScope)) throw new Error("approval decision is incomplete or broader than requested");
     const grantId = uuidv7(now);
-    const digest = sha256(signedGrant);
+    const digest = sha256(canonicalJson({ requestId, grantId, approver, authTime, boundedScope, policyVersion: request.policyVersion, planDigest: request.planDigest } as never));
     return this.db.transaction(() => {
       const current = this.getRequest(requestId);
       if (!current || current.status !== "OPEN" || current.expiresAt <= now) throw new Error("approval request is not open");

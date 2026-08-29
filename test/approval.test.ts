@@ -12,13 +12,13 @@ test("approval request is immutable until a single approve/reject decision", () 
   const approval = new ApprovalService(db, () => now);
   db.run("INSERT INTO goals(id, owner_id, source_json, intent, scope_json, constraints_json, memory_requirement, status, state_version, policy_version, created_at, updated_at) VALUES ('g', 'o', '{}', 'x', '[]', '{}', 'none', 'ACTIVE', 0, 1, ?, ?)", now, now);
   const request = approval.createRequest({ goalId: "g", planDigest: "sha256:p", policyVersion: 1, requiredScope: scope, expiresAt: now + 60_000, correlationId: "c" });
-  const grant = approval.approve(request.id, "owner", now, "signed-grant", scope);
+  const grant = approval.approve(request.id, "owner", now, scope);
   assert.equal(grant.requestId, request.id);
   assert.equal(approval.getRequest(request.id)?.status, "APPROVED");
   assert.equal(approval.revokeGrant(grant.id, "owner"), true);
   assert.equal(approval.revokeGrant(grant.id, "owner"), false);
   assert.equal(new TaskEngine(db, () => now).verifyAuditChain(), true);
-  assert.throws(() => approval.approve(request.id, "owner", now, "signed-grant-2", scope), /not open/);
+  assert.throws(() => approval.approve(request.id, "owner", now, scope), /not open/);
   db.close();
 });
 
@@ -28,7 +28,8 @@ test("approval bounds cannot be widened by the decision", () => {
   const approval = new ApprovalService(db, () => now);
   db.run("INSERT INTO goals(id, owner_id, source_json, intent, scope_json, constraints_json, memory_requirement, status, state_version, policy_version, created_at, updated_at) VALUES ('g', 'o', '{}', 'x', '[]', '{}', 'none', 'ACTIVE', 0, 1, ?, ?)", now, now);
   const request = approval.createRequest({ goalId: "g", planDigest: "sha256:p", policyVersion: 1, requiredScope: scope, expiresAt: now + 60_000 });
-  assert.throws(() => approval.approve(request.id, "owner", now, "signed", { ...scope, actions: ["read", "write"] }), /broader/);
+  assert.throws(() => approval.approve(request.id, "owner", now, { ...scope, actions: ["read", "write"] }), /broader/);
+  assert.throws(() => approval.approve(request.id, "owner", now, { ...scope, budget: null } as never), /incomplete/);
   db.close();
 });
 
@@ -40,7 +41,7 @@ test("expired and rejected approvals cannot produce grants", () => {
   const request = approval.createRequest({ goalId: "g", planDigest: "sha256:p", policyVersion: 1, requiredScope: scope, expiresAt: now + 10 });
   now += 20;
   assert.equal(approval.expireOpen(), 1);
-  assert.throws(() => approval.approve(request.id, "owner", now, "signed", scope), /not open/);
+  assert.throws(() => approval.approve(request.id, "owner", now, scope), /not open/);
   const rejected = approval.createRequest({ goalId: "g", planDigest: "sha256:p2", policyVersion: 1, requiredScope: scope, expiresAt: now + 10 });
   assert.equal(approval.reject(rejected.id, "owner").status, "REJECTED");
   db.close();

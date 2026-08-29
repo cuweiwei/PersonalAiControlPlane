@@ -14,6 +14,12 @@ export type ActionGrantKey = {
   publicKey: KeyObject;
 };
 
+export type OpaqueActionGrantSigner = {
+  kid: string;
+  state: ActionGrantKeyState;
+  sign(signingInput: Buffer): Buffer | Promise<Buffer>;
+};
+
 export type ActionGrantProtectedHeader = {
   alg: "EdDSA";
   typ: "pai-action+jwt";
@@ -60,6 +66,9 @@ export type ActionGrantVerifyOptions = {
   allowedActions?: readonly string[];
   allowedResources?: readonly string[];
   allowedCapabilityIds?: readonly string[];
+  expectedBudget?: Record<string, JsonValue>;
+  expectedSandbox?: Record<string, JsonValue>;
+  hardStopApprovalId?: string | null;
   nowSeconds?: number;
   clockSkewSeconds?: number;
   maxLifetimeSeconds?: number;
@@ -209,6 +218,26 @@ export function signActionGrant(claims: ActionGrantClaims, key: ActionGrantKey, 
   return `${signingInput}.${signature}`;
 }
 
+/** Signs through an opaque key handle; private key material never enters the gateway process. */
+export async function signActionGrantWithOpaqueSigner(
+  claims: ActionGrantClaims,
+  signer: OpaqueActionGrantSigner,
+  maxLifetimeSeconds = DEFAULT_MAX_LIFETIME_SECONDS,
+): Promise<string> {
+  if (signer.state !== "ACTIVE") throw new Error("only ACTIVE keys may sign grants");
+  const normalizedClaims = normalizeClaims(claims);
+  if (!Number.isInteger(maxLifetimeSeconds) || maxLifetimeSeconds < 1 || normalizedClaims.exp - normalizedClaims.iat > maxLifetimeSeconds) {
+    throw new Error("grant lifetime exceeds the configured bound");
+  }
+  const header: ActionGrantProtectedHeader = { alg: ACTION_GRANT_ALGORITHM, typ: ACTION_GRANT_TYPE, kid: signer.kid };
+  const encodedHeader = encodePart(canonicalJson(header));
+  const encodedClaims = encodePart(canonicalJson(normalizedClaims as unknown as JsonValue));
+  const signingInput = `${encodedHeader}.${encodedClaims}`;
+  const signature = await signer.sign(Buffer.from(signingInput, "ascii"));
+  if (!Buffer.isBuffer(signature) || signature.length === 0) throw new Error("opaque signer returned an invalid signature");
+  return `${signingInput}.${signature.toString("base64url")}`;
+}
+
 export function verifyActionGrant(token: string, options: ActionGrantVerifyOptions): ActionGrantVerificationResult {
   if (typeof token !== "string") return failure("grant.malformed", "grant must be a string");
   const parts = token.split(".");
@@ -268,6 +297,9 @@ export function verifyActionGrant(token: string, options: ActionGrantVerifyOptio
   }
   if (claims.taskId !== options.taskId || claims.attemptId !== options.attemptId || claims.planDigest !== options.planDigest || claims.policyVersion !== options.policyVersion || claims.fencingToken !== options.fencingToken) {
     return failure("grant.binding.invalid", "grant is not bound to the requested task, attempt, plan, policy, or fencing token");
+  }
+  if ((options.expectedBudget && canonicalJson(claims.budget) !== canonicalJson(options.expectedBudget)) || (options.expectedSandbox && canonicalJson(claims.sandbox) !== canonicalJson(options.expectedSandbox)) || (options.hardStopApprovalId !== undefined && claims.hardStopApprovalId !== options.hardStopApprovalId)) {
+    return failure("grant.binding.invalid", "grant budget, sandbox, or approval binding does not match the offered operation");
   }
   if (!subset(claims.actions, options.allowedActions)) return failure("grant.action.undeclared", "grant contains an action outside the declared operation scope");
   if (!subset(claims.resources, options.allowedResources)) return failure("grant.resource.undeclared", "grant contains a resource outside the declared operation scope");

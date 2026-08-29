@@ -1,6 +1,18 @@
 name: personal-ai-control-plane
 
 services:
+  pai-control-web:
+    image: ${PAI_CONTROL_WEB_IMAGE:?PAI_CONTROL_WEB_IMAGE must be immutable}
+    restart: unless-stopped
+    user: "101:101"
+    ports:
+      - "127.0.0.1:9083:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
   pai-identity-gateway:
     image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
     restart: unless-stopped
@@ -37,6 +49,8 @@ services:
       PAI_PORT: "9085"
       PAI_IDENTITY_HEALTH_URL: http://pai-identity-gateway:9084/health/ready
       PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator.db
+      PAI_CONVERSATION_DB_PATH: /var/lib/pai/conversation.db
+      PAI_ARTIFACT_ROOT: /var/lib/pai/artifacts
       PAI_ORCHESTRATOR_LOCK_PATH: /var/lib/pai/orchestrator.lock
     volumes:
       - ${PAI_ORCHESTRATOR_DATA_ROOT:?PAI_ORCHESTRATOR_DATA_ROOT must be project-scoped}/data:/var/lib/pai

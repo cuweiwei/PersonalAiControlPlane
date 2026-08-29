@@ -10,21 +10,27 @@ const required = [
   "apps/orchestrator/src/http.ts",
   "apps/orchestrator/src/outbox.ts",
   "apps/orchestrator/src/plan-service.ts",
+  "apps/orchestrator/src/runtime.ts",
+  "apps/orchestrator/src/worker-execution.ts",
   "apps/identity-gateway/src/db.ts",
   "apps/identity-gateway/src/service.ts",
   "apps/identity-gateway/src/http.ts",
   "apps/identity-gateway/src/index.ts",
+  "apps/identity-gateway/src/grants.ts",
   "packages/contracts/src/index.ts",
   "packages/crypto/src/index.ts",
   "packages/policy/src/index.ts",
   "packages/identity/src/index.ts",
   "packages/scheduler/src/index.ts",
   "packages/worker/src/index.ts",
+  "apps/worker/src/db.ts",
+  "apps/worker/src/runtime.ts",
   "apps/orchestrator/src/reconciliation.ts",
   "apps/orchestrator/src/approval-service.ts",
   "apps/orchestrator/src/lease-service.ts",
   "apps/archive/src/db.ts",
   "apps/archive/src/service.ts",
+  "apps/archive/src/runtime.ts",
   "packages/artifacts/src/index.ts",
   "packages/credentials/src/index.ts",
   "packages/adapters/src/index.ts",
@@ -36,7 +42,15 @@ const required = [
   "packages/backup/src/index.ts",
   "packages/compute/src/index.ts",
   "Dockerfile",
+  "Dockerfile.control-web",
   "compose.prod.yml",
+  ".github/workflows/ci.yml",
+  "apps/control-web/index.html",
+  "apps/control-web/src/app.ts",
+  "apps/control-web/src/main.ts",
+  "apps/control-web/src/styles.css",
+  "apps/control-web/vite.config.ts",
+  "apps/control-web/nginx.conf",
   "scripts/release-artifact.mjs",
   "docs/implementation-status.md",
   "schemas/api/v1/goal-create.schema.json",
@@ -49,7 +63,7 @@ for (const relative of required) {
 
 const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 if (packageJson.name !== "personal-ai-control-plane") throw new Error("unexpected package name");
-if (!packageJson.scripts?.test || !packageJson.scripts?.start) throw new Error("required scripts are missing");
+if (!packageJson.scripts?.test || !packageJson.scripts?.start || !packageJson.scripts?.["build:web"]) throw new Error("required scripts are missing");
 
 const schemas = [
   "schemas/api/v1/goal-create.schema.json",
