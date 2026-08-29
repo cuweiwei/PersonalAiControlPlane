@@ -24,12 +24,28 @@ test("WebAuthn RP adapter keeps registration behind the bootstrap boundary and s
     const challenge = db.one<{ challenge_hash: string }>("SELECT challenge_hash FROM auth_challenges WHERE id = ?", started.challengeId);
     assert.ok(challenge?.challenge_hash);
     assert.notEqual(challenge?.challenge_hash, started.options.challenge);
-    assert.equal(adapter.status().registrationAllowed, false);
+    assert.equal(adapter.status().registrationAllowed, true);
     db.run("INSERT INTO identity_profiles(user_id, login, display_name, created_at) VALUES (?, ?, ?, ?)", started.userId, "owner@local", "Owner", 1_700_000_000_000);
     identity.registerCredential(started.userId, "credential-1", Buffer.from([1, 2, 3]).toString("base64url"));
+    assert.equal(adapter.status().registrationAllowed, false);
     const login = await adapter.authenticationOptions("owner@local");
     assert.equal(login.options.rpId, "pai.example.test");
     assert.equal(login.options.allowCredentials?.[0]?.id, "credential-1");
+  } finally { db.close(); }
+});
+
+test("interrupted bootstrap registration can be retried without replacing a completed owner", async () => {
+  const { db, identity, adapter } = adapterFixture();
+  try {
+    const interrupted = await adapter.registrationOptions({ bootstrapToken: "bootstrap-secret", login: "owner@local", displayName: "Owner" });
+    assert.equal(adapter.status().registrationAllowed, true);
+    const retried = await adapter.registrationOptions({ bootstrapToken: "bootstrap-secret", login: "owner@local", displayName: "Owner" });
+    assert.notEqual(retried.userId, interrupted.userId);
+    assert.ok(db.one("SELECT disabled_at FROM identity_users WHERE id = ? AND disabled_at IS NOT NULL", interrupted.userId));
+    db.run("INSERT INTO identity_profiles(user_id, login, display_name, created_at) VALUES (?, ?, ?, ?)", retried.userId, "owner@local", "Owner", 1_700_000_000_000);
+    identity.registerCredential(retried.userId, "credential-1", Buffer.from([1, 2, 3]).toString("base64url"));
+    assert.equal(adapter.status().registrationAllowed, false);
+    await assert.rejects(() => adapter.registrationOptions({ bootstrapToken: "bootstrap-secret", login: "owner@local", displayName: "Owner" }), (error: unknown) => error instanceof IdentityAuthError && error.code === "BOOTSTRAP_COMPLETE");
   } finally { db.close(); }
 });
 

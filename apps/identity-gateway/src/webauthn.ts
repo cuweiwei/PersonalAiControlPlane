@@ -76,13 +76,41 @@ export class PasskeyRpAdapter {
     this.bootstrapToken = options.bootstrapToken?.trim() || undefined;
   }
 
+  private hasIncompleteBootstrapUser(): boolean {
+    const activeUsers = this.db.all<{ id: string; profile_user_id: string | null; credential_count: number }>(`
+      SELECT u.id, p.user_id AS profile_user_id, COUNT(c.id) AS credential_count
+      FROM identity_users u
+      LEFT JOIN identity_profiles p ON p.user_id = u.id
+      LEFT JOIN passkey_credentials c ON c.user_id = u.id AND c.revoked_at IS NULL
+      WHERE u.disabled_at IS NULL
+      GROUP BY u.id, p.user_id
+    `);
+    return activeUsers.length === 1 && activeUsers[0].profile_user_id === null && Number(activeUsers[0].credential_count) === 0;
+  }
+
+  private abandonIncompleteBootstrapUser(): boolean {
+    if (!this.hasIncompleteBootstrapUser()) return false;
+    const user = this.db.one<{ id: string }>(`
+      SELECT u.id
+      FROM identity_users u
+      LEFT JOIN identity_profiles p ON p.user_id = u.id
+      LEFT JOIN passkey_credentials c ON c.user_id = u.id AND c.revoked_at IS NULL
+      WHERE u.disabled_at IS NULL AND p.user_id IS NULL
+      GROUP BY u.id
+      HAVING COUNT(c.id) = 0
+    `);
+    if (!user) return false;
+    this.identity.abandonUser(user.id);
+    return true;
+  }
+
   status(): { configured: true; registrationAllowed: boolean; userCount: number; rpId: string; origin: string; bootstrapConfigured: boolean } {
     const userCount = this.identity.userCount();
-    return { configured: true, registrationAllowed: userCount === 0 && this.bootstrapToken !== undefined, userCount, rpId: this.rpId, origin: this.expectedOrigin, bootstrapConfigured: this.bootstrapToken !== undefined };
+    return { configured: true, registrationAllowed: this.bootstrapToken !== undefined && (userCount === 0 || this.hasIncompleteBootstrapUser()), userCount, rpId: this.rpId, origin: this.expectedOrigin, bootstrapConfigured: this.bootstrapToken !== undefined };
   }
 
   async registrationOptions(input: { bootstrapToken: unknown; login: unknown; displayName: unknown }) {
-    if (this.identity.userCount() > 0) throw new IdentityAuthError("BOOTSTRAP_COMPLETE", "The owner Passkey is already configured", 409);
+    if (this.identity.userCount() > 0 && !this.abandonIncompleteBootstrapUser()) throw new IdentityAuthError("BOOTSTRAP_COMPLETE", "The owner Passkey is already configured", 409);
     if (!this.bootstrapToken) throw new IdentityAuthError("BOOTSTRAP_NOT_CONFIGURED", "The production bootstrap token has not been configured", 503);
     const bootstrapToken = requiredText(input.bootstrapToken, "bootstrapToken", 512);
     if (!safeSecretEqual(bootstrapToken, this.bootstrapToken)) throw new IdentityAuthError("INVALID_BOOTSTRAP_TOKEN", "Bootstrap token is invalid", 403);
