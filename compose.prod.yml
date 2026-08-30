@@ -12,6 +12,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 6
+    networks:
+      default: {}
+      aihp-edge:
+        aliases:
+          - pai-edge-control-web
 
   pai-identity-gateway:
     image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
@@ -32,13 +37,16 @@ services:
       PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
     volumes:
       - ${PAI_IDENTITY_DATA_ROOT:?PAI_IDENTITY_DATA_ROOT must be project-scoped}/data:/var/lib/pai
-    ports:
-      - "127.0.0.1:9084:9084"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9084/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6
+    networks:
+      default: {}
+      aihp-edge:
+        aliases:
+          - pai-edge-identity
 
   pai-orchestrator:
     image: ${PAI_ORCHESTRATOR_IMAGE:?PAI_ORCHESTRATOR_IMAGE must be immutable}
@@ -63,3 +71,13 @@ services:
       interval: 10s
       timeout: 3s
       retries: 6
+    networks:
+      default: {}
+      aihp-edge:
+        aliases:
+          - pai-edge-orchestrator
+
+networks:
+  aihp-edge:
+    external: true
+    name: ai-home-platform_edge

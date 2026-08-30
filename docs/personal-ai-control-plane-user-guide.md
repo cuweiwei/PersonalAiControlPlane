@@ -37,7 +37,7 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 
 ### 2.2 建立第一個 Goal
 
-1. 開啟 Control Web，以 Passkey 登入。
+1. 開啟正式 Control Web 網址；未登入時會顯示 Passkey 頁面，成功後自動進入 `/goals`。
 2. 從上方導覽列選擇 **Goals**。
 3. 在「新增 durable goal」欄位輸入想完成的事情。
 4. 選擇「提交 Goal」。

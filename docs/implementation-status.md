@@ -26,12 +26,12 @@ These adapters cannot be selected or accepted honestly from repository-only evid
 
 | Gate | Missing external evidence or owner choice | Fail-closed behavior |
 | --- | --- | --- |
-| `DD-01` identity/edge | AIHomePlatform same-origin path/SSE routing and forward-auth acceptance, production opaque signing-key provider/key handles, Orchestrator workload enrollment, and any live credential migration source inspection | Identity production readiness remains false until Passkey and action-grant authorities are wired; no raw session secret or client identity header is forwarded |
+| `DD-01` identity/edge | Production opaque signing-key provider/key handles, Orchestrator workload enrollment, and any live credential migration source inspection | The checked-in AIHomePlatform edge contract routes the canonical origin to login, Control Web, Orchestrator API/SSE, and forward-auth; no raw session secret or client identity header is forwarded |
 | `DD-02` / `DD-03` machine control | Approved enrollment request still needs physical-device OS-vault proof/finalization, outbound transport, approved capability adapters, per-device CUA isolation, and safe wake/sleep proof | Enrollment stops at `AWAITING_WORKER_PROOF`; no physical job, CUA, wake, or automatic sleep grant is issued |
 | `DD-04` / `DD-07` compute | Selected planner/executor adapters, live local-model inventory/quality floors, Codex ChatGPT-login worker, owner human-priority policy, and observed quota behavior | Production Orchestrator runtime readiness remains false; no provider is registered and API-key fallback is prohibited |
 | `DD-05` connectors | Supported ContextHub, Hermes, external-AI connector versions and provider deletion semantics | Connector list/status is visible; run/reauthorize remain explicit `CONNECTOR_NOT_CONFIGURED`, their outbox topics are not consumed, and no external side effect is attempted |
 | `DD-06` data operations | Production Artifact root/ACL, measured NAS pressure thresholds, backup destination, pinned-artifact snapshot, and isolated restore/purge evidence | Archive jobs fail visibly when artifact authority is unavailable; production retention/backup acceptance is not claimed |
-| Control Web edge | CI-published server and web image digests plus AIHomePlatform same-origin routing/auth/SSE acceptance | Local management routes and web build are verified, but no image publication or reachable owner portal is claimed |
+| Control Web edge | CI-published server/web image digests and live tailnet acceptance | The service joins only the AIHomePlatform edge network and the login page redirects authenticated sessions to `/goals`; repository evidence alone does not claim the owner portal is reachable |
 | `DD-08` release/NAS | CI run for the current commit, both immutable image digests, exact AIHomePlatform manifest, exact NAS deployment allowlist ID, gateway validation/deploy/status, and live auth/health/rollback evidence | Compose and the multi-image manifest contract are checked locally; production promotion is blocked |
 
 ## Verification commands
@@ -59,7 +59,7 @@ The root-owned production environment must contain matching non-secret configura
 
 ### Forward-auth contract
 
-The AIHomePlatform-owned private edge calls `GET /api/v1/auth/forward` as its authentication subrequest before forwarding a browser request to the portal or another protected human UI. It must set `x-forwarded-method` to the original uppercase method. For an unsafe method, it must also forward the browser `Origin` and `x-pai-csrf-token`; the gateway validates both against the session before returning identity. The gateway reads only the `pai_session` cookie as browser-session authority and ignores incoming `x-pai-*` identity claims.
+The AIHomePlatform-owned private edge calls `GET /api/v1/auth/forward` as its authentication subrequest before forwarding a browser request to the portal or Orchestrator. It sets `x-forwarded-method` to the original uppercase method. For an unsafe method, it also forwards only the browser `Cookie`, `Origin`, and `x-pai-csrf-token` needed by the authentication subrequest; the gateway validates them against the session. Before the original request reaches Control Web or Orchestrator, the edge strips the raw cookie and CSRF header and replaces any client-supplied `x-pai-*` identity claims with gateway response headers.
 
 - Valid session: `204 No Content` with gateway-generated `x-pai-verified`, `x-pai-owner-id`, `x-pai-session-id`, `x-pai-auth-time`, and `x-pai-request-id` response headers. `x-pai-session-id` is the non-secret database row ID; the raw `pai_session` cookie value is never forwarded upstream.
 - Missing, expired, or revoked session: `401 AUTH_REQUIRED`.
