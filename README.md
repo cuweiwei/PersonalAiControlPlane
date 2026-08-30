@@ -1,5 +1,13 @@
 # Personal AI Control Plane
 
+## System architecture at a glance
+
+[![Personal AI Control Plane system architecture and entry points](docs/assets/personal-ai-control-plane-architecture-zh-TW.svg)](docs/assets/personal-ai-control-plane-architecture-zh-TW.svg)
+
+The diagram distinguishes locally verified capabilities from integrations that still require external or production evidence.
+
+Start here: [Traditional Chinese User Guide](docs/personal-ai-control-plane-user-guide.md)
+
 Design documents:
 
 1. [Requirement Definition](docs/personal-ai-control-plane-requirements.md)

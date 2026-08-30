@@ -1,0 +1,288 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1200" viewBox="0 0 1920 1200" role="img" aria-labelledby="title description">
+  <title id="title">Personal AI Control Plane 新手系統架構與使用入口</title>
+  <desc id="description">從 Control Web、Telegram Hermes 或自動排程進入，經過私有邊界與 Passkey 驗證後，由 Personal AI Orchestrator 規劃、審批、分派、驗證，並使用 ContextHub、AIHomePlatform 與個人運算節點完成工作。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07131f"/>
+      <stop offset="0.55" stop-color="#0b1826"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123047"/>
+      <stop offset="1" stop-color="#0d2234"/>
+    </linearGradient>
+    <linearGradient id="entry" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#103149"/>
+      <stop offset="1" stop-color="#102536"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#9dd7ff" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#78d7ff"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f6bd60"/>
+    </marker>
+    <style>
+      text { font-family: "PingFang TC", "Hiragino Sans GB", "STHeiti", "Microsoft JhengHei", sans-serif; }
+      .title { fill: #f5fbff; font-size: 38px; font-weight: 760; letter-spacing: .5px; }
+      .subtitle { fill: #a9c0d2; font-size: 18px; }
+      .section { fill: #8edcff; font-size: 18px; font-weight: 760; letter-spacing: 1px; }
+      .card-title { fill: #f4f9fc; font-size: 21px; font-weight: 760; }
+      .card-subtitle { fill: #8edcff; font-size: 15px; font-weight: 700; }
+      .body { fill: #c9d8e3; font-size: 16px; }
+      .small { fill: #9fb4c3; font-size: 14px; }
+      .tiny { fill: #8fa7b8; font-size: 12.5px; }
+      .number { fill: #08131f; font-size: 16px; font-weight: 800; }
+      .chip { fill: #cfefff; font-size: 13px; font-weight: 700; }
+      .white { fill: #ffffff; }
+      .amber { fill: #ffd38a; }
+      .mint { fill: #8ef0cf; }
+      .muted { fill: #879dad; }
+      .line { fill: none; stroke: #78d7ff; stroke-width: 3; marker-end: url(#arrow); }
+      .line-soft { fill: none; stroke: #78d7ff; stroke-opacity: .62; stroke-width: 2.5; marker-end: url(#arrow); }
+      .line-pending { fill: none; stroke: #f6bd60; stroke-width: 3; stroke-dasharray: 9 8; marker-end: url(#arrowAmber); }
+      .box { fill: #0e1f2c; stroke: #2f5368; stroke-width: 1.5; }
+      .box-strong { fill: url(#core); stroke: #53c7f5; stroke-width: 2; }
+      .box-entry { fill: url(#entry); stroke: #3f7896; stroke-width: 1.5; }
+      .box-pending { fill: #211d1b; stroke: #f6bd60; stroke-width: 2; stroke-dasharray: 9 7; }
+      .box-risk { fill: #241c27; stroke: #d491e8; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1200" fill="url(#bg)"/>
+  <rect width="1920" height="1200" fill="url(#grid)"/>
+  <circle cx="1635" cy="80" r="310" fill="#1d7aa0" opacity="0.07"/>
+  <circle cx="190" cy="1065" r="270" fill="#38bda0" opacity="0.055"/>
+
+  <!-- Header -->
+  <text class="title" x="58" y="58">Personal AI Control Plane｜新手系統架構與使用入口</text>
+  <text class="subtitle" x="58" y="88">你只要提出目標；系統負責規劃、審批、分派、checkpoint、驗證與留下可恢復的證據。</text>
+  <g transform="translate(1490 40)">
+    <rect width="372" height="56" rx="18" fill="#102434" stroke="#2d536a"/>
+    <circle cx="24" cy="20" r="5" fill="#73e0c2"/>
+    <text class="tiny mint" x="38" y="24">實線：已實作並通過本機驗證</text>
+    <line x1="18" y1="39" x2="31" y2="39" stroke="#f6bd60" stroke-width="2" stroke-dasharray="4 3"/>
+    <text class="tiny amber" x="38" y="43">虛線：外部／正式環境整合待驗證</text>
+  </g>
+
+  <!-- First-use path -->
+  <g filter="url(#shadow)">
+    <rect x="58" y="112" width="1804" height="78" rx="20" fill="#0d2130" stroke="#2d536a"/>
+  </g>
+  <text class="card-subtitle" x="82" y="141">第一次使用建議路徑</text>
+  <g>
+    <circle cx="276" cy="152" r="18" fill="#8edcff"/><text class="number" x="271" y="158">1</text>
+    <text class="body white" x="305" y="158">開啟私有 Control Web</text>
+    <path class="line-soft" d="M 486 152 L 545 152"/>
+    <circle cx="579" cy="152" r="18" fill="#8edcff"/><text class="number" x="574" y="158">2</text>
+    <text class="body white" x="608" y="158">用 Passkey 登入</text>
+    <path class="line-soft" d="M 756 152 L 815 152"/>
+    <circle cx="849" cy="152" r="18" fill="#8edcff"/><text class="number" x="844" y="158">3</text>
+    <text class="body white" x="878" y="158">在 Goals 提出目標</text>
+    <path class="line-soft" d="M 1055 152 L 1114 152"/>
+    <circle cx="1148" cy="152" r="18" fill="#d491e8"/><text class="number" x="1143" y="158">4</text>
+    <text class="body white" x="1177" y="158">需要時到 Approvals 核准</text>
+    <path class="line-soft" d="M 1393 152 L 1452 152"/>
+    <circle cx="1486" cy="152" r="18" fill="#73e0c2"/><text class="number" x="1481" y="158">5</text>
+    <text class="body white" x="1515" y="158">查看結果、狀態與 evidence</text>
+  </g>
+
+  <!-- Section labels -->
+  <text class="section" x="58" y="232">① 從哪裡進入</text>
+  <text class="section" x="520" y="232">② 系統如何處理</text>
+  <text class="section" x="1412" y="232">③ 最後得到什麼</text>
+
+  <!-- Entry column -->
+  <g filter="url(#shadow)">
+    <rect class="box-entry" x="58" y="258" width="420" height="220" rx="24"/>
+  </g>
+  <rect x="82" y="282" width="92" height="28" rx="14" fill="#1a5068"/>
+  <text class="chip" x="101" y="301">主要入口</text>
+  <text class="card-title" x="82" y="342">Control Web｜瀏覽器管理入口</text>
+  <text class="card-subtitle" x="82" y="372">私有 HTTPS / Tailscale + Passkey</text>
+  <text class="body" x="82" y="407">• 新增與追蹤 Goals、取消／重試工作</text>
+  <text class="body" x="82" y="435">• 核准風險操作、建立排程、管理設定</text>
+  <rect x="82" y="449" width="78" height="22" rx="11" fill="#173548"/><text class="tiny" x="98" y="464">Goals</text>
+  <rect x="168" y="449" width="98" height="22" rx="11" fill="#173548"/><text class="tiny" x="181" y="464">Approvals</text>
+  <rect x="274" y="449" width="96" height="22" rx="11" fill="#173548"/><text class="tiny" x="288" y="464">Schedules</text>
+  <circle cx="389" cy="460" r="5" fill="#f6bd60"/>
+  <text class="tiny amber" x="401" y="465">正式同源入口待驗證</text>
+
+  <g filter="url(#shadow)">
+    <rect class="box-pending" x="58" y="500" width="420" height="158" rx="24"/>
+  </g>
+  <rect x="82" y="524" width="92" height="28" rx="14" fill="#4a3a1f"/>
+  <text class="chip amber" x="101" y="543">日常對話</text>
+  <text class="card-title" x="82" y="584">Telegram / Hermes</text>
+  <text class="body" x="82" y="614">聊天、提交 Goal、收通知、查進度與一般核准</text>
+  <text class="tiny amber" x="82" y="640">Hermes connector 的正式環境整合仍待 live evidence</text>
+
+  <g filter="url(#shadow)">
+    <rect class="box" x="58" y="680" width="420" height="152" rx="24"/>
+  </g>
+  <rect x="82" y="704" width="92" height="28" rx="14" fill="#17493e"/>
+  <text class="chip mint" x="101" y="723">自動入口</text>
+  <text class="card-title" x="82" y="765">Schedules / Proactive Triggers</text>
+  <text class="body" x="82" y="795">定時、事件或監控觸發時，一律建立正常 Goal</text>
+  <text class="tiny" x="82" y="819">與手動工作共用同一套 policy、approval 與 audit</text>
+
+  <g filter="url(#shadow)">
+    <rect class="box" x="58" y="854" width="420" height="146" rx="24"/>
+  </g>
+  <rect x="82" y="878" width="92" height="28" rx="14" fill="#1f394c"/>
+  <text class="chip" x="101" y="897">整合入口</text>
+  <text class="card-title" x="82" y="939">REST API</text>
+  <text class="body" x="82" y="968">提供 Web、Hermes 與受信任服務送出 Goal／查詢狀態</text>
+  <text class="tiny" x="82" y="991">所有 mutation 都必須有身分、CSRF／workload auth 與 idempotency</text>
+
+  <!-- Entry arrows -->
+  <path class="line" d="M 478 365 C 500 365 500 326 520 326"/>
+  <path class="line-pending" d="M 478 579 C 506 579 494 486 532 486"/>
+  <path class="line-soft" d="M 478 756 C 510 756 495 610 532 610"/>
+  <path class="line-soft" d="M 478 927 C 518 927 498 722 532 722"/>
+
+  <!-- Security boundary -->
+  <g filter="url(#shadow)">
+    <rect class="box-strong" x="520" y="258" width="850" height="136" rx="24"/>
+  </g>
+  <text class="card-subtitle" x="548" y="288">PRIVATE OWNER BOUNDARY</text>
+  <rect x="548" y="305" width="370" height="66" rx="16" fill="#102a3c" stroke="#397897"/>
+  <text class="card-title" x="572" y="334">AIHomePlatform private edge</text>
+  <text class="small" x="572" y="358">Tailscale／反向代理／同源 routing</text>
+  <path class="line" d="M 918 338 L 975 338"/>
+  <rect x="989" y="305" width="353" height="66" rx="16" fill="#1c2032" stroke="#d491e8"/>
+  <text class="card-title" x="1013" y="334">Identity Gateway</text>
+  <text class="small" x="1013" y="358">Passkey · session · CSRF · step-up</text>
+  <path class="line" d="M 1165 394 L 1165 430"/>
+
+  <!-- Orchestrator core -->
+  <g filter="url(#shadow)">
+    <rect class="box-strong" x="520" y="430" width="850" height="570" rx="28"/>
+  </g>
+  <text class="card-subtitle" x="550" y="465">SINGLE BRAIN · NAS MODULAR MONOLITH</text>
+  <text class="card-title" x="550" y="495">Personal AI Orchestrator</text>
+  <text class="small" x="830" y="493">唯一的 durable goal／plan／task 決策者</text>
+
+  <!-- Orchestrator modules row 1 -->
+  <rect x="550" y="520" width="238" height="112" rx="18" fill="#0d2230" stroke="#3f718a"/>
+  <circle cx="580" cy="550" r="16" fill="#8edcff"/><text class="number" x="575" y="556">1</text>
+  <text class="card-title" x="608" y="557">Goal 入庫</text>
+  <text class="small" x="574" y="586">先持久化，再進行昂貴推理</text>
+  <text class="tiny" x="574" y="611">idempotency · audit event</text>
+
+  <rect x="812" y="520" width="238" height="112" rx="18" fill="#0d2230" stroke="#3f718a"/>
+  <circle cx="842" cy="550" r="16" fill="#8edcff"/><text class="number" x="837" y="556">2</text>
+  <text class="card-title" x="870" y="557">規劃與估算</text>
+  <text class="small" x="836" y="586">目標 → 可驗證 task DAG</text>
+  <text class="tiny" x="836" y="611">planner · replanner · budget</text>
+
+  <rect x="1074" y="520" width="266" height="112" rx="18" fill="#211b27" stroke="#d491e8"/>
+  <circle cx="1104" cy="550" r="16" fill="#d491e8"/><text class="number" x="1099" y="556">3</text>
+  <text class="card-title" x="1132" y="557">Policy / Approval</text>
+  <text class="small" x="1098" y="586">風險、資源、權限與 hard stop</text>
+  <text class="tiny" x="1098" y="611">越界時 checkpoint 並請 owner 核准</text>
+
+  <path class="line-soft" d="M 788 576 L 812 576"/>
+  <path class="line-soft" d="M 1050 576 L 1074 576"/>
+  <path class="line-soft" d="M 1207 632 L 1207 664"/>
+
+  <!-- Orchestrator modules row 2 -->
+  <rect x="550" y="664" width="238" height="112" rx="18" fill="#0d2230" stroke="#3f718a"/>
+  <circle cx="580" cy="694" r="16" fill="#8edcff"/><text class="number" x="575" y="700">4</text>
+  <text class="card-title" x="608" y="701">Durable Task</text>
+  <text class="small" x="574" y="730">scheduler · lease · fence · retry</text>
+  <text class="tiny" x="574" y="755">長任務可 checkpoint / resume</text>
+
+  <rect x="812" y="664" width="238" height="112" rx="18" fill="#0d2230" stroke="#3f718a"/>
+  <circle cx="842" cy="694" r="16" fill="#8edcff"/><text class="number" x="837" y="700">5</text>
+  <text class="card-title" x="870" y="701">Compute Broker</text>
+  <text class="small" x="836" y="730">依品質、quota、成本、能力選路</text>
+  <text class="tiny" x="836" y="755">deterministic · local LLM · Codex</text>
+
+  <rect x="1074" y="664" width="266" height="112" rx="18" fill="#0d2230" stroke="#3f718a"/>
+  <circle cx="1104" cy="694" r="16" fill="#8edcff"/><text class="number" x="1099" y="700">6</text>
+  <text class="card-title" x="1132" y="701">Worker Coordinator</text>
+  <text class="small" x="1098" y="730">能力發現、grant、dispatch、result</text>
+  <text class="tiny" x="1098" y="755">worker 只能回報，不可偷偷擴大 plan</text>
+
+  <path class="line-soft" d="M 1074 720 L 1050 720"/>
+  <path class="line-soft" d="M 812 720 L 788 720"/>
+  <path class="line-soft" d="M 669 632 L 669 664"/>
+
+  <!-- Authority stores inside product stack -->
+  <text class="card-subtitle" x="550" y="813">SEPARATE AUTHORITY STORES</text>
+  <rect x="550" y="832" width="238" height="116" rx="18" fill="#111c27" stroke="#35556a"/>
+  <text class="card-title" x="574" y="866">orchestrator.db</text>
+  <text class="small" x="574" y="894">Goals · plans · tasks · approvals</text>
+  <text class="tiny" x="574" y="922">狀態、事件、lease、audit</text>
+
+  <rect x="812" y="832" width="238" height="116" rx="18" fill="#111c27" stroke="#35556a"/>
+  <text class="card-title" x="836" y="866">Conversation Archive</text>
+  <text class="small" x="836" y="894">原始對話與 retention</text>
+  <text class="tiny" x="836" y="922">conversation.db · export / delete jobs</text>
+
+  <rect x="1074" y="832" width="266" height="116" rx="18" fill="#111c27" stroke="#35556a"/>
+  <text class="card-title" x="1098" y="866">Artifact / Checkpoint Store</text>
+  <text class="small" x="1098" y="894">內容定址的結果與恢復材料</text>
+  <text class="tiny" x="1098" y="922">不是語意 Memory；可攜式 resume fallback</text>
+
+  <rect x="550" y="963" width="790" height="20" rx="10" fill="#0a1721"/>
+  <text class="tiny muted" x="569" y="977">安全邊界：Orchestrator 不持有 NAS root／Docker socket；不繞過 AIHomePlatform 與 root-owned deployment gateway。</text>
+
+  <!-- Results column -->
+  <g filter="url(#shadow)">
+    <rect class="box" x="1412" y="258" width="450" height="220" rx="24"/>
+  </g>
+  <rect x="1438" y="282" width="108" height="28" rx="14" fill="#17493e"/>
+  <text class="chip mint" x="1456" y="301">交付與證據</text>
+  <text class="card-title" x="1438" y="342">可追蹤、可恢復的工作結果</text>
+  <text class="body" x="1438" y="379">• Goal 狀態、task DAG、attempt 與進度</text>
+  <text class="body" x="1438" y="409">• 結果、artifact、checkpoint、驗證證據</text>
+  <text class="body" x="1438" y="439">• 失敗會重試／等待／要求處理，不會假成功</text>
+  <rect x="1438" y="451" width="390" height="16" rx="8" fill="#19382f"/>
+  <rect x="1438" y="451" width="302" height="16" rx="8" fill="#54d6b1" opacity=".85"/>
+
+  <g filter="url(#shadow)">
+    <rect class="box" x="1412" y="500" width="450" height="332" rx="24"/>
+  </g>
+  <text class="card-subtitle" x="1438" y="532">DOMAIN AUTHORITIES｜分工邊界</text>
+  <rect x="1438" y="552" width="398" height="74" rx="16" fill="#102835" stroke="#3f718a"/>
+  <text class="card-title" x="1462" y="580">ContextHub</text>
+  <text class="small" x="1462" y="605">唯一的語意 Memory authority｜檢索、治理、衝突</text>
+
+  <rect x="1438" y="640" width="398" height="74" rx="16" fill="#102835" stroke="#3f718a"/>
+  <text class="card-title" x="1462" y="668">AIHomePlatform</text>
+  <text class="small" x="1462" y="693">基礎設施／release／deployment／rollback 最終權責</text>
+
+  <rect x="1438" y="728" width="398" height="74" rx="16" fill="#211d1b" stroke="#f6bd60" stroke-dasharray="8 6"/>
+  <text class="card-title" x="1462" y="756">Hermes 與外部 Connectors</text>
+  <text class="small" x="1462" y="781">對話與 domain integration｜正式 provider 證據待補</text>
+
+  <g filter="url(#shadow)">
+    <rect class="box-pending" x="1412" y="854" width="450" height="146" rx="24"/>
+  </g>
+  <text class="card-subtitle amber" x="1438" y="885">PERSONAL COMPUTE MESH</text>
+  <text class="card-title" x="1438" y="918">Mac / Windows 執行節點</text>
+  <text class="body" x="1438" y="948">Codex（ChatGPT login）、oMLX、LM Studio、工具／CUA</text>
+  <text class="tiny amber" x="1438" y="978">實體 worker、OS vault 與 provider 能力仍需逐台驗證</text>
+
+  <!-- Core to results/authority arrows -->
+  <path class="line" d="M 1370 462 C 1390 462 1390 368 1412 368"/>
+  <path class="line-soft" d="M 1370 590 L 1412 590"/>
+  <path class="line-soft" d="M 1370 678 L 1412 678"/>
+  <path class="line-pending" d="M 1370 766 L 1412 766"/>
+  <path class="line-pending" d="M 1207 776 C 1207 1018 1380 927 1412 927"/>
+
+  <!-- Footer -->
+  <line x1="58" y1="1060" x2="1862" y2="1060" stroke="#294253"/>
+  <text class="section" x="58" y="1100">新手記住三件事</text>
+  <circle cx="76" cy="1136" r="10" fill="#8edcff"/><text class="body white" x="99" y="1142">日常從 Control Web 進入；高風險動作會要求 Passkey 再驗證。</text>
+  <circle cx="723" cy="1136" r="10" fill="#73e0c2"/><text class="body white" x="746" y="1142">Orchestrator 是唯一大腦，但不取代 Memory 與基礎設施權責系統。</text>
+  <circle cx="1402" cy="1136" r="10" fill="#f6bd60"/><text class="body white" x="1425" y="1142">虛線能力先看成「方向已定、尚未完成 live 驗證」。</text>
+  <text class="tiny muted" x="58" y="1176">PersonalAiControlPlane current repository snapshot · 2026-08-30 · architecture source is editable SVG</text>
+</svg>
