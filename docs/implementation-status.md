@@ -20,19 +20,26 @@ The production Orchestrator startup opens the independent `conversation.db` auth
 
 The local fake-provider path now verifies `goal -> plan -> approval when required -> action grant -> outbound worker -> durable result -> verification -> completion`. Goal detail reconstructs immutable plans, task dependencies, attempts, checkpoints, evidence and reconciliation from REST. Browser mutations obtain a fresh session-bound CSRF token; sensitive approval, policy, capability, worker-revoke and conversation-delete actions perform Passkey step-up. Missing external ports do not consume command outbox rows, and production readiness stays false rather than substituting a permissive fake adapter.
 
+## Live production evidence (2026-08-30)
+
+- Personal AI source commit `060c7ce2580d961a86af70cbd314dec4a14fd9b1` passed CI run `33308375983`. Its commit-bound server image is `sha256:700ffe6275452205efc7fcc36486ef7852b6733bd0cdcf67e5bece0d9354d6dd`, and Control Web is `sha256:e6511fc0ce98ca1a8a6a956ee6bf185d2c4d154fc715f0e84ae46310512a7dc8`. Pin-only commit `014d7616223bcd2e195d84589791fc421880eb3a` passed run `33308589867`.
+- AIHomePlatform edge source commit `67c281554eedaa417154b712c08feb30aee52e2d` passed CI run `33308376916` and release run `33308376939`, publishing `sha256:7ea9bf59182f083ebe5591f46497ea49defb4e2067326760c343635639b5e52e`. Pin-only commit `86a14cfb928101f5f7ab03a7c12a0c25bda8afb0` passed run `33308542614`.
+- Both `PersonalAiControlPlane` and `ai-home-platform` passed root-owned deployment-gateway allowlist lookup, staging validation, deploy, and status. All three Personal AI containers are healthy; AIHomePlatform and its private edge remain healthy.
+- Loopback and tailnet `/health/ready` returned `200`; unauthenticated `/api/v1/goals`, direct `/goals`, and spoofed `x-pai-*` identity headers returned `401 AUTH_REQUIRED`. In the owner's existing Passkey browser session, `/` redirected to `/goals`; Goals and System completed their REST authority synchronization without browser errors.
+- This proves the private owner edge is `live_verified`. It does not promote execution adapters to `provider_verified`: production still reports `providers=not_configured`, `workers=not_configured`, `runtime=not_required` under the compatibility profile, and `backupRestore=not_verified`.
+
 ## External integration and acceptance gates
 
 These adapters cannot be selected or accepted honestly from repository-only evidence. Their absence is reflected in readiness/disabled states; it is not replaced with environment booleans or embedded credentials.
 
 | Gate | Missing external evidence or owner choice | Fail-closed behavior |
 | --- | --- | --- |
-| `DD-01` identity/edge | Production opaque signing-key provider/key handles, Orchestrator workload enrollment, and any live credential migration source inspection | The checked-in AIHomePlatform edge contract routes the canonical origin to login, Control Web, Orchestrator API/SSE, and forward-auth; no raw session secret or client identity header is forwarded |
+| `DD-01` identity/edge | Production opaque signing-key provider/key handles, Orchestrator workload enrollment, and any live credential migration source inspection | The live-verified AIHomePlatform edge routes the canonical origin to login, Control Web, Orchestrator API/SSE, and forward-auth; no raw session secret or client identity header is forwarded |
 | `DD-02` / `DD-03` machine control | Approved enrollment request still needs physical-device OS-vault proof/finalization, outbound transport, approved capability adapters, per-device CUA isolation, and safe wake/sleep proof | Enrollment stops at `AWAITING_WORKER_PROOF`; no physical job, CUA, wake, or automatic sleep grant is issued |
 | `DD-04` / `DD-07` compute | Selected planner/executor adapters, live local-model inventory/quality floors, Codex ChatGPT-login worker, owner human-priority policy, and observed quota behavior | Production Orchestrator runtime readiness remains false; no provider is registered and API-key fallback is prohibited |
 | `DD-05` connectors | Supported ContextHub, Hermes, external-AI connector versions and provider deletion semantics | Connector list/status is visible; run/reauthorize remain explicit `CONNECTOR_NOT_CONFIGURED`, their outbox topics are not consumed, and no external side effect is attempted |
 | `DD-06` data operations | Production Artifact root/ACL, measured NAS pressure thresholds, backup destination, pinned-artifact snapshot, and isolated restore/purge evidence | Archive jobs fail visibly when artifact authority is unavailable; production retention/backup acceptance is not claimed |
-| Control Web edge | CI-published server/web image digests and live tailnet acceptance | The service joins only the AIHomePlatform edge network and the login page redirects authenticated sessions to `/goals`; repository evidence alone does not claim the owner portal is reachable |
-| `DD-08` release/NAS | CI run for the current commit, both immutable image digests, exact AIHomePlatform manifest, exact NAS deployment allowlist ID, gateway validation/deploy/status, and live auth/health/rollback evidence | Compose and the multi-image manifest contract are checked locally; production promotion is blocked |
+| `DD-08` future release/NAS | Every later release still needs a commit-bound CI run, both immutable image digests, exact AIHomePlatform manifest, NAS deployment allowlist ID, gateway validation/deploy/status, and live auth/health/rollback evidence | The 2026-08-30 owner edge release is live-verified; no later source or pin is promoted from repository evidence alone |
 
 ## Verification commands
 
