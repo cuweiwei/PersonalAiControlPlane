@@ -19,6 +19,7 @@ type AppOptions = {
   identityReady?: boolean;
   identityReadyProbe?: () => Promise<boolean>;
   runtimeReady?: boolean | (() => boolean);
+  runtimeRequired?: boolean;
   metrics?: CounterRegistry;
   approvalService?: ApprovalService;
   scheduleService?: ScheduleService;
@@ -165,16 +166,17 @@ async function health(options: AppOptions, kind: "live" | "ready" | "ops"): Prom
   const auditChain = options.engine.verifyAuditChain();
   const identityReady = kind === "live" ? true : await resolveIdentityReady(options);
   const runtimeReady = kind === "live" ? true : typeof options.runtimeReady === "function" ? options.runtimeReady() : options.runtimeReady !== false;
-  const ready = dbCheck?.value === 1 && migration?.version === 6 && auditChain && identityReady && runtimeReady;
+  const runtimeRequired = options.runtimeRequired !== false;
+  const ready = dbCheck?.value === 1 && migration?.version === 6 && auditChain && identityReady && (!runtimeRequired || runtimeReady);
   if (kind === "live") return { status: "ok" };
-  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : "not_ready", schemaVersion: migration?.version ?? null };
+  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required", schemaVersion: migration?.version ?? null };
   return {
     status: ready ? "ok" : "degraded",
     evidenceLevel: "implemented_local",
     database: dbCheck?.value === 1 ? "ok" : "error",
     auditChain: auditChain ? "ok" : "error",
     identity: identityReady ? "ok" : "not_ready",
-    runtime: runtimeReady ? "ok" : "not_ready",
+    runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required",
     schemaVersion: migration?.version ?? null,
     authMode: options.allowUnauthenticated ? "development" : "identity-gateway",
     providers: "not_configured",

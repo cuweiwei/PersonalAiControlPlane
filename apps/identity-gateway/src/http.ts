@@ -92,7 +92,7 @@ export function createIdentityHttpServer(options: IdentityHttpOptions) {
         const adapterReady = options.passkeyAdapterReady === true;
         const grantReady = options.actionGrantService !== undefined;
         const ready = schema?.version === 2 && (process.env.NODE_ENV !== "production" ? true : options.passkeyConfigured && adapterReady && (!options.actionGrantRequired || grantReady));
-        return json(response, ready ? 200 : 503, { status: ready ? "ok" : "not_ready", schemaVersion: schema?.version ?? null, passkey: !options.passkeyConfigured ? "disabled" : adapterReady ? "ready" : "not_wired", actionGrants: grantReady ? "ready" : "not_wired" });
+        return json(response, ready ? 200 : 503, { status: ready ? "ok" : "not_ready", schemaVersion: schema?.version ?? null, passkey: !options.passkeyConfigured ? "disabled" : adapterReady ? "ready" : "not_wired", actionGrants: grantReady ? "ready" : options.actionGrantRequired ? "not_wired" : "not_required" });
       }
       if (request.method === "GET" && path === "/api/v1/action-grant-keys") {
         if (!options.actionGrantService) return json(response, 503, { error: { code: "SIGNING_KEY_UNAVAILABLE", message: "Action-grant signing authority is unavailable", retryable: true } });

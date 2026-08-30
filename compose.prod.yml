@@ -21,6 +21,7 @@ services:
     command: ["node", "--experimental-strip-types", "apps/identity-gateway/src/index.ts"]
     environment:
       NODE_ENV: production
+      PAI_OPERATIONAL_PROFILE: compatibility
       PAI_IDENTITY_PORT: "9084"
       PAI_IDENTITY_DB_PATH: /var/lib/pai/identity.db
       PAI_CANONICAL_ORIGIN: ${PAI_CANONICAL_ORIGIN:?PAI_CANONICAL_ORIGIN is required}
@@ -46,6 +47,7 @@ services:
     user: "106808:106808"
     environment:
       NODE_ENV: production
+      PAI_OPERATIONAL_PROFILE: compatibility
       PAI_PORT: "9085"
       PAI_IDENTITY_HEALTH_URL: http://pai-identity-gateway:9084/health/ready
       PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator.db

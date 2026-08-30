@@ -45,6 +45,8 @@ npm run release:artifact -- --commit <full-commit-sha> --repository <owner/repo>
 
 Production promotion additionally requires both immutable CI-published images, staging upload and gateway validation, deployment-gateway status, loopback/tailnet health, and expected protected-API `401` behavior. Missing gateway registration or external owner evidence is a hard stop, not a reason to bypass the boundary.
 
+`PAI_OPERATIONAL_PROFILE=compatibility` is the recovery profile for a schema-forward deployment when the opaque action-grant authority and execution providers are not yet wired. It keeps those routes fail-closed and reports them as `not_required` for legacy traffic readiness; it does not mark action grants, providers, workers, or external adapters as available. Remove the profile only after their live evidence gates pass.
+
 ## Production owner enrollment
 
 The Identity Gateway's browser entry point is the same HTTPS origin configured as `PAI_CANONICAL_ORIGIN`. The URL must include the port when the Tailscale route uses a non-default HTTPS port; for example:

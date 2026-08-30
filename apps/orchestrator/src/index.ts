@@ -14,6 +14,7 @@ const archiveDbPath = process.env.PAI_CONVERSATION_DB_PATH ?? "./data/conversati
 const artifactRoot = process.env.PAI_ARTIFACT_ROOT ?? "./data/artifacts";
 const lockPath = process.env.PAI_ORCHESTRATOR_LOCK_PATH ?? "./data/orchestrator.lock";
 const allowUnauthenticated = process.env.NODE_ENV !== "production" && process.env.PAI_DEV_ALLOW_UNAUTHENTICATED !== "false";
+const compatibilityProfile = process.env.PAI_OPERATIONAL_PROFILE === "compatibility";
 const identityReady = allowUnauthenticated || process.env.PAI_IDENTITY_READY === "true";
 const identityHealthUrl = process.env.PAI_IDENTITY_HEALTH_URL;
 const bindHost = process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1";
@@ -38,7 +39,7 @@ archiveRuntime.start();
 const identityReadyProbe = !allowUnauthenticated && identityHealthUrl
   ? async () => { const response = await fetch(identityHealthUrl, { signal: AbortSignal.timeout(1_500) }); return response.ok; }
   : undefined;
-const server = createHttpServer({ db, engine, allowUnauthenticated, identityReady, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), archiveService });
+const server = createHttpServer({ db, engine, allowUnauthenticated, identityReady, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService });
 
 const shutdown = () => {
   runtime.stop();

@@ -43,6 +43,29 @@ test("configured Passkey without a wired RP adapter remains not ready in product
   }
 });
 
+test("compatibility profile keeps action grants unavailable without blocking Passkey readiness", async () => {
+  const previous = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  const db = new IdentityDatabase(":memory:");
+  const identity = new IdentityService(db);
+  const adapter = new PasskeyRpAdapter({ db, identity, rpName: "Personal AI Control Plane", rpId: "pai.example.test", expectedOrigin: "https://pai.example.test" });
+  const server = createIdentityHttpServer({ db, identity, passkeyConfigured: true, passkeyAdapterReady: true, passkeyAdapter: adapter, canonicalOrigin: "https://pai.example.test", actionGrantRequired: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind");
+  try {
+    const ready = await fetch(`http://127.0.0.1:${address.port}/health/ready`);
+    assert.equal(ready.status, 200);
+    assert.equal((await ready.json()).actionGrants, "not_required");
+    const grants = await fetch(`http://127.0.0.1:${address.port}/api/v1/action-grant-keys`);
+    assert.equal(grants.status, 503);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    db.close();
+    if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous;
+  }
+});
+
 test("forward-auth validates the session cookie and emits only gateway-owned identity headers", async () => {
   const db = new IdentityDatabase(":memory:");
   const identity = new IdentityService(db);

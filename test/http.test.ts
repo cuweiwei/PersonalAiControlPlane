@@ -129,6 +129,22 @@ test("production-style auth rejection is fail-closed", async () => {
   });
 });
 
+test("compatibility profile reports unavailable runtime as not required", async () => {
+  const db = new OrchestratorDatabase(":memory:");
+  const server = createHttpServer({ db, engine: new TaskEngine(db), allowUnauthenticated: false, identityReady: true, runtimeReady: false, runtimeRequired: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("test server did not bind");
+  try {
+    const readiness = await fetch(`http://127.0.0.1:${address.port}/health/ready`);
+    assert.equal(readiness.status, 200);
+    assert.equal((await readiness.json()).runtime, "not_required");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    db.close();
+  }
+});
+
 test("connected Conversation Archive exposes owner read projections", async () => {
   const db = new OrchestratorDatabase(":memory:");
   const archiveDb = new ArchiveDatabase(":memory:");
