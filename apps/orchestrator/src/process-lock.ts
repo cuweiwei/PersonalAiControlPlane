@@ -17,7 +17,10 @@ export class ProcessLock {
     } catch (error) {
       if (!existsSync(`${this.path}/pid`)) throw error;
       const pid = Number.parseInt(readFileSync(`${this.path}/pid`, "utf8"), 10);
-      if (Number.isInteger(pid) && pid > 0) {
+      // Container PID namespaces commonly reuse PID 1 after a recreate. A lock
+      // that names this fresh process cannot have been acquired by this
+      // ProcessLock instance, so treat it as stale instead of self-blocking.
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
         try {
           process.kill(pid, 0);
           throw new Error(`ORCHESTRATOR_ALREADY_RUNNING:${pid}`);
