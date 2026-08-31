@@ -18,6 +18,15 @@ test("Control Web renders owner read projections with semantic navigation and ev
   assert.match(markup, /role="status"/);
 });
 
+test("Worker tab exposes enrollment, status, provider, and lifecycle controls", () => {
+  const markup = renderToStaticMarkup(React.createElement(App, { initialPath: "/workers" }));
+  assert.match(markup, /新增 Worker/);
+  assert.match(markup, /Worker public key（PEM）/);
+  assert.match(markup, /建立 enrollment request/);
+  assert.match(markup, /Enrollment requests/);
+  assert.match(markup, /LLM \/ Provider/);
+});
+
 test("Control Web exposes one portal entry while preserving service authority boundaries", () => {
   const home = renderToStaticMarkup(React.createElement(App, { initialPath: "/home" }));
   const systems = renderToStaticMarkup(React.createElement(App, { initialPath: "/systems" }));

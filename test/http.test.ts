@@ -249,9 +249,14 @@ test("owner management API exposes safe projections and keeps external adapters 
     const drained = await fetch(`${baseUrl}/api/v1/workers/worker-1/drain`, { method: "POST" });
     assert.equal(drained.status, 202);
     assert.equal((await drained.json()).drainState, "DRAINING");
-    const revoked = await fetch(`${baseUrl}/api/v1/workers/worker-1/revoke`, { method: "POST", headers: { "x-pai-auth-time": String(now) } });
-    assert.equal(revoked.status, 200);
-    assert.equal((await revoked.json()).trustState, "REVOKED");
+    const unsteppedDelete = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "DELETE" });
+    assert.equal(unsteppedDelete.status, 403);
+    assert.equal((await unsteppedDelete.json()).error.code, "STEP_UP_REQUIRED");
+    const deleted = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(deleted.status, 200);
+    assert.equal((await deleted.json()).retention, "historical-evidence-preserved");
+    const retained = await fetch(`${baseUrl}/api/v1/workers/worker-1`);
+    assert.equal((await retained.json()).trustState, "REVOKED");
 
     const { publicKey } = generateKeyPairSync("ed25519");
     const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -260,9 +265,19 @@ test("owner management API exposes safe projections and keeps external adapters 
     const enrollment = await enrollmentResponse.json();
     assert.equal(typeof enrollment.challenge, "string");
     assert.notEqual(db.one<{ challenge_hash: string }>("SELECT challenge_hash FROM worker_enrollment_requests WHERE id = ?", enrollment.id)?.challenge_hash, enrollment.challenge);
+    const enrollmentList = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests`);
+    assert.equal(enrollmentList.status, 200);
+    assert.equal((await enrollmentList.json()).items[0].id, enrollment.id);
+    const secondKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+    const secondEnrollment = await (await fetch(`${baseUrl}/api/v1/workers/enrollment-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicKeyPem: secondKey, deviceSummary: { name: "Cancelled Laptop", platform: "macOS" } }) })).json();
+    const cancelled = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${secondEnrollment.id}`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json()).status, "REJECTED");
     const approved = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${enrollment.id}/approve`, { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(now) }, body: JSON.stringify({ fingerprint: enrollment.fingerprint }) });
     assert.equal(approved.status, 200);
     assert.equal((await approved.json()).next, "AWAITING_WORKER_PROOF");
+    const approvedList = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests?status=APPROVED`);
+    assert.equal((await approvedList.json()).items[0].status, "APPROVED");
 
     const policy = await fetch(`${baseUrl}/api/v1/policies`, { method: "PATCH", headers: { "content-type": "application/json", "x-pai-auth-time": String(now) }, body: JSON.stringify({ autonomy: { personal: "notify" }, hardStops: ["deployment"] }) });
     assert.equal(policy.status, 201);

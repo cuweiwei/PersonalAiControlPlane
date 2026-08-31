@@ -123,12 +123,28 @@ Schedule 不會直接執行工具；每次觸發都會建立普通 Goal，並重
 
 ### 4.5 查看或管理 Workers
 
-**Workers** 顯示已註冊裝置、trust state、heartbeat、drain state 與 capabilities。
+**Workers** 是 worker 的集中管理頁，包含 enrollment、連線狀態、能力、provider 與生命週期操作。
+
+新增 worker：
+
+1. 先在 worker 裝置產生 Ed25519 key pair；私鑰留在該裝置的 OS vault。
+2. 在 **Workers → 新增 Worker** 輸入名稱、平台與 worker public key PEM。
+3. 建立 enrollment request 後，核對畫面上的 fingerprint。
+4. 在 **Enrollment requests** 按「Passkey 核准此 Worker」。
+5. 核准後仍要等待 worker proof 與 heartbeat；`APPROVED` 不等於已可派工。
+6. 若 fingerprint 不正確或不再需要，可在同一張 request 卡片按「取消 request」。
+
+Worker 卡片會顯示：
+
+- 連線：`ONLINE`、`STALE` 或 `NO_HEARTBEAT`。
+- 信任與派工狀態：`TRUSTED`、`DRAINING`、`DRAINED` 或 `REVOKED`。
+- 已發現的 capability 及其 `GRANTED` / `REVIEW_REQUIRED` 狀態。
+- 綁定的 LLM / provider；沒有 provider 只能表示尚未驗證，不能直接宣稱是 LLM worker。
 
 - **Drain**：停止派發新工作，讓現有工作安全收尾。
 - **Wake**：要求喚醒 worker；如果尚未接上 accepted wake adapter，系統會明確回報不可用。
 - **Passkey grant capability**：核准該 worker 的特定 capability。系統會綁定目前的 descriptor hash，避免能力內容變更後沿用舊核准。
-- **Passkey 撤銷 Worker**：撤銷 worker 與其 capabilities，屬安全敏感操作。
+- **Passkey 刪除 Worker**：安全撤銷 worker 與其 capabilities；這是 logical delete，會保留歷史 attempt、audit 與 evidence。仍有執行中工作時，系統會回報 `WORKER_BUSY`，必須先 Drain 並等待工作結束。
 
 「worker 宣告發現某能力」不等於「該能力已授權」。如果沒有實體 worker、OS vault 或 capability adapter 的 live evidence，不要把列表中的 proposal 當成可執行能力。
 
@@ -224,6 +240,8 @@ Goal 或 task detail 可能出現以下狀態：
 | Passkey step-up cancelled/expired | 敏感操作的再次驗證未完成 | 重新整理並再次操作；先確認 scope 沒有變更 |
 | `STATE_CONFLICT` | 畫面上的 state version 已過期 | 重新整理 authority projection，不要重複送出 |
 | `WAKE_ADAPTER_NOT_CONFIGURED` | 尚未接上可接受的喚醒能力 | 不要繞過；先完成 worker/wake integration evidence |
+| `WORKER_BUSY` | Worker 仍有執行中的 attempt | 先按 Drain，等待工作進入終態後再刪除 |
+| `AWAITING_WORKER_PROOF` | Owner 已核准 enrollment，但裝置 proof/heartbeat 尚未完成 | 等待正式 worker runtime；不要手動修改 database |
 | `CONNECTOR_NOT_CONFIGURED` | connector 只有契約，尚無 live adapter | 等待正式整合，不要反覆重試 |
 | `ARCHIVE_NOT_CONNECTED` | Conversation Archive authority 未連接 | 查看 **System** 與部署狀態 |
 | `503 not_ready` | 必要的 identity、provider、worker 或外部 authority 尚未就緒 | 先確認 **System** 與 [Implementation Status](implementation-status.md) |

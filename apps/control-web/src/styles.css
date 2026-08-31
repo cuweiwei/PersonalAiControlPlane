@@ -74,6 +74,17 @@ footer { padding: 1.5rem; color: #91a4b1; text-align: center; }
 .status-pill.good { color: #aaf0d2; background: #153a31; }
 .status-pill.warn { color: #ffe09c; background: #47371b; }
 .status-pill.bad { color: #ffb6bd; background: #4b2228; }
+.worker-management { margin-block: 1rem 2rem; }
+.worker-help { color: #b6c7d2; line-height: 1.55; }
+.worker-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin-block: 1rem; }
+.worker-status-grid > div { display: grid; gap: .3rem; padding: .65rem; background: #0b151c; border: 1px solid #263d4c; border-radius: .6rem; }
+.worker-status-grid span { color: #91a8b7; font-size: .78rem; }
+.worker-status-grid strong { overflow-wrap: anywhere; font-size: .82rem; }
+.worker-capabilities, .worker-providers { color: #b6c7d2; line-height: 1.5; }
+.worker-capabilities strong, .worker-providers strong { color: #eef4f8; }
+.worker-revoked { display: flex; align-items: center; justify-content: space-between; gap: .7rem; margin: 1rem 0 0; color: #ffb6bd; }
+.enrollment-result p { margin: .4rem 0 0; overflow-wrap: anywhere; }
+.enrollment-card dl { margin-top: .9rem; }
 .section-heading.compact { margin-top: 2rem; }
 .infrastructure-card p { color: #b6c7d2; }
 .service-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); gap: 1rem; margin-block: 1rem 1.5rem; }
@@ -94,5 +105,5 @@ footer { padding: 1.5rem; color: #91a4b1; text-align: center; }
 .memory-card > p { color: #c3d0d8; white-space: pre-wrap; line-height: 1.58; }
 .memory-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .7rem; color: #8fa4b2; font-size: .82rem; }
 @media (max-width: 1050px) { .portal-header { align-items: stretch; flex-wrap: wrap; } .primary-nav { order: 3; width: 100%; } .more-nav { order: 4; } .metric-grid, .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 700px) { header { align-items: stretch; flex-direction: column; } nav a { flex: 1 1 42%; text-align: center; } .portal-header { position: static; } .primary-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } .more-nav { width: 100%; } .more-nav nav { position: static; width: 100%; margin-top: .5rem; } .portal-hero { align-items: stretch; flex-direction: column; } .hero-actions { min-width: 0; } .metric-grid, .quick-grid, .memory-metrics { grid-template-columns: 1fr; } .memory-toolbar { grid-template-columns: 1fr; } .section-heading { align-items: stretch; flex-direction: column; } .section-heading button, .actions button { width: 100%; } dl { grid-template-columns: 1fr; } dd { margin-bottom: .55rem; } }
+@media (max-width: 700px) { header { align-items: stretch; flex-direction: column; } nav a { flex: 1 1 42%; text-align: center; } .portal-header { position: static; } .primary-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } .more-nav { width: 100%; } .more-nav nav { position: static; width: 100%; margin-top: .5rem; } .portal-hero { align-items: stretch; flex-direction: column; } .hero-actions { min-width: 0; } .metric-grid, .quick-grid, .memory-metrics, .worker-status-grid { grid-template-columns: 1fr; } .memory-toolbar { grid-template-columns: 1fr; } .section-heading { align-items: stretch; flex-direction: column; } .section-heading button, .actions button { width: 100%; } dl { grid-template-columns: 1fr; } dd { margin-bottom: .55rem; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }

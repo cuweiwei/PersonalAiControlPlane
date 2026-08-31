@@ -123,6 +123,32 @@ function StatusPill({ value }: { value: unknown }) {
   return h("span", { className: `status-pill ${stateClass(value)}` }, text(value));
 }
 
+function timestamp(value: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? new Date(numeric).toLocaleString("zh-TW") : text(value);
+}
+
+function workerConnectionState(item: Item): string {
+  if (text(item.trustState) === "REVOKED") return "REVOKED";
+  const staleAt = Number(item.staleAt);
+  if (Number.isFinite(staleAt) && staleAt > 0 && staleAt <= Date.now()) return "STALE";
+  if (item.lastHeartbeatAt === null || item.lastHeartbeatAt === undefined || !Number.isFinite(Number(item.lastHeartbeatAt))) return "NO_HEARTBEAT";
+  return "ONLINE";
+}
+
+function WorkerSummary({ item, providers = [] }: { item: Item; providers?: Item[] }) {
+  const capabilities = Array.isArray(item.capabilities) ? item.capabilities as Item[] : [];
+  const workerProviders = providers.filter((provider) => text(provider.workerId) === text(item.id));
+  return h(React.Fragment, null,
+    h("div", { className: "worker-status-grid" },
+      h("div", null, h("span", null, "連線"), h(StatusPill, { value: workerConnectionState(item) })),
+      h("div", null, h("span", null, "信任"), h(StatusPill, { value: item.trustState })),
+      h("div", null, h("span", null, "派工"), h(StatusPill, { value: item.drainState })),
+      h("div", null, h("span", null, "Heartbeat"), h("strong", null, timestamp(item.lastHeartbeatAt)))),
+    h("p", { className: "worker-capabilities" }, h("strong", null, "Capabilities："), capabilities.length ? capabilities.map((capability) => `${text(capability.kind)} · ${text(capability.grantState)}`).join("、") : "尚未發現能力"),
+    h("p", { className: "worker-providers" }, h("strong", null, "LLM / Provider："), workerProviders.length ? workerProviders.map((provider) => `${text(provider.class)}${nested(provider, "descriptor", "modelId") ? ` · ${text(nested(provider, "descriptor", "modelId"))}` : ""} · ${text(provider.status)}`).join("、") : "尚未驗證 provider；可能是 tool-only worker"));
+}
+
 function IntegrationNotice({ title, detail }: { title: string; detail: string }) {
   return h("aside", { className: "integration-notice" }, h("strong", null, title), h("p", null, detail));
 }
@@ -139,7 +165,23 @@ function DetailFields({ item }: { item: Item }) {
   return h("dl", null, Object.entries(item).filter(([, value]) => value !== undefined).flatMap(([key, value]) => [h("dt", { key: `${key}:label` }, key), h("dd", { key }, text(value))]));
 }
 
-function ItemCard({ item, view, onRefresh }: { item: Item; view: View; onRefresh(): void }) {
+function WorkerActionButtons({ item, onRefresh }: { item: Item; onRefresh(): void }) {
+  const id = text(item.id);
+  const capabilities = Array.isArray(item.capabilities) ? item.capabilities as Item[] : [];
+  const active = text(item.trustState) !== "REVOKED";
+  const run = async (label: string, path: string, method: "POST" | "DELETE", body?: Item, stepUpRequired = false) => {
+    if (["刪除", "撤銷"].includes(label) && !window.confirm(`${label}會撤銷 worker 並保留歷史證據，確定繼續？`)) return;
+    try { await mutate(path, { method, body, stepUpRequired }); onRefresh(); } catch (error) { reportError(error); }
+  };
+  if (!active) return h("p", { className: "worker-revoked" }, "Worker 已撤銷，歷史 evidence 已保留。", h(StatusPill, { value: item.trustState }));
+  return h("div", { className: "actions worker-actions" },
+    text(item.drainState) === "DRAINED" ? null : h("button", { type: "button", onClick: () => void run("Drain", `/api/v1/workers/${encodeURIComponent(id)}/drain`, "POST") }, "Drain"),
+    h("button", { type: "button", onClick: () => void run("Wake", `/api/v1/workers/${encodeURIComponent(id)}/wake`, "POST") }, "Wake"),
+    h("button", { type: "button", className: "danger", onClick: () => void run("刪除", `/api/v1/workers/${encodeURIComponent(id)}`, "DELETE", undefined, true) }, "Passkey 刪除 Worker"),
+    capabilities.filter((capability) => text(capability.grantState) !== "GRANTED").map((capability) => h("button", { type: "button", key: text(capability.id), onClick: () => void run("Grant", `/api/v1/workers/${encodeURIComponent(id)}/capabilities/${encodeURIComponent(text(capability.id))}/grant`, "POST", { descriptorHash: capability.descriptorHash as string }, true) }, `Passkey grant ${text(capability.kind)}`)));
+}
+
+function ItemCard({ item, view, onRefresh, workerProviders = [] }: { item: Item; view: View; onRefresh(): void; workerProviders?: Item[] }) {
   const id = text(item.id ?? item.goalId ?? item.connector);
   const detail = ["goals", "approvals", "schedules", "workers", "conversations"].includes(view.key) && item.id;
   const action = async (label: string, path: string, method: "POST" | "PATCH" | "DELETE", body?: Item, sensitive = false) => {
@@ -156,7 +198,49 @@ function ItemCard({ item, view, onRefresh }: { item: Item; view: View; onRefresh
     buttons.push(h("button", { type: "button", key: "run", onClick: () => void action("同步", `/api/v1/connectors/${encodeURIComponent(text(item.connector))}/run`, "POST") }, "同步"));
     buttons.push(h("button", { type: "button", key: "reauthorize", onClick: () => void action("重新授權", `/api/v1/connectors/${encodeURIComponent(text(item.connector))}/reauthorize`, "POST") }, "重新授權"));
   }
-  return h("article", { className: "card" }, h("h3", null, detail ? h("a", { href: `/${view.key}/${id}` }, itemTitle(item)) : itemTitle(item)), h(DetailFields, { item }), buttons.length ? h("div", { className: "actions" }, buttons) : null);
+  return h("article", { className: "card" }, h("h3", null, detail ? h("a", { href: `/${view.key}/${id}` }, itemTitle(item)) : itemTitle(item)), view.key === "workers" ? h(WorkerSummary, { item, providers: workerProviders }) : h(DetailFields, { item }), buttons.length ? h("div", { className: "actions" }, buttons) : null, view.key === "workers" ? h(WorkerActionButtons, { item, onRefresh }) : null);
+}
+
+function WorkerComposer({ onRefresh }: { onRefresh(): void }) {
+  const [name, setName] = useState("");
+  const [platform, setPlatform] = useState("macOS");
+  const [architecture, setArchitecture] = useState("");
+  const [publicKeyPem, setPublicKeyPem] = useState("");
+  const [result, setResult] = useState<Item | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    void mutate("/api/v1/workers/enrollment-requests", { method: "POST", body: { publicKeyPem: publicKeyPem.trim(), deviceSummary: { name: name.trim(), platform, ...(architecture.trim() ? { architecture: architecture.trim() } : {}) } } }).then((body) => { setResult(body); setPublicKeyPem(""); onRefresh(); }).catch(reportError).finally(() => setSubmitting(false));
+  };
+  return h("section", { className: "worker-management", "aria-labelledby": "worker-add-title" },
+    h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER ENROLLMENT"), h("h3", { id: "worker-add-title" }, "新增 Worker"))),
+    h("p", { className: "worker-help" }, "Worker 先在自己的裝置產生 key pair；這裡只提交 public key。私鑰不可貼上來，也不會由 Portal 代管。"),
+    h("p", { className: "worker-help" }, "Worker 卡片會顯示 LLM / Provider 證據；沒有 provider 時，只能先視為尚未驗證，不能直接宣稱是 LLM worker。"),
+    h("form", { className: "editor", onSubmit: submit },
+      h("label", null, "名稱", h("input", { value: name, required: true, placeholder: "例如：MacBook Worker", onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value) })),
+      h("label", null, "平台", h("select", { value: platform, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setPlatform(event.target.value) }, h("option", { value: "macOS" }, "macOS"), h("option", { value: "Windows" }, "Windows"))),
+      h("label", null, "架構（選填）", h("input", { value: architecture, placeholder: "例如：arm64", onChange: (event: React.ChangeEvent<HTMLInputElement>) => setArchitecture(event.target.value) })),
+      h("label", null, "Worker public key（PEM）", h("textarea", { value: publicKeyPem, required: true, rows: 7, placeholder: "-----BEGIN PUBLIC KEY-----", onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setPublicKeyPem(event.target.value) })),
+      h("button", { type: "submit", disabled: submitting }, submitting ? "建立中…" : "建立 enrollment request")),
+    result ? h("aside", { className: "notice ready enrollment-result", role: "status" }, h("strong", null, "Enrollment request 已建立"), h("p", null, `Fingerprint：${text(result.fingerprint)}`), h("p", null, `目前狀態：${text(result.status)}；Owner 核准後仍需 worker proof。`)) : null);
+}
+
+function EnrollmentRequestCard({ item, onRefresh }: { item: Item; onRefresh(): void }) {
+  const summary = item.deviceSummary && typeof item.deviceSummary === "object" ? item.deviceSummary as Item : {};
+  const approve = () => {
+    if (!window.confirm("請確認畫面上的 fingerprint 與 worker 裝置一致，再進行 Passkey 核准。")) return;
+    void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}/approve`, { method: "POST", body: { fingerprint: text(item.fingerprint) }, stepUpRequired: true }).then(onRefresh).catch(reportError);
+  };
+  const cancel = () => {
+    if (!window.confirm("取消後此 enrollment request 將不能再核准，確定繼續？")) return;
+    void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}`, { method: "DELETE", stepUpRequired: true }).then(onRefresh).catch(reportError);
+  };
+  return h("article", { className: "card enrollment-card" },
+    h("div", { className: "card-title-row" }, h("div", null, h("h3", null, text(summary.name ?? item.id)), h("p", { className: "service-id" }, text(summary.platform))), h(StatusPill, { value: item.status })),
+    h("dl", null, h("dt", null, "Fingerprint"), h("dd", null, text(item.fingerprint)), h("dt", null, "Expires"), h("dd", null, timestamp(item.expiresAt))),
+    item.status === "PENDING" ? h("div", { className: "actions" }, h("button", { type: "button", onClick: approve }, "Passkey 核准此 Worker"), h("button", { type: "button", className: "danger", onClick: cancel }, "取消 request")) : item.status === "APPROVED" ? h("p", { className: "worker-help" }, "已核准，等待 worker proof；尚未成為可派工 worker。") : null);
 }
 
 function GoalComposer({ onRefresh }: { onRefresh(): void }) {
@@ -195,8 +279,7 @@ function DetailActions({ view, item, onRefresh }: { view: View; item: Item; onRe
   if (view.key === "approvals" && item.status === "OPEN") return h(ApprovalEditor, { item, onRefresh });
   if (view.key === "schedules") return h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("暫停", `/api/v1/schedules/${id}/pause`, "POST") }, "暫停"), h("button", { type: "button", onClick: () => void run("立即執行", `/api/v1/schedules/${id}/run`, "POST") }, "立即執行"));
   if (view.key === "workers") {
-    const capabilities = Array.isArray(item.capabilities) ? item.capabilities as Item[] : [];
-    return h(React.Fragment, null, h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("Drain", `/api/v1/workers/${id}/drain`, "POST") }, "Drain"), h("button", { type: "button", onClick: () => void run("Wake", `/api/v1/workers/${id}/wake`, "POST") }, "Wake（需 adapter）"), h("button", { type: "button", className: "danger", onClick: () => void run("撤銷", `/api/v1/workers/${id}/revoke`, "POST", undefined, true) }, "Passkey 撤銷 Worker")), capabilities.map((capability) => h("button", { type: "button", key: text(capability.id), onClick: () => void run("Grant", `/api/v1/workers/${id}/capabilities/${text(capability.id)}/grant`, "POST", { descriptorHash: capability.descriptorHash as string }, true) }, `Passkey grant ${text(capability.kind)}`)));
+    return h(WorkerActionButtons, { item, onRefresh });
   }
   if (view.key === "conversations") return h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("匯出", `/api/v1/conversations/${id}/export`, "POST") }, "建立匯出 Job"), h("button", { type: "button", className: "danger", onClick: () => void run("刪除", `/api/v1/conversations/${id}`, "DELETE", { reason: "owner portal deletion", blockFuture: true }, true) }, "Passkey 刪除與 purge"));
   return null;
@@ -204,22 +287,25 @@ function DetailActions({ view, item, onRefresh }: { view: View; item: Item; onRe
 
 function detailRequests(view: View, id: string): Promise<Item> {
   if (view.key === "goals") return Promise.all([jsonRequest(`/api/v1/goals/${id}`), jsonRequest(`/api/v1/goals/${id}/plans`), jsonRequest(`/api/v1/goals/${id}/tasks`), jsonRequest(`/api/v1/goals/${id}/events`)]).then(([goal, plans, tasks, events]) => ({ ...goal, plans: plans.items, tasks: tasks.items, events: events.items }));
+  if (view.key === "workers") return Promise.all([jsonRequest(`${view.endpoint}/${encodeURIComponent(id)}`), jsonRequest("/api/v1/compute/providers")]).then(([worker, providers]) => ({ ...worker, providers: items(providers).filter((provider) => text(provider.workerId) === id) }));
   return jsonRequest(`${view.endpoint}/${encodeURIComponent(id)}`);
 }
 
 function ResourceView({ view, id }: { view: View; id?: string }) {
-  const [items, setItems] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [state, setState] = useState<ResourceState>("loading"); const [message, setMessage] = useState("正在讀取 authority projection…");
+  const [resourceItems, setResourceItems] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [enrollmentRequests, setEnrollmentRequests] = useState<Item[]>([]); const [workerProviders, setWorkerProviders] = useState<Item[]>([]); const [state, setState] = useState<ResourceState>("loading"); const [message, setMessage] = useState("正在讀取 authority projection…");
   const refresh = useCallback(async () => {
     setState("loading"); setMessage("正在讀取 authority projection…");
     try {
-      if (id) { const value = await detailRequests(view, id); setDetail(value); setItems([]); }
-      else { const body = view.key === "compute" ? await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/compute/routes")]).then(([providers, routes]) => ({ items: [...(providers.items as Item[] ?? []), { id: "effective-routes", ...routes }] })) : await jsonRequest(view.endpoint); const next = Array.isArray(body.items) ? body.items.filter((item): item is Item => Boolean(item) && typeof item === "object") : view.key === "system" ? [body] : []; setItems(next); setDetail(null); }
+      if (id) { const value = await detailRequests(view, id); setDetail(value); setResourceItems([]); setEnrollmentRequests([]); setWorkerProviders(items(value.providers)); }
+      else if (view.key === "workers") { const [body, requests, providers] = await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/workers/enrollment-requests"), jsonRequest("/api/v1/compute/providers")]); setResourceItems(items(body)); setEnrollmentRequests(items(requests)); setWorkerProviders(items(providers)); setDetail(null); }
+      else { const body = view.key === "compute" ? await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/compute/routes")]).then(([providers, routes]) => ({ items: [...(providers.items as Item[] ?? []), { id: "effective-routes", ...routes }] })) : await jsonRequest(view.endpoint); const next = Array.isArray(body.items) ? body.items.filter((item): item is Item => Boolean(item) && typeof item === "object") : view.key === "system" ? [body] : []; setResourceItems(next); setEnrollmentRequests([]); setWorkerProviders([]); setDetail(null); }
       setState("ready"); setMessage("已從目前 authority 重建；SSE/polling 不取代 REST truth。");
     } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "讀取失敗"); }
   }, [id, view]);
   useEffect(() => { void refresh(); }, [refresh]);
-  const editor = !id && view.key === "goals" ? h(GoalComposer, { onRefresh: refresh }) : !id && view.key === "schedules" ? h(ScheduleComposer, { onRefresh: refresh }) : !id && view.key === "policies" ? h(PolicyEditor, { onRefresh: refresh }) : null;
-  return h("section", { "aria-labelledby": "view-title" }, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "OWNER-SAFE AUTHORITY PROJECTION"), h("h2", { id: "view-title" }, `${view.label}${id ? " detail" : ""}`)), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")), h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status", "aria-live": "polite" }, message), editor, state === "ready" && !id && items.length === 0 ? h("p", { className: "empty" }, view.empty) : null, detail ? h("article", { className: "card detail-card" }, h("h3", null, itemTitle(detail)), h(DetailFields, { item: detail }), h(DetailActions, { view, item: detail, onRefresh: refresh })) : h("div", { className: "card-grid" }, items.map((item, index) => h(ItemCard, { item, view, onRefresh: refresh, key: text(item.id ?? item.goalId ?? index) }))));
+  const editor = !id && view.key === "goals" ? h(GoalComposer, { onRefresh: refresh }) : !id && view.key === "schedules" ? h(ScheduleComposer, { onRefresh: refresh }) : !id && view.key === "policies" ? h(PolicyEditor, { onRefresh: refresh }) : !id && view.key === "workers" ? h(WorkerComposer, { onRefresh: refresh }) : null;
+  const enrollmentPanel = !id && view.key === "workers" ? h("section", { "aria-labelledby": "enrollment-title" }, h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "PENDING TRUST"), h("h3", { id: "enrollment-title" }, "Enrollment requests"))), enrollmentRequests.length ? h("div", { className: "card-grid" }, enrollmentRequests.map((item) => h(EnrollmentRequestCard, { item, onRefresh: refresh, key: text(item.id) }))) : h("p", { className: "empty" }, "目前沒有 enrollment requests。")) : null;
+  return h("section", { "aria-labelledby": "view-title" }, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "OWNER-SAFE AUTHORITY PROJECTION"), h("h2", { id: "view-title" }, `${view.label}${id ? " detail" : ""}`)), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")), h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status", "aria-live": "polite" }, message), editor, enrollmentPanel, state === "ready" && !id && resourceItems.length === 0 ? h("p", { className: "empty" }, view.empty) : null, detail ? h("article", { className: "card detail-card" }, h("h3", null, itemTitle(detail)), view.key === "workers" ? h(WorkerSummary, { item: detail, providers: items(detail.providers) }) : h(DetailFields, { item: detail }), h(DetailActions, { view, item: detail, onRefresh: refresh })) : h("div", { className: "card-grid" }, resourceItems.map((item, index) => h(ItemCard, { item, view, onRefresh: refresh, workerProviders, key: text(item.id ?? item.goalId ?? index) }))));
 }
 
 function PortalHome() {
