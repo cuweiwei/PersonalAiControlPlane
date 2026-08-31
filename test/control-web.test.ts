@@ -77,6 +77,7 @@ test("production Compose connects each process to the AIHomePlatform-owned priva
   const compose = readFileSync(new URL("../compose.prod.yml", import.meta.url), "utf8");
   assert.match(compose, /name: ai-home-platform_edge/);
   for (const alias of ["pai-edge-control-web", "pai-edge-identity", "pai-edge-orchestrator"]) assert.match(compose, new RegExp(`- ${alias}`));
+  assert.match(compose, /PAI_CANONICAL_ORIGIN: https:\/\/gnest\.taila77e5f\.ts\.net(?:\r?\n)/);
   assert.doesNotMatch(compose, /127\.0\.0\.1:9084:9084/);
   assert.match(compose, /127\.0\.0\.1:9083:8080/);
   assert.match(compose, /127\.0\.0\.1:9085:9085/);

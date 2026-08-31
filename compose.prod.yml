@@ -29,7 +29,7 @@ services:
       PAI_OPERATIONAL_PROFILE: compatibility
       PAI_IDENTITY_PORT: "9084"
       PAI_IDENTITY_DB_PATH: /var/lib/pai/identity.db
-      PAI_CANONICAL_ORIGIN: ${PAI_CANONICAL_ORIGIN:?PAI_CANONICAL_ORIGIN is required}
+      PAI_CANONICAL_ORIGIN: https://gnest.taila77e5f.ts.net
       PAI_WEBAUTHN_RP_ID: ${PAI_WEBAUTHN_RP_ID:?PAI_WEBAUTHN_RP_ID is required}
       PAI_WEBAUTHN_RP_NAME: ${PAI_WEBAUTHN_RP_NAME:-Personal AI Control Plane}
       # The token is only used for the first owner registration and must stay
