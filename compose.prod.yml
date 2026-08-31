@@ -21,7 +21,11 @@ services:
       # in the root-controlled production .env. It is never committed or logged.
       PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
       PAI_PORT: "9085"
-      PAI_MEMORY_ORIGIN: http://host.docker.internal:8788
+      # ContextHub keeps its Tailscale-facing 8788 listener loopback-only. The
+      # separate Docker-bridge ingress is private container-to-host plumbing;
+      # ContextHub still enforces the forwarded personal-ai principal and
+      # safe-method-only contract.
+      PAI_MEMORY_ORIGIN: http://host.docker.internal:18788
       PAI_IDENTITY_HEALTH_URL: http://127.0.0.1:9084/health/ready
       PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator/orchestrator.db
       PAI_CONVERSATION_DB_PATH: /var/lib/pai/orchestrator/conversation.db

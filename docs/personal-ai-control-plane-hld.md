@@ -14,7 +14,7 @@ The Personal AI Control Plane will be a new, independently versioned product and
 
 ### Current superseding decision (2026-08-31)
 
-The separation decision supersedes the original shared-edge deployment described below. Personal AI owns the complete private entry runtime inside its single non-root container. Tailscale HTTPS `:443` targets NAS loopback `127.0.0.1:9084`, which publishes the container edge listener on `8081`; the edge routes Identity/Passkey, Control Web, Orchestrator/SSE, signed Worker HTTP/WebSocket, and the safe-method ContextHub Memory projection. AI Home Platform, its Traefik/OpenBao/Prometheus/Grafana bundle, shared Docker network, Personal AI routes, and `:9443` Serve route are retired and remain only as independently recoverable repository/data/release assets. Infrastructure operations are performed by the owner/operator through the root-owned deployment gateway. The Orchestrator does not call AI Home Platform, Docker, NAS root, or the gateway.
+The separation decision supersedes the original shared-edge deployment described below. Personal AI owns the complete private entry runtime inside its single non-root container. Tailscale HTTPS `:443` targets NAS loopback `127.0.0.1:9084`, which publishes the container edge listener on `8081`; the edge routes Identity/Passkey, Control Web, Orchestrator/SSE, signed Worker HTTP/WebSocket, and the safe-method ContextHub Memory projection. ContextHub keeps its Tailscale-facing `8788` listener loopback-only and exposes a separate Docker-host-bridge-only ingress for this projection; no shared Docker network is used. AI Home Platform, its Traefik/OpenBao/Prometheus/Grafana bundle, shared Docker network, Personal AI routes, and `:9443` Serve route are retired and remain only as independently recoverable repository/data/release assets. Infrastructure operations are performed by the owner/operator through the root-owned deployment gateway. The Orchestrator does not call AI Home Platform, Docker, NAS root, or the gateway.
 
 The target uses one durable decision-maker on the NAS and distributed execution on enrolled Mac and Windows workers:
 
@@ -973,7 +973,8 @@ Personal AI private edge (container :8081)
         +-- /health*                  -> Orchestrator :9085
         +-- /api/v1/worker/*          -> signed Worker HTTP/WSS :9085
         +-- /api/v1/*, Control Web    -> Identity forward-auth
-        +-- /api/portal/v1/memory/*   -> ContextHub :8788 (safe methods)
+        +-- /api/portal/v1/memory/*   -> ContextHub Docker-bridge ingress :18788 (safe methods)
+                                         (ContextHub :8788 remains loopback/Tailscale-facing)
 
 Owner/operator -> root-owned deployment gateway -> independent Compose projects
 

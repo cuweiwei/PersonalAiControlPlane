@@ -96,5 +96,5 @@ test("production Compose runs one container with a self-owned private edge", () 
   assert.match(compose, /127\.0\.0\.1:9084:8081/);
   assert.match(compose, /127\.0\.0\.1:9085:9085/);
   assert.match(compose, /PAI_EDGE_PORT: "8081"/);
-  assert.match(compose, /PAI_MEMORY_ORIGIN: http:\/\/host\.docker\.internal:8788/);
+  assert.match(compose, /PAI_MEMORY_ORIGIN: http:\/\/host\.docker\.internal:18788/);
 });
