@@ -59,8 +59,8 @@ export class CodexExecAdapter implements WorkerCapabilityAdapter {
       const child = spawn(this.options.executable, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
-      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8").slice(0, this.options.maxOutputBytes); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8").slice(0, 20_000); });
+      child.stdout.on("data", (chunk: Buffer) => { if (stdout.length < this.options.maxOutputBytes) stdout += chunk.toString("utf8").slice(0, this.options.maxOutputBytes - stdout.length); });
+      child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 20_000) stderr += chunk.toString("utf8").slice(0, 20_000 - stderr.length); });
       const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("CODEX_TIMEOUT")); }, timeoutMs);
       child.once("error", (error) => { clearTimeout(timer); reject(error); });
       child.once("close", (code) => { clearTimeout(timer); resolvePromise({ code: code ?? 1, stdout, stderr }); });

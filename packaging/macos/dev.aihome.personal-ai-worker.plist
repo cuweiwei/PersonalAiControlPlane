@@ -6,8 +6,10 @@
   <string>dev.aihome.personal-ai-worker</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/pai-worker</string>
+    <string>REPLACE_WORKER_EXECUTABLE</string>
     <string>start</string>
+    <string>--origin</string>
+    <string>REPLACE_ORIGIN</string>
     <string>--repo-id</string>
     <string>REPLACE_REPO_ID</string>
     <string>--repo-path</string>

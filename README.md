@@ -32,14 +32,17 @@ Worker device bootstrap (development/local channel):
 
 ```bash
 npm run worker:cli -- enroll
-# approve the displayed fingerprint in Control Web, then finalize from the saved local challenge
+# approve the displayed fingerprint in Control Web; a running worker auto-finalizes from its saved local challenge
 npm run worker:cli -- enroll-finalize
 npm run worker:cli -- rotate
 npm run worker:cli -- status
 npm run worker:cli -- start --repo-id <logical-id> --repo-path <git-repository>
+# optional: --origin https://<private-control-plane-origin> --data-dir <worker-data-dir>
 ```
 
-The current local CLI uses a `0600` file fallback for the device key and credential so the protocol can be exercised. It is intentionally reported as `file-fallback`; the signed production packages must replace it with the native macOS Keychain/Windows Credential Manager helper before production acceptance.
+`start` is now bootstrap-aware: it creates an enrollment request when no credential exists, waits for the owner approval, automatically completes proof/finalize, and then starts the WSS worker runtime. `enroll`/`enroll-finalize` remain explicit recovery commands. The current local CLI uses a `0600` file fallback for the device key and credential so the protocol can be exercised. It is intentionally reported as `file-fallback`; the signed production packages must replace it with the native macOS Keychain/Windows Credential Manager helper before production acceptance.
+
+For a resident user-session install, macOS can register the LaunchAgent with `packaging/macos/install-worker.sh <repo-id> <repo-path> [origin] [worker-executable] [log-directory]`; Windows can register the equivalent limited Scheduled Task with `packaging/windows/install-worker.ps1 -RepoId <repo-id> -RepoPath <repo-path> [-Origin <private-origin>]`. Both keep the worker outbound-only and restart it at login; after installation, only the owner fingerprint approval is required.
 
 The development server listens on `127.0.0.1:9085`, opens independent local Orchestrator and Conversation Archive databases, and permits local unauthenticated goal admission. Production mode fails closed until the Identity Gateway is connected.
 

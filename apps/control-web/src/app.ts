@@ -204,9 +204,9 @@ function ItemCard({ item, view, onRefresh, workerProviders = [] }: { item: Item;
 function WorkerComposer({ onRefresh }: { onRefresh(): void }) {
   return h("section", { className: "worker-management", "aria-labelledby": "worker-add-title" },
     h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER ENROLLMENT"), h("h3", { id: "worker-add-title" }, "新增 Worker"))),
-    h("p", { className: "worker-help" }, "請在要執行 Codex 的 macOS 或 Windows 裝置執行下列 CLI。裝置會自行產生 key pair；Portal 不接收私鑰或手動貼上的 public key。"),
-    h("pre", { className: "command-block" }, "npm run worker:cli -- enroll"),
-    h("p", { className: "worker-help" }, "CLI 顯示 fingerprint 後，回到此頁使用 Passkey 核准；再依 CLI 顯示的 status nonce 完成 proof。Worker 卡片只在 heartbeat、LLM / Provider 與 capability evidence 到齊後顯示可用狀態。"),
+    h("p", { className: "worker-help" }, "請先在要執行 Codex 的 macOS 或 Windows 裝置安裝並啟動 Worker。Worker 會自行產生 key pair 並建立 enrollment request；Portal 不接收私鑰或手動貼上的 public key。"),
+    h("pre", { className: "command-block" }, "pai-worker start --repo-id <logical-id> --repo-path <git-repository>"),
+    h("p", { className: "worker-help" }, "確認畫面上的 fingerprint 後，使用 Passkey 按下核准；Worker 會自動完成 proof、取得 credential 並連線。此頁每 5 秒會自動同步待確認 request。若需要手動 recovery，仍可使用 pai-worker enroll / enroll-finalize。Worker 卡片只在 heartbeat、LLM / Provider 與 capability evidence 到齊後顯示可用狀態。"),
     h("button", { type: "button", onClick: onRefresh }, "重新整理 enrollment requests"));
 }
 
@@ -285,7 +285,12 @@ function ResourceView({ view, id }: { view: View; id?: string }) {
       setState("ready"); setMessage("已從目前 authority 重建；SSE/polling 不取代 REST truth。");
     } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "讀取失敗"); }
   }, [id, view]);
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    if (view.key !== "workers" || id) return;
+    const timer = setInterval(() => void refresh(), 5_000);
+    return () => clearInterval(timer);
+  }, [id, refresh, view.key]);
   const editor = !id && view.key === "goals" ? h(GoalComposer, { onRefresh: refresh }) : !id && view.key === "schedules" ? h(ScheduleComposer, { onRefresh: refresh }) : !id && view.key === "policies" ? h(PolicyEditor, { onRefresh: refresh }) : !id && view.key === "workers" ? h(WorkerComposer, { onRefresh: refresh }) : null;
   const enrollmentPanel = !id && view.key === "workers" ? h("section", { "aria-labelledby": "enrollment-title" }, h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "PENDING TRUST"), h("h3", { id: "enrollment-title" }, "Enrollment requests"))), enrollmentRequests.length ? h("div", { className: "card-grid" }, enrollmentRequests.map((item) => h(EnrollmentRequestCard, { item, onRefresh: refresh, key: text(item.id) }))) : h("p", { className: "empty" }, "目前沒有 enrollment requests。")) : null;
   return h("section", { "aria-labelledby": "view-title" }, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "OWNER-SAFE AUTHORITY PROJECTION"), h("h2", { id: "view-title" }, `${view.label}${id ? " detail" : ""}`)), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")), h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status", "aria-live": "polite" }, message), editor, enrollmentPanel, state === "ready" && !id && resourceItems.length === 0 ? h("p", { className: "empty" }, view.empty) : null, detail ? h("article", { className: "card detail-card" }, h("h3", null, itemTitle(detail)), view.key === "workers" ? h(WorkerSummary, { item: detail, providers: items(detail.providers) }) : h(DetailFields, { item: detail }), h(DetailActions, { view, item: detail, onRefresh: refresh })) : h("div", { className: "card-grid" }, resourceItems.map((item, index) => h(ItemCard, { item, view, onRefresh: refresh, workerProviders, key: text(item.id ?? item.goalId ?? index) }))));

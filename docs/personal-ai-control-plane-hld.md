@@ -411,11 +411,11 @@ The worker is a Node.js 22/TypeScript service for macOS and Windows. It makes an
 
 Enrollment flow:
 
-1. Worker generates a device key pair locally.
-2. Owner approves enrollment through Passkey.
-3. Identity Gateway issues a device-bound, automatically rotated certificate or signed credential.
-4. Private key remains in macOS Keychain or Windows Credential Manager.
-5. Orchestrator records device identity, Tailscale identity, owner, and trust state.
+1. The resident worker generates a device key pair locally and submits an enrollment request; no private key is sent to the Portal.
+2. Control Web polls the owner-visible request list and the owner approves the displayed fingerprint through Passkey.
+3. The resident worker observes the approval, signs the proof, and receives a device-bound short-lived credential without manual token copying.
+4. The worker maintains a WSS-primary outbound channel with signed HTTP poll/events fallback and rotates the credential before expiry.
+5. The private key remains in macOS Keychain or Windows Credential Manager, while the Orchestrator records device identity, Tailscale identity, owner, and trust state.
 
 The user never copies or rotates worker tokens manually.
 

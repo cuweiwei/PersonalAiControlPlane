@@ -6,6 +6,8 @@ import {
   verifyEnrollmentProofSignature,
   verifyWorkerCredential,
   WorkerConnectionVerifier,
+  validateCapabilityDescriptor,
+  type CapabilityDescriptor,
   type WorkerCredentialRecord,
   type WorkerEnvelope,
 } from "../../../packages/worker/src/index.ts";
@@ -138,6 +140,22 @@ export class WorkerChannelService {
     this.db.run("UPDATE worker_connections SET last_sequence = ?, last_heartbeat_at = ?, updated_at = ? WHERE worker_id = ?", frame.sequence, now, now, workerId);
     this.db.run("UPDATE workers SET last_heartbeat_at = ?, stale_at = ?, updated_at = ? WHERE id = ?", now, now + 90_000, now, workerId);
     const payload = asRecord(frame.payload);
+    if (frame.type === "worker.hello" || frame.type === "capability.update") {
+      const descriptor = payload as unknown as CapabilityDescriptor;
+      let descriptorValid = false;
+      try { descriptorValid = validateCapabilityDescriptor(descriptor).valid; } catch { /* malformed discovery must not tear down an authenticated channel */ }
+      if (descriptorValid) {
+        const existing = this.db.one<{ id: string; grant_state: string }>("SELECT id, grant_state FROM capabilities WHERE worker_id = ? AND kind = ? AND version = ? AND descriptor_hash = ?", workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash);
+        if (existing) {
+          this.db.run("UPDATE capabilities SET discovered_state = 'DISCOVERED', health = ?, descriptor_json = ?, updated_at = ? WHERE id = ?", descriptor.health, JSON.stringify(descriptor), now, existing.id);
+        } else {
+          this.db.run("INSERT INTO capabilities(id, worker_id, kind, version, descriptor_hash, descriptor_json, discovered_state, grant_state, health, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'DISCOVERED', 'REVIEW_REQUIRED', ?, ?, ?)", uuidv7(now), workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash, JSON.stringify(descriptor), descriptor.health, now, now);
+        }
+      }
+    }
+    if (frame.type === "worker.heartbeat" && typeof payload.capabilityId === "string" && typeof payload.capabilityDescriptorHash === "string" && ["HEALTHY", "DEGRADED", "UNHEALTHY"].includes(String(payload.health))) {
+      this.db.run("UPDATE capabilities SET health = ?, updated_at = ? WHERE worker_id = ? AND kind = ? AND descriptor_hash = ?", String(payload.health), now, workerId, payload.capabilityId, payload.capabilityDescriptorHash);
+    }
     if (frame.type === "job.result" || frame.type === "job.reject") {
       const attemptId = typeof payload.attemptId === "string" ? payload.attemptId : undefined;
       if (attemptId) {

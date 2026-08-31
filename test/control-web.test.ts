@@ -21,7 +21,8 @@ test("Control Web renders owner read projections with semantic navigation and ev
 test("Worker tab exposes enrollment, status, provider, and lifecycle controls", () => {
   const markup = renderToStaticMarkup(React.createElement(App, { initialPath: "/workers" }));
   assert.match(markup, /新增 Worker/);
-  assert.match(markup, /npm run worker:cli -- enroll/);
+  assert.match(markup, /pai-worker start --repo-id/);
+  assert.match(markup, /自動完成 proof/);
   assert.match(markup, /Portal 不接收私鑰/);
   assert.match(markup, /Enrollment requests/);
   assert.match(markup, /LLM \/ Provider/);

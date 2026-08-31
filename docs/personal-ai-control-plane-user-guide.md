@@ -4,6 +4,8 @@
 
 本文件依目前 repository 的 Control Web 與 API 行為編寫。功能是否已接上正式環境、實體 worker 或外部 provider，請以 [Implementation Status](implementation-status.md) 與頁面中的即時狀態為準。
 
+目前 repository 版 CLI 以 `file-fallback` 保存裝置 key/credential，僅供本地協定測試；正式簽署套件必須改用 macOS Keychain 或 Windows Credential Manager，並重新完成實體裝置 evidence。
+
 ![Personal AI Control Plane 系統架構與使用入口](assets/personal-ai-control-plane-architecture-zh-TW.svg)
 
 ## 1. 這套系統可以幫你做什麼
@@ -127,12 +129,12 @@ Schedule 不會直接執行工具；每次觸發都會建立普通 Goal，並重
 
 新增 worker：
 
-1. 先在 worker 裝置產生 Ed25519 key pair；私鑰留在該裝置的 OS vault。
-2. 在 **Workers → 新增 Worker** 輸入名稱、平台與 worker public key PEM。
-3. 建立 enrollment request 後，核對畫面上的 fingerprint。
-4. 在 **Enrollment requests** 按「Passkey 核准此 Worker」。
-5. 核准後仍要等待 worker proof 與 heartbeat；`APPROVED` 不等於已可派工。
-6. 若 fingerprint 不正確或不再需要，可在同一張 request 卡片按「取消 request」。
+1. 在 worker 裝置安裝 `pai-worker`，並以使用者身分建立常駐程序：`pai-worker start --repo-id <logical-id> --repo-path <git-repository>`。macOS 使用 LaunchAgent，Windows 使用工作排程器；程序會自行產生 Ed25519 key pair，私鑰留在該裝置。
+2. 開啟 **Workers**。常駐 worker 會自動建立 enrollment request；本頁每 5 秒同步一次，不需要複製 public key 或私鑰。
+3. 核對 request 卡片上的 fingerprint 與裝置一致後，按「Passkey 核准此 Worker」。
+4. Worker 會自動輪詢核准結果、完成 proof、取得短期 credential，接著透過 WSS（無法建立時使用簽名 HTTP fallback）連線並送出 heartbeat。
+5. 等待卡片顯示 `ONLINE`；`APPROVED` 只代表 owner 已核准，仍須等待 proof、heartbeat 與 capability evidence 才能派工。
+6. 若 fingerprint 不正確或不再需要，可在同一張 request 卡片按「取消 request」。`pai-worker enroll` / `enroll-finalize` 僅作為無法使用常駐流程時的 recovery。
 
 Worker 卡片會顯示：
 

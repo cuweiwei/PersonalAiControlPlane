@@ -12,7 +12,9 @@ import { signWorkerEnvelope, signEnrollmentProof } from "../packages/worker/src/
 import type { WorkerEnvelope } from "../packages/worker/src/index.ts";
 import { WorkerDatabase } from "../apps/worker/src/db.ts";
 import { OutboundWorkerRuntime } from "../apps/worker/src/runtime.ts";
-import { WorkerHttpTransport, WorkerWebSocketTransport } from "../apps/worker/src/transport.ts";
+import { FileDeviceKeyStore, FileWorkerCredentialStore, WorkerHttpTransport, WorkerWebSocketTransport } from "../apps/worker/src/transport.ts";
+import { WorkerBootstrap } from "../apps/worker/src/bootstrap.ts";
+import { createWorkerDaemon } from "../apps/worker/src/service.ts";
 
 async function withServer(run: (baseUrl: string, channel: WorkerChannelService, db: OrchestratorDatabase) => Promise<void>): Promise<void> {
   const db = new OrchestratorDatabase(":memory:");
@@ -23,6 +25,14 @@ async function withServer(run: (baseUrl: string, channel: WorkerChannelService, 
   if (!address || typeof address === "string") throw new Error("server did not bind");
   try { await run(`http://127.0.0.1:${address.port}`, channel, db); }
   finally { channel.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); db.close(); }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition did not become true");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 test("device enrollment finalizes only after owner approval and proof of possession", async () => {
@@ -45,6 +55,47 @@ test("device enrollment finalizes only after owner approval and proof of possess
     assert.equal(replay.status, 409);
     assert.equal((await replay.json()).error.code, "ENROLLMENT_ALREADY_FINALIZED");
     channel.close();
+  });
+});
+
+test("resident worker bootstrap auto-finalizes after owner approval", async () => {
+  await withServer(async (baseUrl, _channel, db) => {
+    const temp = mkdtempSync(join(tmpdir(), "pai-worker-bootstrap-"));
+    const keyStore = new FileDeviceKeyStore(join(temp, "device-key.json"));
+    const credentialStore = new FileWorkerCredentialStore(join(temp, "credential.json"));
+    const bootstrap = new WorkerBootstrap({ origin: baseUrl, keyStore, credentialStore, enrollmentPath: join(temp, "enrollment.json"), deviceSummary: { name: "Auto", platform: "darwin" } });
+    assert.equal(await bootstrap.ensureCredential(), undefined);
+    const pending = bootstrap.readEnrollment();
+    assert.ok(pending);
+    const enrollment = db.one<{ fingerprint: string }>("SELECT fingerprint FROM worker_enrollment_requests WHERE id = ?", pending!.requestId);
+    assert.ok(enrollment);
+    const approve = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${pending!.requestId}/approve`, { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(Date.now()) }, body: JSON.stringify({ fingerprint: enrollment!.fingerprint }) });
+    assert.equal(approve.status, 200);
+    const credential = await bootstrap.ensureCredential();
+    assert.ok(credential);
+    assert.equal(credentialStore.read()?.workerId, credential!.workerId);
+    assert.equal(bootstrap.readEnrollment(), undefined);
+  });
+});
+
+test("worker daemon starts from an uncredentialed install and connects after approval", async () => {
+  await withServer(async (baseUrl, _channel, db) => {
+    const temp = mkdtempSync(join(tmpdir(), "pai-worker-daemon-"));
+    const service = createWorkerDaemon({ dataDir: temp, origin: baseUrl, repositories: {}, pollIntervalMs: 10, heartbeatIntervalMs: 10 });
+    service.daemon.start();
+    try {
+      await waitFor(() => Boolean(db.one("SELECT id FROM worker_enrollment_requests WHERE status = 'PENDING'")));
+      const pending = db.one<{ id: string; fingerprint: string }>("SELECT id, fingerprint FROM worker_enrollment_requests WHERE status = 'PENDING'");
+      assert.ok(pending);
+      const approve = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${pending!.id}/approve`, { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(Date.now()) }, body: JSON.stringify({ fingerprint: pending!.fingerprint }) });
+      assert.equal(approve.status, 200);
+      await waitFor(() => Boolean(db.one("SELECT worker_id FROM worker_connections")) && Boolean(db.one("SELECT worker_id FROM capabilities WHERE kind = 'codex.execute'")));
+      assert.equal(db.one<{ trust_state: string }>("SELECT trust_state FROM workers LIMIT 1")?.trust_state, "TRUSTED");
+      assert.equal(db.one<{ grant_state: string }>("SELECT grant_state FROM capabilities WHERE kind = 'codex.execute'")?.grant_state, "REVIEW_REQUIRED");
+    } finally {
+      service.daemon.stop();
+      service.db.close();
+    }
   });
 });
 
@@ -123,6 +174,7 @@ test("WorkerWebSocketTransport uses WSS and keeps HTTP fallback available", asyn
     await transport.send(heartbeat);
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(db.one<{ last_sequence: number }>("SELECT last_sequence FROM worker_connections WHERE worker_id = ?", credentials.workerId)?.last_sequence, 1);
+    transport.close();
     workerDb.close();
   });
 });

@@ -32,6 +32,7 @@ export type WorkerCapabilityAdapter = {
 export type OutboundWorkerTransport = {
   poll(): Promise<WorkerJobOffer[]>;
   send(frame: WorkerEnvelope): Promise<void>;
+  close?: () => void;
 };
 
 export type WorkerRuntimeOptions = {
@@ -63,6 +64,8 @@ export class OutboundWorkerRuntime {
       capabilityDescriptorHash: this.options.adapter.descriptor.descriptorHash,
     });
   }
+
+  close(): void { this.options.transport.close?.(); }
 
   private async processOffer(offer: WorkerJobOffer): Promise<void> {
     if (offer.workerId !== this.options.workerId) return this.reject(offer, "WORKER_MISMATCH");

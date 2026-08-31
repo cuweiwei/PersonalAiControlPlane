@@ -14,16 +14,19 @@ function send(socket: WebSocket, value: unknown): void {
 
 export function attachWorkerWebSocket(server: HttpServer, channel: WorkerChannelService): WebSocketServer {
   const gateway = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
+  server.on("close", () => {
+    for (const client of gateway.clients) {
+      if (typeof client.terminate === "function") client.terminate(); else client.close();
+    }
+    gateway.close();
+  });
   server.on("upgrade", (request: IncomingMessage, socket, head) => {
-    console.error("DEBUG upgrade", request.url);
     if (!isWorkerPath(request.url)) { socket.destroy(); return; }
     gateway.handleUpgrade(request, socket, head, (client) => gateway.emit("connection", client, request));
   });
   gateway.on("connection", (socket: WebSocket) => {
-    console.error("DEBUG connection");
     let identity: { workerId: string; credential: string; connectionId: string } | undefined;
     socket.on("message", (raw: Buffer) => {
-      console.error("DEBUG message", raw.toString("utf8"));
       void (async () => {
         let message: WorkerSocketMessage;
         try { message = JSON.parse(raw.toString("utf8")) as WorkerSocketMessage; } catch { send(socket, { error: { code: "INVALID_WORKER_MESSAGE" } }); return; }
