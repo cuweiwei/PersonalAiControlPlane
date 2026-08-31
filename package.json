@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node --experimental-strip-types apps/orchestrator/src/index.ts",
+    "worker:cli": "node --experimental-strip-types apps/worker/src/cli.ts",
     "build:web": "vite build --config apps/control-web/vite.config.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check.mjs",
@@ -16,7 +17,8 @@
   "dependencies": {
     "@simplewebauthn/server": "13.3.2",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "typescript": "7.0.2",

@@ -427,6 +427,52 @@ CREATE TABLE IF NOT EXISTS worker_enrollment_requests (
 CREATE INDEX IF NOT EXISTS worker_enrollment_status_idx ON worker_enrollment_requests(status, expires_at);
 `;
 
+const WORKER_CHANNEL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS worker_credentials (
+  id TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  secret_hash TEXT NOT NULL UNIQUE,
+  issued_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS worker_credentials_active_idx ON worker_credentials(worker_id, revoked_at, expires_at);
+
+CREATE TABLE IF NOT EXISTS worker_connections (
+  worker_id TEXT PRIMARY KEY REFERENCES workers(id),
+  connection_id TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  last_sequence INTEGER NOT NULL DEFAULT -1,
+  last_heartbeat_at INTEGER,
+  state TEXT NOT NULL CHECK (state IN ('CONNECTED', 'STALE', 'CLOSED')),
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_channel_messages (
+  id TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  connection_id TEXT,
+  attempt_id TEXT,
+  type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('QUEUED', 'DELIVERED', 'ACKED', 'FAILED')),
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  acked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS worker_channel_messages_queue_idx ON worker_channel_messages(worker_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS worker_channel_inbound_messages (
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  connection_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  accepted_at INTEGER NOT NULL,
+  PRIMARY KEY(worker_id, connection_id, message_id)
+);
+`;
+
 export type SqlRow = Record<string, unknown>;
 
 export class OrchestratorDatabase {
@@ -501,6 +547,18 @@ export class OrchestratorDatabase {
         this.connection.prepare(
           "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(6, ?, ?)",
         ).run("owner-management-surfaces-v6", Date.now());
+      }
+      const seventhMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 7").get();
+      if (!seventhMigration) {
+        const workerColumns = this.connection.prepare("PRAGMA table_info(workers)").all() as Array<{ name: string }>;
+        if (!workerColumns.some((column) => column.name === "public_key_pem")) this.connection.exec("ALTER TABLE workers ADD COLUMN public_key_pem TEXT");
+        if (!workerColumns.some((column) => column.name === "fingerprint")) this.connection.exec("ALTER TABLE workers ADD COLUMN fingerprint TEXT");
+        const enrollmentColumns = this.connection.prepare("PRAGMA table_info(worker_enrollment_requests)").all() as Array<{ name: string }>;
+        if (!enrollmentColumns.some((column) => column.name === "finalized_worker_id")) this.connection.exec("ALTER TABLE worker_enrollment_requests ADD COLUMN finalized_worker_id TEXT");
+        this.connection.exec(WORKER_CHANNEL_SCHEMA);
+        this.connection.prepare(
+          "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(7, ?, ?)",
+        ).run("worker-channel-v7", Date.now());
       }
       this.connection.exec("COMMIT");
     } catch (error) {

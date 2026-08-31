@@ -3,12 +3,14 @@ import { createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { parseGoalCreateInput } from "../../../packages/contracts/src/index.ts";
 import { canonicalJson, sha256, uuidv7 } from "../../../packages/crypto/src/index.ts";
 import { CounterRegistry } from "../../../packages/observability/src/index.ts";
-import { publicKeyFingerprint } from "../../../packages/worker/src/index.ts";
+import { publicKeyFingerprint, type WorkerEnvelope } from "../../../packages/worker/src/index.ts";
 import { ArchiveService } from "../../archive/src/service.ts";
 import { OrchestratorDatabase } from "./db.ts";
 import { ApprovalService } from "./approval-service.ts";
 import { ScheduleService } from "./schedule-service.ts";
 import { TaskEngine } from "./task-engine.ts";
+import { WorkerChannelService } from "./worker-channel.ts";
+import { attachWorkerWebSocket } from "./worker-websocket.ts";
 
 const MAX_BODY_BYTES = 1_048_576;
 
@@ -24,6 +26,7 @@ type AppOptions = {
   approvalService?: ApprovalService;
   scheduleService?: ScheduleService;
   archiveService?: ArchiveService;
+  workerChannel?: WorkerChannelService;
 };
 
 type AppError = Error & { code?: string; retryable?: boolean; status?: number };
@@ -167,7 +170,7 @@ async function health(options: AppOptions, kind: "live" | "ready" | "ops"): Prom
   const identityReady = kind === "live" ? true : await resolveIdentityReady(options);
   const runtimeReady = kind === "live" ? true : typeof options.runtimeReady === "function" ? options.runtimeReady() : options.runtimeReady !== false;
   const runtimeRequired = options.runtimeRequired !== false;
-  const ready = dbCheck?.value === 1 && migration?.version === 6 && auditChain && identityReady && (!runtimeRequired || runtimeReady);
+  const ready = dbCheck?.value === 1 && migration?.version === 7 && auditChain && identityReady && (!runtimeRequired || runtimeReady);
   if (kind === "live") return { status: "ok" };
   if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required", schemaVersion: migration?.version ?? null };
   return {
@@ -195,7 +198,8 @@ export function createHttpServer(options: AppOptions) {
   const metrics = options.metrics ?? new CounterRegistry();
   const approvals = options.approvalService ?? new ApprovalService(options.db);
   const schedules = options.scheduleService ?? new ScheduleService(options.db);
-  return createServer(async (req, response) => {
+  const workerChannel = options.workerChannel ?? new WorkerChannelService(options.db);
+  const server = createServer(async (req, response) => {
     const id = requestId(req);
     response.setHeader("x-request-id", id);
     try {
@@ -219,6 +223,61 @@ export function createHttpServer(options: AppOptions) {
         return;
       }
       if (parts[0] !== "api" || parts[1] !== "v1") throw Object.assign(new Error("not found"), { status: 404, code: "NOT_FOUND" });
+
+      // Worker routes authenticate with a device credential and proof-of-possession.
+      // They intentionally do not call ownerId(), so browser cookies/CSRF headers cannot
+      // be used as a substitute for the registered device key.
+      if (parts[2] === "worker") {
+        if (method === "POST" && parts.length === 4 && parts[3] === "enrollment-requests") {
+          const input = await readJson(req) as Record<string, unknown>;
+          if (typeof input.publicKeyPem !== "string" || input.publicKeyPem.length > 20_000 || !input.deviceSummary || typeof input.deviceSummary !== "object" || Array.isArray(input.deviceSummary)) throw Object.assign(new Error("worker enrollment request is invalid"), { status: 400, code: "INVALID_ENROLLMENT_REQUEST" });
+          let key;
+          try { key = createPublicKey(input.publicKeyPem); } catch { throw Object.assign(new Error("worker public key is invalid"), { status: 400, code: "INVALID_ENROLLMENT_KEY" }); }
+          const now = Date.now();
+          const requestId = uuidv7(now);
+          const challenge = randomBytes(32).toString("base64url");
+          const expiresAt = now + 10 * 60_000;
+          options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, publicKeyFingerprint(key), JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
+          writeJson(response, 202, { requestId, fingerprint: publicKeyFingerprint(key), status: "PENDING", challenge, expiresAt, approvalUrl: `/workers/enrollment-requests/${requestId}` });
+          return;
+        }
+        if (method === "GET" && parts.length === 6 && parts[3] === "enrollment-requests" && parts[5] === "status") {
+          const row = options.db.one<{ id: string; fingerprint: string; status: string; expires_at: number; finalized_worker_id: string | null }>("SELECT id, fingerprint, status, expires_at, finalized_worker_id FROM worker_enrollment_requests WHERE id = ?", parts[4]);
+          if (!row) throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
+          const status = row.status === "PENDING" && row.expires_at <= Date.now() ? "EXPIRED" : row.status;
+          if (status === "EXPIRED") options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND status = 'PENDING'", parts[4]);
+          writeJson(response, 200, { requestId: row.id, fingerprint: row.fingerprint, status, expiresAt: row.expires_at, finalized: Boolean(row.finalized_worker_id), serverNonce: status === "APPROVED" && !row.finalized_worker_id ? randomBytes(32).toString("base64url") : null });
+          return;
+        }
+        if (method === "POST" && parts.length === 6 && parts[3] === "enrollment-requests" && parts[5] === "finalize") {
+          const input = await readJson(req) as Record<string, unknown>;
+          if (typeof input.challenge !== "string" || typeof input.serverNonce !== "string" || typeof input.workerSignature !== "string") throw Object.assign(new Error("worker enrollment proof is incomplete"), { status: 400, code: "INVALID_ENROLLMENT_PROOF" });
+          const finalized = workerChannel.finalizeEnrollment({ requestId: parts[4], challenge: input.challenge, serverNonce: input.serverNonce, workerSignature: input.workerSignature });
+          writeJson(response, 201, { workerId: finalized.workerId, credentialId: finalized.credentialId, credential: finalized.credential, expiresAt: finalized.expiresAt, fingerprint: finalized.fingerprint });
+          return;
+        }
+        if (method === "POST" && parts.length === 4 && parts[3] === "poll") {
+          const input = await readJson(req) as Record<string, unknown>;
+          if (typeof input.workerId !== "string" || typeof input.credential !== "string" || typeof input.connectionId !== "string") throw Object.assign(new Error("worker poll identity is incomplete"), { status: 400, code: "INVALID_WORKER_POLL" });
+          const result = workerChannel.poll({ workerId: input.workerId, credential: input.credential, connectionId: input.connectionId, hello: input.hello as never });
+          writeJson(response, 200, result);
+          return;
+        }
+        if (method === "POST" && parts.length === 4 && parts[3] === "events") {
+          const input = await readJson(req) as Record<string, unknown>;
+          if (typeof input.workerId !== "string" || typeof input.credential !== "string" || !input.frame || typeof input.frame !== "object") throw Object.assign(new Error("worker event identity is incomplete"), { status: 400, code: "INVALID_WORKER_EVENT" });
+          workerChannel.receive(input.workerId, input.credential, input.frame as WorkerEnvelope);
+          writeJson(response, 202, { accepted: true });
+          return;
+        }
+        if (method === "POST" && parts.length === 5 && parts[3] === "credentials" && parts[4] === "rotate") {
+          const input = await readJson(req) as Record<string, unknown>;
+          if (typeof input.workerId !== "string" || typeof input.credential !== "string") throw Object.assign(new Error("worker credential rotation input is incomplete"), { status: 400, code: "INVALID_WORKER_CREDENTIAL_ROTATION" });
+          const rotated = workerChannel.rotateCredential(input.workerId, input.credential);
+          writeJson(response, 201, rotated);
+          return;
+        }
+      }
 
       if (method === "POST" && parts.length === 3 && parts[2] === "goals") {
         const owner = ownerId(req, options.allowUnauthenticated);
@@ -607,4 +666,6 @@ export function createHttpServer(options: AppOptions) {
       });
     }
   });
+  attachWorkerWebSocket(server, workerChannel);
+  return server;
 }

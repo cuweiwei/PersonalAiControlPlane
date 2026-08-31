@@ -1,9 +1,54 @@
-import { createPublicKey, randomBytes, sign, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, sign, timingSafeEqual, verify, type KeyObject } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { canonicalJson, sha256, uuidv7, type JsonValue } from "../../crypto/src/index.ts";
 
 export type WorkerEnvelopeType = "worker.hello" | "worker.heartbeat" | "job.accept" | "job.reject" | "job.event" | "job.checkpoint" | "job.result" | "capability.update";
+
+export type WorkerCredential = {
+  id: string;
+  workerId: string;
+  secret: string;
+  issuedAt: number;
+  expiresAt: number;
+};
+
+export type WorkerCredentialRecord = Omit<WorkerCredential, "secret"> & { secretHash: string; revokedAt: number | null };
+
+export function hashWorkerCredential(secret: string): string {
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(secret)) throw new Error("worker credential has invalid encoding");
+  return `sha256:${createHash("sha256").update(secret, "utf8").digest("hex")}`;
+}
+
+export function createWorkerCredential(workerId: string, now = Date.now(), ttlMs = 24 * 60 * 60_000): WorkerCredential {
+  if (!workerId || !Number.isInteger(now) || !Number.isInteger(ttlMs) || ttlMs < 5 * 60_000 || ttlMs > 7 * 24 * 60 * 60_000) throw new Error("worker credential bounds are invalid");
+  return { id: uuidv7(now), workerId, secret: randomBytes(48).toString("base64url"), issuedAt: now, expiresAt: now + ttlMs };
+}
+
+export function verifyWorkerCredential(credential: string, record: WorkerCredentialRecord, now = Date.now()): boolean {
+  if (record.revokedAt !== null || record.expiresAt <= now || record.issuedAt > now + 60_000) return false;
+  try {
+    const actual = Buffer.from(hashWorkerCredential(credential), "utf8");
+    const expected = Buffer.from(record.secretHash, "utf8");
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+export function enrollmentProofPayload(challenge: string, serverNonce: string, connectionId = ""): Buffer {
+  if (!challenge || !serverNonce) throw new Error("enrollment proof inputs are required");
+  return Buffer.from(`${challenge}.${serverNonce}${connectionId ? `.${connectionId}` : ""}`, "utf8");
+}
+
+export function signEnrollmentProof(challenge: string, serverNonce: string, privateKey: KeyObject, connectionId = ""): string {
+  return sign(null, enrollmentProofPayload(challenge, serverNonce, connectionId), privateKey).toString("base64url");
+}
+
+export function verifyEnrollmentProofSignature(challenge: string, serverNonce: string, workerSignature: string, publicKey: KeyObject, connectionId = ""): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(workerSignature)) return false;
+  try { return verify(null, enrollmentProofPayload(challenge, serverNonce, connectionId), publicKey, Buffer.from(workerSignature, "base64url")); } catch { return false; }
+}
 
 export type WorkerEnvelope = {
   protocolVersion: string;

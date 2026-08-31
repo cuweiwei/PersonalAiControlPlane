@@ -7,6 +7,7 @@ import { ArchiveService } from "../../archive/src/service.ts";
 import { ArchiveBackgroundRuntime } from "../../archive/src/runtime.ts";
 import { ContentAddressedArtifactStore } from "../../../packages/artifacts/src/index.ts";
 import { OrchestratorRuntime } from "./runtime.ts";
+import { WorkerChannelService } from "./worker-channel.ts";
 
 const port = Number.parseInt(process.env.PAI_PORT ?? "9085", 10);
 const dbPath = process.env.PAI_ORCHESTRATOR_DB_PATH ?? "./data/orchestrator.db";
@@ -29,6 +30,7 @@ const artifactStore = new ContentAddressedArtifactStore(artifactRoot);
 const engine = new TaskEngine(db);
 const runtime = new OrchestratorRuntime(db, engine, { scheduleOwnerId: process.env.PAI_SCHEDULE_OWNER_ID });
 runtime.start();
+const workerChannel = new WorkerChannelService(db);
 const archiveService = new ArchiveService(archiveDb, Date.now, (digests) => {
   const removable = digests.filter((digest) => !db.one("SELECT 1 AS value FROM artifact_references WHERE artifact_hash = ? AND released_at IS NULL", digest) && !archiveDb.one("SELECT 1 AS value FROM artifact_references WHERE artifact_hash = ? AND released_at IS NULL", digest));
   const removed = artifactStore.sweep(removable, 0);
@@ -39,10 +41,11 @@ archiveRuntime.start();
 const identityReadyProbe = !allowUnauthenticated && identityHealthUrl
   ? async () => { const response = await fetch(identityHealthUrl, { signal: AbortSignal.timeout(1_500) }); return response.ok; }
   : undefined;
-const server = createHttpServer({ db, engine, allowUnauthenticated, identityReady, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService });
+const server = createHttpServer({ db, engine, allowUnauthenticated, identityReady, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService, workerChannel });
 
 const shutdown = () => {
   runtime.stop();
+  workerChannel.close();
   archiveRuntime.stop();
   server.close(() => {
     db.close();

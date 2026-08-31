@@ -1,0 +1,191 @@
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, type KeyObject } from "node:crypto";
+import { dirname } from "node:path";
+import { canonicalJson, sha256, uuidv7, type JsonValue } from "../../../packages/crypto/src/index.ts";
+import { signWorkerEnvelopeWithSigner, type WorkerEnvelope } from "../../../packages/worker/src/index.ts";
+import type { OutboundWorkerTransport, WorkerJobOffer } from "./runtime.ts";
+import { WorkerDatabase } from "./db.ts";
+
+type KeyStoreFile = { privateKeyPem: string };
+type CredentialStoreFile = { workerId: string; credentialId: string; credential: string; expiresAt: number; origin: string };
+
+export interface DeviceKeyStore {
+  storageClass: "native" | "file-fallback";
+  ensure(): Promise<void>;
+  publicKeyPem(): Promise<string>;
+  sign(payload: Buffer): Promise<Buffer>;
+}
+
+export interface WorkerCredentialStore {
+  storageClass: "native" | "file-fallback";
+  read(): CredentialStoreFile | undefined;
+  write(value: CredentialStoreFile): void;
+  clear(): void;
+}
+
+/** Development bootstrap store. Production packages must replace this with the native helper. */
+export class FileDeviceKeyStore implements DeviceKeyStore {
+  readonly storageClass = "file-fallback" as const;
+  private privateKey?: KeyObject;
+  private readonly path: string;
+  constructor(path: string) { this.path = path; }
+  async ensure(): Promise<void> {
+    if (!existsSync(this.path)) {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      mkdirSync(dirname(this.path), { recursive: true });
+      writeFileSync(this.path, JSON.stringify({ privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString() }), { mode: 0o600 });
+      chmodSync(this.path, 0o600);
+    }
+    const raw = JSON.parse(readFileSync(this.path, "utf8")) as KeyStoreFile;
+    this.privateKey = createPrivateKey(raw.privateKeyPem);
+  }
+  async publicKeyPem(): Promise<string> {
+    await this.ensure();
+    return this.privateKey!.asymmetricKeyType === "ed25519" ? createPublicKey(this.privateKey!).export({ type: "spki", format: "pem" }).toString() : "";
+  }
+  async sign(payload: Buffer): Promise<Buffer> {
+    await this.ensure();
+    const { sign } = await import("node:crypto");
+    return sign(null, payload, this.privateKey!);
+  }
+}
+
+export class FileWorkerCredentialStore implements WorkerCredentialStore {
+  readonly storageClass = "file-fallback" as const;
+  private readonly path: string;
+  constructor(path: string) { this.path = path; }
+  read(): CredentialStoreFile | undefined { try { return JSON.parse(readFileSync(this.path, "utf8")) as CredentialStoreFile; } catch { return undefined; } }
+  write(value: CredentialStoreFile): void { mkdirSync(dirname(this.path), { recursive: true }); writeFileSync(this.path, JSON.stringify(value), { mode: 0o600 }); chmodSync(this.path, 0o600); }
+  clear(): void { try { writeFileSync(this.path, "", { mode: 0o600 }); } catch { /* best-effort local cleanup */ } }
+}
+
+export type WorkerHttpTransportOptions = {
+  origin: string;
+  workerId: string;
+  credential: string;
+  db: WorkerDatabase;
+  signer: (payload: Buffer) => Buffer | Promise<Buffer>;
+  descriptor: Record<string, JsonValue>;
+  fetchImpl?: typeof fetch;
+  connectionId?: string;
+  helloSent?: boolean;
+  resetSequence?: boolean;
+};
+
+export class WorkerHttpTransport implements OutboundWorkerTransport {
+  private readonly fetchImpl: typeof fetch;
+  private helloSent: boolean;
+  private connectionId: string;
+  private readonly options: WorkerHttpTransportOptions;
+  constructor(options: WorkerHttpTransportOptions) {
+    this.options = options;
+    this.helloSent = options.helloSent ?? false;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.connectionId = options.connectionId ?? uuidv7(Date.now());
+    this.writeState("connectionId", this.connectionId);
+    if (options.resetSequence !== false) this.writeState("sequence", "-1");
+  }
+  get activeConnectionId(): string { return this.connectionId; }
+  private writeState(key: string, value: string): void { this.options.db.connection.prepare("INSERT INTO worker_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value); }
+  private async hello(): Promise<WorkerEnvelope> {
+    const unsigned = { protocolVersion: "1.0", messageId: uuidv7(Date.now()), connectionId: this.connectionId, sequence: 0, workerId: this.options.workerId, sentAt: new Date().toISOString(), nonce: uuidv7(Date.now()).replaceAll("-", ""), type: "worker.hello" as const, payload: this.options.descriptor };
+    return signWorkerEnvelopeWithSigner(unsigned, this.options.signer);
+  }
+  async poll(): Promise<WorkerJobOffer[]> {
+    const body: Record<string, unknown> = { workerId: this.options.workerId, credential: this.options.credential, connectionId: this.connectionId };
+    if (!this.helloSent) body.hello = await this.hello();
+    const response = await this.fetchImpl(`${this.options.origin.replace(/\/$/, "")}/api/v1/worker/poll`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`worker poll failed: ${response.status}`);
+    const result = await response.json() as { connectionId: string; offers: WorkerJobOffer[] };
+    if (typeof result.connectionId !== "string" || !Array.isArray(result.offers)) throw new Error("worker poll response is invalid");
+    this.connectionId = result.connectionId;
+    this.writeState("connectionId", this.connectionId);
+    if (!this.helloSent) {
+      this.writeState("sequence", "0");
+      this.helloSent = true;
+    }
+    return result.offers;
+  }
+  async send(frame: WorkerEnvelope): Promise<void> {
+    const response = await this.fetchImpl(`${this.options.origin.replace(/\/$/, "")}/api/v1/worker/events`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ workerId: this.options.workerId, credential: this.options.credential, frame }), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`worker event failed: ${response.status}`);
+  }
+}
+
+type SocketLike = { readyState: number; send(data: string): void; close(): void; addEventListener(name: string, listener: (event: { data?: unknown }) => void): void };
+
+/** WebSocket-first transport. It falls back to the signed HTTP channel when
+ * the desktop runtime or private edge cannot establish WSS. */
+export class WorkerWebSocketTransport implements OutboundWorkerTransport {
+  private readonly options: WorkerHttpTransportOptions;
+  private readonly fallback: WorkerHttpTransport;
+  private socket?: SocketLike;
+  private connectPromise?: Promise<void>;
+  private pollResolver?: (offers: WorkerJobOffer[]) => void;
+  private pollRejecter?: (error: unknown) => void;
+  private helloSent = false;
+  private failed = false;
+  private readonly connectionId: string;
+  constructor(options: WorkerHttpTransportOptions) {
+    this.options = options;
+    this.connectionId = options.connectionId ?? uuidv7(Date.now());
+    this.fallback = new WorkerHttpTransport({ ...options, connectionId: this.connectionId, helloSent: true, resetSequence: false });
+  }
+  get activeConnectionId(): string { return this.connectionId; }
+  private async connect(): Promise<void> {
+    if (this.failed) throw new Error("WSS_DISABLED");
+    if (this.socket?.readyState === 1) return;
+    if (this.connectPromise) return this.connectPromise;
+    this.connectPromise = new Promise<void>((resolve, reject) => {
+      const Constructor = (globalThis as unknown as { WebSocket?: new (url: string) => SocketLike }).WebSocket;
+      if (!Constructor) { reject(new Error("WSS_UNAVAILABLE")); return; }
+      let socket: SocketLike;
+      try { socket = new Constructor(this.options.origin.replace(/^http/, "ws").replace(/\/$/, "") + "/api/v1/worker/connect"); } catch (error) { reject(error); return; }
+      console.error("DEBUG client ws", this.options.origin.replace(/^http/, "ws").replace(/\/$/, "") + "/api/v1/worker/connect");
+      this.socket = socket;
+      socket.addEventListener("open", () => { console.error("DEBUG client open"); resolve(); });
+      socket.addEventListener("error", (event) => { console.error("DEBUG client error", event); reject(event); });
+      socket.addEventListener("close", () => { console.error("DEBUG client close"); this.failed = true; this.socket = undefined; this.pollRejecter?.(new Error("WSS_CLOSED")); this.pollResolver = undefined; this.pollRejecter = undefined; });
+      socket.addEventListener("message", (event) => {
+        try {
+          const body = JSON.parse(typeof event.data === "string" ? event.data : String(event.data)) as { connectionId?: string; offers?: WorkerJobOffer[] };
+          if (body.connectionId && body.connectionId !== this.connectionId) throw new Error("WSS_CONNECTION_CHANGED");
+          console.error("DEBUG client message", body); if (this.pollResolver) { const resolvePoll = this.pollResolver; this.pollResolver = undefined; this.pollRejecter = undefined; resolvePoll(Array.isArray(body.offers) ? body.offers : []); }
+        } catch (error) { this.pollRejecter?.(error); this.pollResolver = undefined; this.pollRejecter = undefined; }
+      });
+    }).finally(() => { this.connectPromise = undefined; });
+    await this.connectPromise;
+  }
+  async poll(): Promise<WorkerJobOffer[]> {
+    if (this.failed) return this.fallback.poll();
+    try {
+      await this.connect();
+      const body: Record<string, unknown> = { workerId: this.options.workerId, credential: this.options.credential, connectionId: this.connectionId };
+      if (!this.helloSent) {
+        body.hello = await signWorkerEnvelopeWithSigner({ protocolVersion: "1.0", messageId: uuidv7(Date.now()), connectionId: this.connectionId, sequence: 0, workerId: this.options.workerId, sentAt: new Date().toISOString(), nonce: uuidv7(Date.now()).replaceAll("-", ""), type: "worker.hello", payload: this.options.descriptor }, this.options.signer);
+        this.helloSent = true;
+        this.options.db.connection.prepare("UPDATE worker_state SET value = '0' WHERE key = 'sequence'").run();
+      }
+      this.socket!.send(JSON.stringify(body));
+      return await new Promise<WorkerJobOffer[]>((resolve, reject) => {
+        this.pollResolver = resolve;
+        this.pollRejecter = reject;
+        setTimeout(() => { if (this.pollRejecter === reject) { this.pollResolver = undefined; this.pollRejecter = undefined; reject(new Error("WSS_POLL_TIMEOUT")); } }, 30_000);
+      });
+    } catch {
+      this.failed = true;
+      this.socket?.close();
+      return this.fallback.poll();
+    }
+  }
+  async send(frame: WorkerEnvelope): Promise<void> {
+    if (this.failed) { await this.fallback.send(frame); return; }
+    try { await this.connect(); this.socket!.send(JSON.stringify({ workerId: this.options.workerId, credential: this.options.credential, frame })); }
+    catch { this.failed = true; this.socket?.close(); await this.fallback.send(frame); }
+  }
+}
+
+export function workerDescriptor(input: { platform: string; version: string; loginMode?: string; sandboxModes?: string[] }): Record<string, JsonValue> {
+  const base = { kind: "codex.execute", version: input.version, health: "HEALTHY", properties: { loginMode: input.loginMode ?? "chatgpt", sandboxModes: input.sandboxModes ?? ["workspace_write"], maxConcurrency: 1 } } as Record<string, JsonValue>;
+  return { ...base, descriptorHash: sha256(canonicalJson(base)) };
+}

@@ -56,6 +56,14 @@ export class OutboundWorkerRuntime {
     return offers.length;
   }
 
+  async heartbeat(): Promise<void> {
+    await this.send("worker.heartbeat", {
+      health: await this.options.adapter.probe(),
+      capabilityId: this.options.adapter.capabilityId,
+      capabilityDescriptorHash: this.options.adapter.descriptor.descriptorHash,
+    });
+  }
+
   private async processOffer(offer: WorkerJobOffer): Promise<void> {
     if (offer.workerId !== this.options.workerId) return this.reject(offer, "WORKER_MISMATCH");
     const existing = this.options.db.connection.prepare("SELECT offer_digest, state, result_json FROM accepted_jobs WHERE attempt_id = ?").get(offer.attemptId) as { offer_digest: string; state: string; result_json: string | null } | undefined;

@@ -202,29 +202,12 @@ function ItemCard({ item, view, onRefresh, workerProviders = [] }: { item: Item;
 }
 
 function WorkerComposer({ onRefresh }: { onRefresh(): void }) {
-  const [name, setName] = useState("");
-  const [platform, setPlatform] = useState("macOS");
-  const [architecture, setArchitecture] = useState("");
-  const [publicKeyPem, setPublicKeyPem] = useState("");
-  const [result, setResult] = useState<Item | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (submitting) return;
-    setSubmitting(true);
-    void mutate("/api/v1/workers/enrollment-requests", { method: "POST", body: { publicKeyPem: publicKeyPem.trim(), deviceSummary: { name: name.trim(), platform, ...(architecture.trim() ? { architecture: architecture.trim() } : {}) } } }).then((body) => { setResult(body); setPublicKeyPem(""); onRefresh(); }).catch(reportError).finally(() => setSubmitting(false));
-  };
   return h("section", { className: "worker-management", "aria-labelledby": "worker-add-title" },
     h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER ENROLLMENT"), h("h3", { id: "worker-add-title" }, "新增 Worker"))),
-    h("p", { className: "worker-help" }, "Worker 先在自己的裝置產生 key pair；這裡只提交 public key。私鑰不可貼上來，也不會由 Portal 代管。"),
-    h("p", { className: "worker-help" }, "Worker 卡片會顯示 LLM / Provider 證據；沒有 provider 時，只能先視為尚未驗證，不能直接宣稱是 LLM worker。"),
-    h("form", { className: "editor", onSubmit: submit },
-      h("label", null, "名稱", h("input", { value: name, required: true, placeholder: "例如：MacBook Worker", onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value) })),
-      h("label", null, "平台", h("select", { value: platform, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setPlatform(event.target.value) }, h("option", { value: "macOS" }, "macOS"), h("option", { value: "Windows" }, "Windows"))),
-      h("label", null, "架構（選填）", h("input", { value: architecture, placeholder: "例如：arm64", onChange: (event: React.ChangeEvent<HTMLInputElement>) => setArchitecture(event.target.value) })),
-      h("label", null, "Worker public key（PEM）", h("textarea", { value: publicKeyPem, required: true, rows: 7, placeholder: "-----BEGIN PUBLIC KEY-----", onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setPublicKeyPem(event.target.value) })),
-      h("button", { type: "submit", disabled: submitting }, submitting ? "建立中…" : "建立 enrollment request")),
-    result ? h("aside", { className: "notice ready enrollment-result", role: "status" }, h("strong", null, "Enrollment request 已建立"), h("p", null, `Fingerprint：${text(result.fingerprint)}`), h("p", null, `目前狀態：${text(result.status)}；Owner 核准後仍需 worker proof。`)) : null);
+    h("p", { className: "worker-help" }, "請在要執行 Codex 的 macOS 或 Windows 裝置執行下列 CLI。裝置會自行產生 key pair；Portal 不接收私鑰或手動貼上的 public key。"),
+    h("pre", { className: "command-block" }, "npm run worker:cli -- enroll"),
+    h("p", { className: "worker-help" }, "CLI 顯示 fingerprint 後，回到此頁使用 Passkey 核准；再依 CLI 顯示的 status nonce 完成 proof。Worker 卡片只在 heartbeat、LLM / Provider 與 capability evidence 到齊後顯示可用狀態。"),
+    h("button", { type: "button", onClick: onRefresh }, "重新整理 enrollment requests"));
 }
 
 function EnrollmentRequestCard({ item, onRefresh }: { item: Item; onRefresh(): void }) {

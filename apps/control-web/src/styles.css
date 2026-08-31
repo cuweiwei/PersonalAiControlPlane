@@ -76,6 +76,7 @@ footer { padding: 1.5rem; color: #91a4b1; text-align: center; }
 .status-pill.bad { color: #ffb6bd; background: #4b2228; }
 .worker-management { margin-block: 1rem 2rem; }
 .worker-help { color: #b6c7d2; line-height: 1.55; }
+.command-block { margin: 1rem 0; padding: .9rem 1rem; overflow-x: auto; color: #eef4f8; background: #091017; border: 1px solid #496274; border-radius: .55rem; font: .95rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .worker-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin-block: 1rem; }
 .worker-status-grid > div { display: grid; gap: .3rem; padding: .65rem; background: #0b151c; border: 1px solid #263d4c; border-radius: .6rem; }
 .worker-status-grid span { color: #91a8b7; font-size: .78rem; }
