@@ -2,7 +2,7 @@ name: personal-ai-control-plane
 
 services:
   pai-control-plane:
-    image: ${PAI_IMAGE:?PAI_IMAGE must be a commit-bound immutable image}
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:b91c9ce9fc1439cdc11b685b8bc210f0dc977b79866748ed428a1b255cddd654
     restart: unless-stopped
     # Synology bind roots grant write access to the non-root ContainerManager UID.
     user: "106808:106808"
