@@ -323,10 +323,10 @@ function PortalHome() {
       h("article", null, h("span", null, "Memory Spaces"), h("strong", null, namespaces.length || "—"), h("small", null, namespaces.length ? namespaces.map((item) => text(item.namespace)).join(" · ") : "尚待 Identity link")),
       h("article", null, h("span", null, "Workers"), h("strong", null, text(counts.workers ?? 0)), h("small", null, `${text(counts.providers ?? 0)} compute providers`))),
     h("div", { className: "quick-grid" },
-      h("a", { href: "/goals" }, h("span", { className: "quick-icon" }, "◎"), h("strong", null, "工作中心"), h("p", null, "Goals、Approvals、Schedules 與執行證據。")),
-      h("a", { href: "/memory" }, h("span", { className: "quick-icon" }, "◇"), h("strong", null, "Memory"), h("p", null, "直接檢索 ContextHub accepted Memory。")),
-      h("a", { href: "/systems" }, h("span", { className: "quick-icon" }, "▦"), h("strong", null, "Systems"), h("p", null, "集中查看所有服務、版本與 evidence。")),
-      h("a", { href: "/infrastructure" }, h("span", { className: "quick-icon" }, "⌁"), h("strong", null, "Infrastructure"), h("p", null, "AIHomePlatform 基礎設施與 operation 狀態。"))),
+      h("a", { href: "/goals" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◎"), h("strong", null, "工作中心"), h("p", null, "Goals、Approvals、Schedules 與執行證據。")),
+      h("a", { href: "/memory" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◇"), h("strong", null, "Memory"), h("p", null, "直接檢索 ContextHub accepted Memory。")),
+      h("a", { href: "/systems" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "▦"), h("strong", null, "Systems"), h("p", null, "集中查看所有服務、版本與 evidence。")),
+      h("a", { href: "/infrastructure" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "⌁"), h("strong", null, "Infrastructure"), h("p", null, "AIHomePlatform 基礎設施與 operation 狀態。"))),
     h(IntegrationNotice, { title: "Authority boundary", detail: "Portal 只呈現各系統的 authority projection；健康狀態不會被當成部署、備份、還原或 provider 驗證成功。" }));
 }
 
