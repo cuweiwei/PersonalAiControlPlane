@@ -66,6 +66,8 @@ https://gnest.taila77e5f.ts.net/
 
 The root-owned production environment must contain `PAI_WEBAUTHN_RP_ID=gnest.taila77e5f.ts.net` and a one-time `PAI_BOOTSTRAP_TOKEN`; the Compose-owned `PAI_CANONICAL_ORIGIN` must match the Tailscale HTTPS route. The token is entered only in the browser enrollment form, then removed or rotated by the owner after the first credential is registered. The gateway stores only a hash of each challenge and recovery code; it never logs the token or raw challenge.
 
+Live route acceptance on 2026-08-31 verified the default HTTPS Personal AI entry, authenticated `/home`, `/goals`, and `/systems`, `401 AUTH_REQUIRED` for unauthenticated and spoofed-identity requests, and HTTP 200 readiness. The prior `:9084` Serve route is retired; AIHomePlatform is exposed on private `:9443`.
+
 ### Forward-auth contract
 
 The AIHomePlatform-owned private edge calls `GET /api/v1/auth/forward` as its authentication subrequest before forwarding a browser request to the portal or Orchestrator. It sets `x-forwarded-method` to the original uppercase method. For an unsafe method, it also forwards only the browser `Cookie`, `Origin`, and `x-pai-csrf-token` needed by the authentication subrequest; the gateway validates them against the session. Before the original request reaches Control Web or Orchestrator, the edge strips the raw cookie and CSRF header and replaces any client-supplied `x-pai-*` identity claims with gateway response headers.
