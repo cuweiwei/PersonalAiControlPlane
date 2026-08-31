@@ -83,8 +83,12 @@ test("Control Web stylesheet includes visible focus, narrow-screen cards, and re
   assert.doesNotMatch(css, /outline:\s*none/);
 });
 
-test("production Compose connects each process to the AIHomePlatform-owned private edge", () => {
+test("production Compose runs one container while preserving the AIHomePlatform edge aliases", () => {
   const compose = readFileSync(new URL("../compose.prod.yml", import.meta.url), "utf8");
+  const services = compose.slice(compose.indexOf("services:"), compose.indexOf("\nnetworks:"));
+  assert.deepEqual([...services.matchAll(/^  ([a-z][a-z0-9-]+):$/gm)].map((match) => match[1]), ["pai-control-plane"]);
+  assert.equal([...services.matchAll(/^    image:/gm)].length, 1);
+  assert.match(services, /apps\/control-plane\/src\/index\.ts/);
   assert.match(compose, /name: ai-home-platform_edge/);
   for (const alias of ["pai-edge-control-web", "pai-edge-identity", "pai-edge-orchestrator"]) assert.match(compose, new RegExp(`- ${alias}`));
   assert.match(compose, /PAI_CANONICAL_ORIGIN: https:\/\/gnest\.taila77e5f\.ts\.net(?:\r?\n)/);

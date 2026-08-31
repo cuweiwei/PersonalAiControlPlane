@@ -7,7 +7,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node --experimental-strip-types apps/orchestrator/src/index.ts",
+    "start": "node --experimental-strip-types apps/control-plane/src/index.ts",
     "worker:cli": "node --experimental-strip-types apps/worker/src/cli.ts",
     "build:web": "vite build --config apps/control-web/vite.config.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",

@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 const root = resolve(new URL("..", import.meta.url).pathname);
 const required = [
   "package.json",
-  "apps/orchestrator/src/index.ts",
+  "apps/control-plane/src/index.ts",
+  "apps/control-plane/src/control-web-server.ts",
   "apps/orchestrator/src/db.ts",
   "apps/orchestrator/src/task-engine.ts",
   "apps/orchestrator/src/http.ts",
@@ -15,7 +16,6 @@ const required = [
   "apps/identity-gateway/src/db.ts",
   "apps/identity-gateway/src/service.ts",
   "apps/identity-gateway/src/http.ts",
-  "apps/identity-gateway/src/index.ts",
   "apps/identity-gateway/src/grants.ts",
   "packages/contracts/src/index.ts",
   "packages/crypto/src/index.ts",
@@ -53,7 +53,6 @@ const required = [
   "packages/backup/src/index.ts",
   "packages/compute/src/index.ts",
   "Dockerfile",
-  "Dockerfile.control-web",
   "compose.prod.yml",
   ".github/workflows/ci.yml",
   "apps/control-web/index.html",
@@ -61,7 +60,6 @@ const required = [
   "apps/control-web/src/main.ts",
   "apps/control-web/src/styles.css",
   "apps/control-web/vite.config.ts",
-  "apps/control-web/nginx.conf",
   "scripts/release-artifact.mjs",
   "docs/implementation-status.md",
   "schemas/api/v1/goal-create.schema.json",

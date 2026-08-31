@@ -23,7 +23,7 @@ Infrastructure     = AIHomePlatform
 Coding Specialist  = local Codex App runtime using ChatGPT subscription access
 ```
 
-The NAS core is a modular monolith rather than a collection of microservices. Planning, scheduling, policy, task persistence, compute routing, worker coordination, and proactive triggers share one Orchestrator transaction boundary. Identity and Conversation Archive remain separate authority stores, but all three are released as one bounded product stack.
+The NAS core is a modular monolith rather than a collection of microservices. Control Web, Identity, Orchestrator, and Conversation Archive run in one non-root container and one Node process. Planning, scheduling, policy, task persistence, compute routing, worker coordination, and proactive triggers share one Orchestrator transaction boundary. Identity and Conversation Archive remain separate authority stores with independent SQLite files inside the bounded product stack.
 
 This design optimizes for a single owner, one NAS, fewer credentials, recoverability, and observable failure rather than high availability or horizontal scale.
 
@@ -175,13 +175,13 @@ flowchart TB
 
 ### 6.1 Deployment shape
 
-The new NAS stack contains:
+The new NAS stack contains one `pai-control-plane` container and one Node process. It exposes three internal listeners so the existing private edge can keep stable routing aliases:
 
-- `pai-identity-gateway`: Passkey authority and forward-auth service.
-- `pai-orchestrator`: modular core containing API, planner, scheduler, policy, approvals, compute broker, quota, worker coordination, proactive engine, connector coordination, and archive services.
-- `pai-control-web`: static management portal.
+- `pai-edge-identity:9084`: Passkey authority and forward-auth module.
+- `pai-edge-orchestrator:9085`: modular core containing API, planner, scheduler, policy, approvals, compute broker, quota, worker coordination, proactive engine, connector coordination, and archive services.
+- `pai-edge-control-web:8080`: built static management portal.
 
-These are separately named processes/containers but one product release and one repository. Internal modules communicate in process where possible. No Redis, Kafka, or external workflow engine is introduced initially.
+Identity, Orchestrator, and Conversation Archive keep typed module and database ownership boundaries, but they intentionally share one process, image, lifecycle, and failure domain. No Redis, Kafka, process supervisor, or external workflow engine is introduced.
 
 ## 7. Repository and ownership topology
 
@@ -255,7 +255,7 @@ The worker runtime stays in `PersonalAiControlPlane` initially because the job e
 
 ### 9.1 Shared Identity Gateway
 
-The existing AIHomePlatform WebAuthn code is refactored, not copied, into `pai-identity-gateway`.
+The existing AIHomePlatform WebAuthn code is refactored, not copied, into the Control Plane's Identity module. Its protocol-level issuer name remains `pai-identity-gateway` for grant compatibility; it is not a separate container.
 
 Responsibilities:
 
@@ -621,7 +621,7 @@ Development approval does not automatically authorize deployment or use. Self-ex
 | AIHomePlatform `control.db` | AIHomePlatform | Service registry observations, operations, release evidence, audit, backup evidence | Orchestrator tasks, application data |
 | OpenBao / root environment | AIHomePlatform infrastructure | NAS-held runtime secrets | User-facing values or LLM-visible payloads |
 
-The SQLite files are never shared between processes as an integration API. Each owner exposes typed APIs. Separate files preserve backup, restore, corruption, release, and rollback boundaries.
+The SQLite files are never used as an integration API between modules. Each authority exposes typed operations, and separate files preserve backup, restore, corruption analysis, and data-ownership boundaries even though the runtime lifecycle is shared.
 
 ### 10.2 Orchestrator core entities
 
@@ -976,8 +976,8 @@ Tailscale Serve :443
         |
 AIHomePlatform-owned Traefik/private edge
         |
-        +-- /                  -> pai-control-web / pai-orchestrator
-        +-- /auth              -> pai-identity-gateway
+        +-- /                  -> pai-control-plane :8080 / :9085
+        +-- /auth              -> pai-control-plane :9084
         +-- /infrastructure    -> AIHomePlatform
         +-- /memory            -> ContextHub Control Center
 
@@ -993,7 +993,7 @@ Tailscale mesh
 └── Windows worker(s)
 ```
 
-The Personal AI stack must use immutable Linux/amd64 images, its own Compose project name, its own approved bind roots, and a new exact deployment gateway allowlist ID. It must not be deployed until that ID exists. Production delivery follows repository tests, commit, CI image publication, immutable digest pin, staging upload, gateway validation, deploy, status, loopback/tailnet health, auth behavior, backup, and restore evidence.
+The Personal AI stack must use one immutable Linux/amd64 image, its own Compose project name, its own approved bind roots, and a new exact deployment gateway allowlist ID. It must not be deployed until that ID exists. Production delivery follows repository tests, commit, CI image publication, immutable digest pin, staging upload, gateway validation, deploy, status, loopback/tailnet health, auth behavior, backup, and restore evidence.
 
 ## 18. Migration plan and constraints
 
@@ -1104,7 +1104,7 @@ Constraint: current ContextHub `AGENTS.md`, ADR-001, policies, tests, and docs i
 
 | Decision | Benefit | Cost / limitation |
 | --- | --- | --- |
-| Modular monolith on NAS | Fewer services and transactional core | Core release is coupled; internal boundaries require discipline |
+| Single-container modular monolith on NAS | One image, one process, one health lifecycle, and a transactional core | Identity, UI, and Orchestrator now share restart, memory, secret, and compromise blast radius; internal boundaries require discipline |
 | SQLite single writer | Familiar, reliable, low operations burden | No active-active HA and limited write concurrency |
 | Separate SQLite authorities | Clear data/restore ownership | More backup manifests and cross-service reconciliation |
 | App-backed Codex subscription | Reuses Plus subscription; avoids default API billing | Quota is shared with human use and reset timing is not authoritative |

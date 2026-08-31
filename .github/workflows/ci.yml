@@ -40,15 +40,6 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
-      - id: build-web
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.control-web
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}-web
-          labels: org.opencontainers.image.revision=${{ github.sha }}
       - name: Generate release manifest
         env:
           RELEASE_COMMIT: ${{ github.sha }}
@@ -57,8 +48,6 @@ jobs:
           RELEASE_DEPLOYMENT_PROJECT_ID: PersonalAiControlPlane
           RELEASE_IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
           RELEASE_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-          RELEASE_ADDITIONAL_IMAGES_JSON: >-
-            [{"serviceId":"personal-ai-control-web","imageReference":"ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}-web","imageDigest":"${{ steps.build-web.outputs.digest }}"}]
         run: npm run release:artifact
       - uses: actions/upload-artifact@v4
         with:
