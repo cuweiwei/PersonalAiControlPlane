@@ -37,7 +37,7 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 
 ### 2.2 建立第一個 Goal
 
-1. 開啟正式 Control Web 網址；未登入時會顯示 Passkey 頁面，成功後自動進入 `/goals`。
+1. 開啟正式 Portal 網址；未登入時會顯示 Passkey 頁面，成功後自動進入 `/home`。
 2. 從上方導覽列選擇 **Goals**。
 3. 在「新增 durable goal」欄位輸入想完成的事情。
 4. 選擇「提交 Goal」。
@@ -56,6 +56,7 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 
 | 選單 | 主要用途 | 你可以做的事情 |
 | --- | --- | --- |
+| **首頁** | 單一日常入口 | 一次查看 Goal、服務、Memory 與 infrastructure 的 authority 摘要 |
 | **Goals** | 提出與追蹤工作 | 新增 Goal、查看 plan/tasks/events、取消、重試可恢復工作 |
 | **Approvals** | 控制風險與資源邊界 | 檢查風險、plan digest、資源與權限範圍；Passkey 核准或拒絕 |
 | **Schedules** | 建立週期性工作 | 建立間隔排程、暫停、立即執行、延後一小時 |
@@ -67,8 +68,9 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 | **Policies** | 管理系統自治規則 | 查看版本；以 JSON 建立新的 immutable policy revision |
 | **Audit** | 查核系統操作 | 查看最近的 actor、action、target、decision 與 hash chain 資訊 |
 | **System** | 查看整體狀態 | 查看 health、Goal/Approval/Worker/Provider/DLQ 數量與外部入口 |
-| **Infrastructure** | 進入基礎設施管理 | 前往 AIHomePlatform，查看服務、release、部署與 rollback 權責 |
-| **Memory** | 進入語意記憶管理 | 前往 ContextHub，檢索與治理 semantic Memory |
+| **Systems** | 集中查看獨立服務 | 查看服務健康、版本與 evidence；Hermes 從卡片開啟其獨立 Dashboard |
+| **Infrastructure** | 查看基礎設施 authority | 在 Portal 讀取 AIHomePlatform 服務與 operation；部署與 rollback 仍維持原權責 |
+| **Memory** | 查看語意記憶 authority | 在 Portal 檢索 ContextHub accepted Memory；review 與 policy mutation 仍由 ContextHub 管理 |
 
 ## 4. 常見操作
 
@@ -237,9 +239,10 @@ Goal 或 task detail 可能出現以下狀態：
 | 建立週期性工作 | **Control Web → Schedules** |
 | 查看 AI provider、worker 與 quota | **Control Web → Compute / Workers** |
 | 管理原始對話 | **Control Web → Conversations** |
-| 管理長期語意記憶 | **Memory → ContextHub** |
-| 查看服務、release、部署或 rollback | **Infrastructure → AIHomePlatform** |
-| 日常聊天、通知或快速查狀態 | **Telegram / Hermes**；僅在 connector 已有 live evidence 時使用 |
+| 管理長期語意記憶 | **Portal → Memory**；進階治理仍屬 ContextHub |
+| 查看服務、release 或部署紀錄 | **Portal → Systems / Infrastructure** |
+| 執行部署或 rollback | AIHomePlatform 原本的核准、step-up 與 deployment gateway 路徑；Portal 目前不執行 mutation |
+| 日常聊天、通知或快速查狀態 | **Portal → Systems → Hermes Dashboard** 或 Telegram；Hermes 維持獨立發版 |
 | 讓另一個受信任系統建立 Goal | **REST API**；必須使用既有 workload auth 與 idempotency contract |
 
 ## 8. 使用時的安全原則

@@ -75,7 +75,7 @@ test("wired adapter reports production readiness and serves the owner entry page
     assert.match(pageHtml, /clientExtensionResults: credential\.getClientExtensionResults/);
     assert.match(pageHtml, /const authenticationJSON = \(credential\) => \{ const rawId = b64\(credential\.rawId\); return \{ id: rawId, rawId/);
     assert.match(pageHtml, /fetch\('\/api\/v1\/auth\/me'/);
-    assert.match(pageHtml, /location\.replace\('\/goals'\)/);
+    assert.match(pageHtml, /location\.replace\('\/home'\)/);
     assert.doesNotMatch(pageHtml, /publicKey:start\.options/);
     const status = await fetch(`http://127.0.0.1:${address.port}/api/v1/auth/status`);
     assert.equal(status.status, 200);

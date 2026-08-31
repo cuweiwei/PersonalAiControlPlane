@@ -10,12 +10,27 @@ test("Control Web renders owner read projections with semantic navigation and ev
   const document = readFileSync(new URL("../apps/control-web/index.html", import.meta.url), "utf8");
   assert.match(document, /<html lang="zh-Hant">/);
   assert.match(markup, /Control Plane/);
-  assert.match(markup, /<nav aria-label="主要導覽">/);
+  assert.match(markup, /<nav aria-label="主要導覽" class="primary-nav">/);
   assert.match(markup, /aria-current="page"[^>]*>Workers/);
   assert.match(markup, /<main id="main" tabindex="-1">/);
   assert.match(markup, /Health 不等於 management/);
-  for (const label of ["Goals", "Approvals", "Schedules", "Workers", "Compute", "Conversations", "Connectors", "Credentials", "Policies", "Audit", "System", "Infrastructure", "Memory"]) assert.match(markup, new RegExp(`>${label}<`));
+  for (const label of ["首頁", "Goals", "Approvals", "Schedules", "Workers", "Compute", "Conversations", "Connectors", "Credentials", "Policies", "Audit", "System", "Systems", "Infrastructure", "Memory"]) assert.match(markup, new RegExp(`>${label}<`));
   assert.match(markup, /role="status"/);
+});
+
+test("Control Web exposes one portal entry while preserving service authority boundaries", () => {
+  const home = renderToStaticMarkup(React.createElement(App, { initialPath: "/home" }));
+  const systems = renderToStaticMarkup(React.createElement(App, { initialPath: "/systems" }));
+  const infrastructure = renderToStaticMarkup(React.createElement(App, { initialPath: "/infrastructure" }));
+  const memory = renderToStaticMarkup(React.createElement(App, { initialPath: "/memory" }));
+  assert.match(home, /你的 Personal AI 首頁/);
+  assert.match(home, /ONE OWNER · ONE PRIVATE ENTRY/);
+  assert.match(systems, /INDEPENDENT SERVICES · ONE PORTAL/);
+  assert.match(systems, /Hermes 維持獨立入口/);
+  assert.match(infrastructure, /AIHOMEPLATFORM AUTHORITY/);
+  assert.match(infrastructure, /owner-safe read integration/);
+  assert.match(memory, /CONTEXTHUB SEMANTIC AUTHORITY/);
+  assert.match(memory, /Memory authority remains ContextHub/);
 });
 
 test("Control Web exposes durable goal, schedule, and step-up policy management forms", () => {

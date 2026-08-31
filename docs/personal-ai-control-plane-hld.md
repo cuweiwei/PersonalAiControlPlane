@@ -564,7 +564,9 @@ Primary surfaces:
 - Links/proxied routes to ContextHub Memory Control Center.
 - Links/proxied routes to AIHomePlatform infrastructure management.
 
-AIHomePlatform and ContextHub remain the APIs of record for their domain screens. The portal does not copy their tables into the Orchestrator database.
+AIHomePlatform and ContextHub remain the APIs of record for their domain screens. The portal does not copy their tables into the Orchestrator database. The first integration slice is safe-method-only: the owner Passkey session is verified at the shared edge, client-supplied identity headers are stripped, and each downstream authority maps the forwarded owner to its own read policy. Mutations remain unavailable until a bounded signed action-grant contract exists.
+
+Hermes is deliberately not embedded as a micro-frontend or reverse-proxied subpath. Its Portal card shows registry health, version, and evidence, then opens the Hermes-owned Dashboard in a separate browser context. This keeps Hermes package updates, repository, image, data, deployment, and rollback independent from Portal releases.
 
 ### 9.16 Proactive engine
 
