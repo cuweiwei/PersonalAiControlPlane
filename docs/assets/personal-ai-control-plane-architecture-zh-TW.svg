@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1200" viewBox="0 0 1920 1200" role="img" aria-labelledby="title description">
   <title id="title">Personal AI Control Plane 新手系統架構與使用入口</title>
-  <desc id="description">從 Control Web、Telegram Hermes 或自動排程進入，經過私有邊界與 Passkey 驗證後，由 Personal AI Orchestrator 規劃、審批、分派、驗證，並使用 ContextHub、AIHomePlatform 與個人運算節點完成工作。</desc>
+  <desc id="description">從 Control Web、Telegram Hermes 或自動排程進入，經過 Personal AI 自有私有 edge 與 Passkey 驗證後，由 Personal AI Orchestrator 規劃、審批、分派、驗證，並使用 ContextHub 與個人運算節點完成工作；基礎設施由 owner/operator 經 root-owned deployment gateway 管理。</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#07131f"/>
@@ -152,8 +152,8 @@
   </g>
   <text class="card-subtitle" x="548" y="288">PRIVATE OWNER BOUNDARY</text>
   <rect x="548" y="305" width="370" height="66" rx="16" fill="#102a3c" stroke="#397897"/>
-  <text class="card-title" x="572" y="334">AIHomePlatform private edge</text>
-  <text class="small" x="572" y="358">Tailscale／反向代理／同源 routing</text>
+  <text class="card-title" x="572" y="334">Personal AI private edge</text>
+  <text class="small" x="572" y="358">Tailscale :443／同源 routing／forward-auth</text>
   <path class="line" d="M 918 338 L 975 338"/>
   <rect x="989" y="305" width="353" height="66" rx="16" fill="#1c2032" stroke="#d491e8"/>
   <text class="card-title" x="1013" y="334">Identity Gateway</text>
@@ -232,7 +232,7 @@
   <text class="tiny" x="1098" y="922">不是語意 Memory；可攜式 resume fallback</text>
 
   <rect x="550" y="963" width="790" height="20" rx="10" fill="#0a1721"/>
-  <text class="tiny muted" x="569" y="977">安全邊界：Orchestrator 不持有 NAS root／Docker socket；不繞過 AIHomePlatform 與 root-owned deployment gateway。</text>
+  <text class="tiny muted" x="569" y="977">安全邊界：Orchestrator 不持有 NAS root／Docker socket；基礎設施只經 owner/operator 的 root-owned deployment gateway。</text>
 
   <!-- Results column -->
   <g filter="url(#shadow)">
@@ -256,8 +256,8 @@
   <text class="small" x="1462" y="605">唯一的語意 Memory authority｜檢索、治理、衝突</text>
 
   <rect x="1438" y="640" width="398" height="74" rx="16" fill="#102835" stroke="#3f718a"/>
-  <text class="card-title" x="1462" y="668">AIHomePlatform</text>
-  <text class="small" x="1462" y="693">基礎設施／release／deployment／rollback 最終權責</text>
+  <text class="card-title" x="1462" y="668">Deployment Gateway</text>
+  <text class="small" x="1462" y="693">owner/operator 經 root-owned 邊界執行 release／deployment／rollback</text>
 
   <rect x="1438" y="728" width="398" height="74" rx="16" fill="#211d1b" stroke="#f6bd60" stroke-dasharray="8 6"/>
   <text class="card-title" x="1462" y="756">Hermes 與外部 Connectors</text>

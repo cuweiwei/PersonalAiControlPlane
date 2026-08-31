@@ -14,7 +14,7 @@ test("Control Web renders owner read projections with semantic navigation and ev
   assert.match(markup, /aria-current="page"[^>]*>Workers/);
   assert.match(markup, /<main id="main" tabindex="-1">/);
   assert.match(markup, /Health 不等於 management/);
-  for (const label of ["首頁", "Goals", "Approvals", "Schedules", "Workers", "Compute", "Conversations", "Connectors", "Credentials", "Policies", "Audit", "System", "Systems", "Infrastructure", "Memory"]) assert.match(markup, new RegExp(`>${label}<`));
+  for (const label of ["首頁", "Goals", "Approvals", "Schedules", "Workers", "Compute", "Conversations", "Connectors", "Credentials", "Policies", "Audit", "System", "Systems", "Memory"]) assert.match(markup, new RegExp(`>${label}<`));
   assert.match(markup, /role="status"/);
 });
 
@@ -31,14 +31,13 @@ test("Worker tab exposes enrollment, status, provider, and lifecycle controls", 
 test("Control Web exposes one portal entry while preserving service authority boundaries", () => {
   const home = renderToStaticMarkup(React.createElement(App, { initialPath: "/home" }));
   const systems = renderToStaticMarkup(React.createElement(App, { initialPath: "/systems" }));
-  const infrastructure = renderToStaticMarkup(React.createElement(App, { initialPath: "/infrastructure" }));
   const memory = renderToStaticMarkup(React.createElement(App, { initialPath: "/memory" }));
   assert.match(home, /你的 Personal AI 首頁/);
   assert.match(home, /ONE OWNER · ONE PRIVATE ENTRY/);
-  assert.match(systems, /INDEPENDENT SERVICES · ONE PORTAL/);
-  assert.match(systems, /Hermes 維持獨立入口/);
-  assert.match(infrastructure, /AIHOMEPLATFORM AUTHORITY/);
-  assert.match(infrastructure, /owner-safe read integration/);
+  assert.match(systems, /PERSONAL AI RUNTIME/);
+  assert.match(systems, /Independent authority boundaries/);
+  assert.doesNotMatch(home, /AIHomePlatform/);
+  assert.doesNotMatch(systems, /AIHomePlatform/);
   assert.match(memory, /CONTEXTHUB SEMANTIC AUTHORITY/);
   assert.match(memory, /Memory authority remains ContextHub/);
 });
@@ -83,16 +82,19 @@ test("Control Web stylesheet includes visible focus, narrow-screen cards, and re
   assert.doesNotMatch(css, /outline:\s*none/);
 });
 
-test("production Compose runs one container while preserving the AIHomePlatform edge aliases", () => {
+test("production Compose runs one container with a self-owned private edge", () => {
   const compose = readFileSync(new URL("../compose.prod.yml", import.meta.url), "utf8");
-  const services = compose.slice(compose.indexOf("services:"), compose.indexOf("\nnetworks:"));
+  const services = compose.slice(compose.indexOf("services:"));
   assert.deepEqual([...services.matchAll(/^  ([a-z][a-z0-9-]+):$/gm)].map((match) => match[1]), ["pai-control-plane"]);
   assert.equal([...services.matchAll(/^    image:/gm)].length, 1);
   assert.match(services, /apps\/control-plane\/src\/index\.ts/);
-  assert.match(compose, /name: ai-home-platform_edge/);
-  for (const alias of ["pai-edge-control-web", "pai-edge-identity", "pai-edge-orchestrator"]) assert.match(compose, new RegExp(`- ${alias}`));
+  assert.doesNotMatch(compose, /ai-home-platform_edge/);
+  for (const alias of ["pai-edge-control-web", "pai-edge-identity", "pai-edge-orchestrator"]) assert.doesNotMatch(compose, new RegExp(`- ${alias}`));
   assert.match(compose, /PAI_CANONICAL_ORIGIN: https:\/\/gnest\.taila77e5f\.ts\.net(?:\r?\n)/);
   assert.doesNotMatch(compose, /127\.0\.0\.1:9084:9084/);
   assert.match(compose, /127\.0\.0\.1:9083:8080/);
+  assert.match(compose, /127\.0\.0\.1:9084:8081/);
   assert.match(compose, /127\.0\.0\.1:9085:9085/);
+  assert.match(compose, /PAI_EDGE_PORT: "8081"/);
+  assert.match(compose, /PAI_MEMORY_ORIGIN: http:\/\/host\.docker\.internal:8788/);
 });

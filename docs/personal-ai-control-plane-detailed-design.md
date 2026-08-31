@@ -11,6 +11,10 @@ Parent documents:
 
 Scope: Implementation design for the brownfield target architecture. This document does not authorize source changes, production migration, enrollment, or deployment.
 
+## Current superseding separation decision (2026-08-31)
+
+The shared AI Home Platform edge described in historical sections is retired. The active implementation is a Personal AI-owned private edge in the same non-root container: Tailscale HTTPS `:443` -> NAS loopback `127.0.0.1:9084` -> edge listener `:8081`. It owns Identity/Passkey, Control Web, Orchestrator/SSE, signed Worker HTTP/WebSocket, and the safe-method ContextHub Memory projection. `/infrastructure` and `/api/portal/v1/infrastructure/*` are removed and return `404`. AI Home Platform, Traefik, OpenBao, Prometheus, Grafana, shared Docker networks, and the old `:9443` route are not runtime dependencies; their repository, data, Compose and immutable image remain independently recoverable. Infrastructure changes are performed by the owner/operator through the root-owned deployment gateway, never by the Orchestrator.
+
 ## 1. Design outcome
 
 The first implementation is one TypeScript product with two deliverables:
@@ -27,7 +31,7 @@ Device release
 └── pai-worker             macOS and Windows outbound execution runtime
 ```
 
-`pai-control-plane` is a modular monolith. Modules interact through typed in-process ports and explicit authority APIs. Identity, Orchestrator, Conversation Archive, and Control Web intentionally share one process and container to minimize owner operations. Identity and Conversation Archive retain independent databases and ownership contracts, but process-level secret, restart, and compromise isolation is no longer claimed. The three existing internal listeners remain so AIHomePlatform routing does not need a coordinated migration.
+`pai-control-plane` is a modular monolith. Modules interact through typed in-process ports and explicit authority APIs. Identity, Orchestrator, Conversation Archive, and Control Web intentionally share one process and container to minimize owner operations. Identity and Conversation Archive retain independent databases and ownership contracts, but process-level secret, restart, and compromise isolation is no longer claimed. The three module listeners remain inside the container, with the additional self-owned edge listener on `8081`; no external AI Home Platform aliases or shared network are required.
 
 The design preserves these non-negotiable authority boundaries:
 
@@ -37,7 +41,7 @@ The design preserves these non-negotiable authority boundaries:
 | Goal and task execution | Orchestrator module (`pai-orchestrator` logical audience) | Only durable planner and task-state writer |
 | Raw conversations | Conversation Archive | Stores normalized history and retention state |
 | Semantic Memory | ContextHub | Compile/propose through its API; never copy accepted Memory into Orchestrator tables |
-| Infrastructure operations | AIHomePlatform | Request typed operations; never call Docker or the NAS gateway directly |
+| Infrastructure operations | Owner/operator + root-owned deployment gateway | Execute validated deployment/rollback/status workflow; Orchestrator never calls Docker, NAS root, or the gateway |
 | Production privilege | Root-owned NAS deployment gateway | Unchanged final deployment boundary |
 | Provider credentials | OpenBao, root environment, or device OS vault | Expose only opaque capability handles |
 
@@ -1525,25 +1529,9 @@ The ContextHub scope migration is a separate repository change and ADR. This rep
 
 Compatibility requires a ContextHub feature response declaring the owner-domain plus conceptual-scope contract version. The migration in that repository must back up/export first, preserve item IDs where possible, revisions, source, authority, trust, reviews, successor/supersession links, claim keys, conflict behavior, audit evidence, and import provenance. Acceptance reconciles row counts and canonical checksums, rebuilds retrieval indexes, tests representative scope retrieval and same-`claim_key` conflict exclusion, then runs an isolated rollback. Existing personal/work namespaces are archived only after those gates pass; the Orchestrator never performs direct production SQL or uses a break-glass admin credential to bypass them.
 
-### 19.4 AIHomePlatform adapter
+### 19.4 Retired AIHomePlatform runtime adapter
 
-```ts
-interface InfrastructureAdapter {
-  getServiceCapability(serviceId: string): Promise<ServiceCapability>;
-  requestOperation(input: {
-    serviceId: string;
-    action: "deploy" | "rollback" | "backup" | "restore-test";
-    releaseCoordinates?: ReleaseCoordinates;
-    actionGrant: string;
-    idempotencyKey: string;
-  }): Promise<OperationRef>;
-  getOperation(ref: OperationRef): Promise<OperationStatus>;
-}
-```
-
-The adapter requires service manifest capability, immutable release coordinates, relevant release/live evidence, exact grant scope, and AIHomePlatform acceptance. It never shells into the NAS, writes Compose, calls Docker, or calls the deployment gateway. Readiness health is not operation authority.
-
-An infrastructure task is complete only after the task's declared evidence set passes, which may include CI/release coordinates, AIHomePlatform operation result, gateway status, NAS loopback health, tailnet health, expected unauthenticated `401`, authenticated behavior, and application-specific checks.
+The former `InfrastructureAdapter` and all Personal AI calls to AI Home Platform are retired. Personal AI does not proxy, schedule, or mutate infrastructure. Owner/operator infrastructure work uses the independent root-owned deployment gateway with repository-scoped staging, validation, deployment, status, and rollback evidence. AI Home Platform's repository and data remain recoverable but are not a runtime dependency.
 
 ### 19.5 Hermes adapter
 
@@ -1663,7 +1651,7 @@ Backoff is capped exponential with jitter. Retry counters are per logical task a
 | Worker disconnect during non-idempotent mutation | Wait for reconciliation/owner action |
 | Duplicate/stale worker result | Store rejected evidence; fencing prevents completion |
 | ContextHub unavailable | Apply task `memoryRequirement`; never invent Memory success |
-| AIHomePlatform unavailable | Wait/fail infrastructure step; no direct fallback |
+| Retired AI Home Platform | No Personal AI runtime dependency; owner/operator uses its independent recovery/deployment boundary |
 | Identity module not ready | Existing non-expired worker execution may reach a safe checkpoint; no new grants or sensitive action |
 | Artifact write/digest failure | Do not reference artifact or claim checkpoint |
 | Disk warning | Alert/backpressure optional ingestion; preserve forever data |
@@ -1719,8 +1707,7 @@ Prompt-injection detection remains backlog. Therefore broad autonomous action de
 | NAS -> worker | signed connection and messages, device status, exact capability grant |
 | Worker -> adapter | action-grant bounds, local root/destination checks, credential purpose |
 | Orchestrator -> ContextHub | typed API, owner domain/scope, idempotency, conflict fail-closed |
-| Orchestrator -> AIHomePlatform | service capability, evidence, signed action grant, idempotency |
-| AIHomePlatform -> gateway | existing root-owned validated workflow only |
+| Owner/operator -> gateway | repository-scoped Compose staging, validation, deployment, status, rollback |
 
 ### 23.3 Redaction
 
@@ -1949,7 +1936,6 @@ Startup fails closed on:
 /policies
 /audit
 /system
-/infrastructure/*   AIHomePlatform-owned route
 /memory/*           ContextHub-owned route
 ```
 
@@ -2004,7 +1990,7 @@ Discovered and granted state use separate controls and labels. Descriptor change
 
 The service uses no `build:`, privileged mode, host namespaces, Docker socket, devices, added capabilities, arbitrary host mounts, or root-owned production file writes. Its health check succeeds only when the static portal, Identity readiness, and Orchestrator readiness all succeed.
 
-The stack has a unique Compose project name, independent image/release, persistent roots, backup set, rollback boundary, AIHomePlatform manifest, and exact NAS gateway allowlist ID.
+The stack has a unique Compose project name, independent image/release, persistent roots, backup set, rollback boundary, and exact NAS gateway allowlist ID. It does not require an AIHomePlatform manifest or runtime network.
 
 ### 28.2 Delivery chain
 

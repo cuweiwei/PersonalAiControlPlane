@@ -6,7 +6,6 @@ type View = { key: string; label: string; endpoint: string; empty: string };
 type PortalRoute =
   | { kind: "home" }
   | { kind: "systems" }
-  | { kind: "infrastructure" }
   | { kind: "memory" }
   | { kind: "resource"; view: View; id?: string };
 
@@ -93,7 +92,6 @@ function route(path: string): PortalRoute {
   const parts = path.split("/").filter(Boolean);
   if (parts.length === 0 || parts[0] === "home") return { kind: "home" };
   if (parts[0] === "systems") return { kind: "systems" };
-  if (parts[0] === "infrastructure") return { kind: "infrastructure" };
   if (parts[0] === "memory") return { kind: "memory" };
   const view = views.find((candidate) => candidate.key === parts[0]) ?? views[0];
   return { kind: "resource", view, id: parts[1] };
@@ -297,112 +295,72 @@ function ResourceView({ view, id }: { view: View; id?: string }) {
 }
 
 function PortalHome() {
-  const [data, setData] = useState<{ system?: Item; infrastructure?: Item; memory?: Item }>({});
+  const [data, setData] = useState<{ system?: Item; memory?: Item }>({});
   const [state, setState] = useState<ResourceState>("loading");
   const refresh = useCallback(async () => {
     setState("loading");
-    const [system, infrastructure, memory] = await Promise.allSettled([
+    const [system, memory] = await Promise.allSettled([
       jsonRequest("/api/v1/system"),
-      jsonRequest("/api/portal/v1/infrastructure/dashboard"),
       jsonRequest("/api/portal/v1/memory/namespaces"),
     ]);
     setData({
       system: system.status === "fulfilled" ? system.value : undefined,
-      infrastructure: infrastructure.status === "fulfilled" ? infrastructure.value : undefined,
       memory: memory.status === "fulfilled" ? memory.value : undefined,
     });
     setState("ready");
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const counts = data.system && typeof data.system.counts === "object" ? data.system.counts as Item : {};
-  const totals = data.infrastructure && typeof data.infrastructure.totals === "object" ? data.infrastructure.totals as Item : {};
   const namespaces = items(data.memory, "namespaces");
   return h("section", { "aria-labelledby": "home-title" },
     h("div", { className: "portal-hero" },
-      h("div", null, h("p", { className: "eyebrow" }, "ONE OWNER · ONE PRIVATE ENTRY"), h("h2", { id: "home-title" }, "你的 Personal AI 首頁"), h("p", null, "工作、Memory、服務與基礎設施集中在同一個 Passkey Portal；各 authority 仍保留自己的資料與部署邊界。")),
-      h("div", { className: "hero-actions" }, h("a", { className: "button-link", href: "/goals" }, "建立 Goal"), h("a", { className: "button-link secondary", href: "/systems#hermes-agent" }, "Hermes 狀態"))),
+      h("div", null, h("p", { className: "eyebrow" }, "ONE OWNER · ONE PRIVATE ENTRY"), h("h2", { id: "home-title" }, "你的 Personal AI 首頁"), h("p", null, "工作、Memory 與 Personal AI 執行狀態集中在同一個 Passkey Portal；外部系統仍保留自己的資料與部署邊界。")),
+      h("div", { className: "hero-actions" }, h("a", { className: "button-link", href: "/goals" }, "建立 Goal"), h("a", { className: "button-link secondary", href: "/systems" }, "系統狀態"))),
     state === "loading" ? h(LoadingPanel, { message: "正在同步各 authority 的只讀總覽…" }) : null,
     h("div", { className: "metric-grid" },
       h("article", null, h("span", null, "Durable Goals"), h("strong", null, text(counts.goals ?? 0)), h("small", null, `${text(counts.openApprovals ?? 0)} 個待核准`)),
-      h("article", null, h("span", null, "Managed Services"), h("strong", null, text(totals.all ?? "—")), h("small", null, `${text(totals.healthy ?? 0)} healthy`)),
       h("article", null, h("span", null, "Memory Spaces"), h("strong", null, namespaces.length || "—"), h("small", null, namespaces.length ? namespaces.map((item) => text(item.namespace)).join(" · ") : "尚待 Identity link")),
-      h("article", null, h("span", null, "Workers"), h("strong", null, text(counts.workers ?? 0)), h("small", null, `${text(counts.providers ?? 0)} compute providers`))),
+      h("article", null, h("span", null, "Workers"), h("strong", null, text(counts.workers ?? 0)), h("small", null, `${text(counts.providers ?? 0)} compute providers`)),
+      h("article", null, h("span", null, "Runtime"), h("strong", null, text(nested(data.system, "health", "status") ?? "—")), h("small", null, text(nested(data.system, "health", "runtime") ?? "evidence pending")))),
     h("div", { className: "quick-grid" },
       h("a", { href: "/goals" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◎"), h("strong", null, "工作中心"), h("p", null, "Goals、Approvals、Schedules 與執行證據。")),
       h("a", { href: "/memory" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◇"), h("strong", null, "Memory"), h("p", null, "直接檢索 ContextHub accepted Memory。")),
-      h("a", { href: "/systems" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "▦"), h("strong", null, "Systems"), h("p", null, "集中查看所有服務、版本與 evidence。")),
-      h("a", { href: "/infrastructure" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "⌁"), h("strong", null, "Infrastructure"), h("p", null, "AIHomePlatform 基礎設施與 operation 狀態。"))),
+      h("a", { href: "/systems" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "▦"), h("strong", null, "Systems"), h("p", null, "查看 Personal AI 自身狀態與獨立服務入口。"))),
     h(IntegrationNotice, { title: "Authority boundary", detail: "Portal 只呈現各系統的 authority projection；健康狀態不會被當成部署、備份、還原或 provider 驗證成功。" }));
 }
 
-function InfrastructureView() {
-  const [dashboard, setDashboard] = useState<Item | null>(null);
-  const [operations, setOperations] = useState<Item[]>([]);
-  const [state, setState] = useState<ResourceState>("loading");
-  const [message, setMessage] = useState("正在讀取 AIHomePlatform…");
-  const refresh = useCallback(async () => {
-    setState("loading");
-    try {
-      const [nextDashboard, nextOperations] = await Promise.all([
-        jsonRequest("/api/portal/v1/infrastructure/dashboard"),
-        jsonRequest("/api/portal/v1/infrastructure/operations"),
-      ]);
-      setDashboard(nextDashboard);
-      setOperations(items(nextOperations, "operations"));
-      setState("ready");
-      setMessage("AIHomePlatform authority 已同步；敏感 mutation 仍維持原本的核准與 step-up 邊界。");
-    } catch (error) {
-      setState("error");
-      setMessage(error instanceof Error ? error.message : "AIHomePlatform 讀取失敗");
-    }
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const infrastructure = items(dashboard, "infrastructure");
-  return h("section", { "aria-labelledby": "infrastructure-title" },
-    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "AIHOMEPLATFORM AUTHORITY"), h("h2", { id: "infrastructure-title" }, "Infrastructure")), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")),
-    h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status" }, message),
-    h("div", { className: "card-grid" }, infrastructure.map((item) => h("article", { className: "card infrastructure-card", key: text(item.id) }, h("div", { className: "card-title-row" }, h("h3", null, text(item.label)), h(StatusPill, { value: item.state })), h("p", null, text(item.detail)), h("small", null, "Private network · no Docker socket")))),
-    h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "RECENT OPERATIONS"), h("h2", null, "Release 與部署紀錄"))),
-    operations.length ? h("div", { className: "card-grid" }, operations.slice(0, 12).map((item) => h("article", { className: "card", key: text(item.id) }, h("div", { className: "card-title-row" }, h("h3", null, `${text(item.action)} · ${text(item.serviceId)}`), h(StatusPill, { value: item.status })), h("p", null, text(item.commitSha ?? item.imageDigest)), h("small", null, text(item.completedAt ?? item.createdAt))))) : state === "ready" ? h("p", { className: "empty" }, "目前沒有 infrastructure operations。") : null,
-    h(IntegrationNotice, { title: "目前為 owner-safe read integration", detail: "Portal 不會直接呼叫 Docker、NAS gateway 或 root-owned Compose。部署與 rollback 後續必須使用簽署 action grant 才會在這裡開放。" }));
-}
-
 function SystemsView() {
-  const [services, setServices] = useState<Item[]>([]);
+  const [system, setSystem] = useState<Item | null>(null);
   const [state, setState] = useState<ResourceState>("loading");
-  const [message, setMessage] = useState("正在讀取 service registry…");
+  const [message, setMessage] = useState("正在讀取 Personal AI 狀態…");
   const refresh = useCallback(async () => {
     setState("loading");
     try {
-      const dashboard = await jsonRequest("/api/portal/v1/infrastructure/dashboard");
-      setServices(items(dashboard, "services"));
+      setSystem(await jsonRequest("/api/v1/system"));
       setState("ready");
-      setMessage("服務 registry 已同步；Hermes 維持獨立入口，其餘服務由 Portal 集中呈現。");
-    } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "Registry 讀取失敗"); }
+      setMessage("Personal AI runtime 狀態已同步；外部服務維持獨立部署與權責。");
+    } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "Personal AI 狀態讀取失敗"); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  const health = nested(system, "health") as Item | undefined;
+  const counts = nested(system, "counts") as Item | undefined;
   return h("section", { "aria-labelledby": "systems-title" },
-    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "INDEPENDENT SERVICES · ONE PORTAL"), h("h2", { id: "systems-title" }, "Systems")), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")),
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "PERSONAL AI RUNTIME"), h("h2", { id: "systems-title" }, "Systems")), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")),
     h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status" }, message),
-    h("div", { className: "service-grid" }, services.map((service) => {
-      const id = text(nested(service, "manifest", "metadata", "id"));
-      const name = text(nested(service, "manifest", "metadata", "displayName") ?? id);
-      const description = text(nested(service, "manifest", "metadata", "description"));
-      const publicUrl = nested(service, "manifest", "spec", "management", "publicUrl");
-      const health = nested(service, "health", "state");
-      const management = nested(service, "management", "state");
-      const hermes = id === "hermes-agent";
-      const internalHref = id === "contexthub" ? "/memory" : id === "personal-ai-control-plane" ? "/home" : "/infrastructure";
-      return h("article", { className: `service-card${hermes ? " hermes-card" : ""}`, id, key: id },
-        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, id), h("h3", null, name)), h(StatusPill, { value: health })),
-        h("p", null, description),
-        h("div", { className: "service-meta" }, h("span", null, "Management", h(StatusPill, { value: management })), h("span", null, "Evidence", h("strong", null, text(nested(service, "management", "evidenceLevel"))))),
-        hermes && typeof publicUrl === "string"
-          ? h("a", { className: "button-link external", href: publicUrl, target: "_blank", rel: "noreferrer" }, "開啟 Hermes Dashboard ↗")
-          : h("a", { className: "button-link secondary", href: internalHref }, "在 Portal 查看"));
-    })),
-    state === "ready" && services.length === 0 ? h("p", { className: "empty" }, "Service registry 目前沒有項目。") : null,
-    h(IntegrationNotice, { title: "Hermes 維持獨立入口", detail: "Portal 只顯示 Hermes 健康、版本與 evidence，實際對話介面仍由 Hermes 自己發版與開啟，避免獨立套件更新被 Portal 綁住。" }));
+    h("div", { className: "service-grid" },
+      h("article", { className: "service-card", id: "personal-ai-control-plane" },
+        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "personal-ai-control-plane"), h("h3", null, "Personal AI Control Plane")), h(StatusPill, { value: health?.status })),
+        h("p", null, "Identity、Control Web、Orchestrator 與 Conversation Archive 的本地 authority。"),
+        h("div", { className: "service-meta" }, h("span", null, "Database", h(StatusPill, { value: health?.database })), h("span", null, "Audit chain", h(StatusPill, { value: health?.auditChain })), h("span", null, "Goals", h("strong", null, text(counts?.goals ?? 0)))),
+        h("a", { className: "button-link secondary", href: "/home" }, "在 Portal 查看")),
+      h("article", { className: "service-card", id: "contexthub" },
+        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "contexthub"), h("h3", null, "ContextHub Memory")), h(StatusPill, { value: "INDEPENDENT" })),
+        h("p", null, "Semantic Memory 維持獨立資料庫與部署；Portal 僅透過 safe-method projection 讀取。"),
+        h("a", { className: "button-link secondary", href: "/memory" }, "開啟 Memory")),
+      h("article", { className: "service-card", id: "hermes-agent" },
+        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "hermes-agent"), h("h3", null, "Hermes")), h(StatusPill, { value: "INDEPENDENT" })),
+        h("p", null, "Hermes 維持獨立 conversational edge、資料、release 與 rollback；此 Portal 不再代理其管理狀態。"))),
+    h(IntegrationNotice, { title: "Independent authority boundaries", detail: "Personal AI 不再依賴 AI Home Platform runtime。部署、rollback、backup 與 restore 仍由各 repository 的 operator workflow 和 root-owned deployment gateway 負責；Portal 不持有 Docker 或 NAS 權限。" }));
 }
 
 function MemoryView() {
@@ -456,8 +414,8 @@ function MemoryView() {
 export function App({ initialPath = typeof window === "undefined" ? "/home" : window.location.pathname }: { initialPath?: string }) {
   const current = useMemo(() => route(initialPath), [initialPath]);
   const active = current.kind === "resource" ? current.view.key : current.kind;
-  const content = current.kind === "home" ? h(PortalHome) : current.kind === "systems" ? h(SystemsView) : current.kind === "infrastructure" ? h(InfrastructureView) : current.kind === "memory" ? h(MemoryView) : h(ResourceView, { view: current.view, id: current.id });
-  const primary = [{ key: "home", label: "首頁" }, { key: "goals", label: "Goals" }, { key: "approvals", label: "Approvals" }, { key: "schedules", label: "Schedules" }, { key: "memory", label: "Memory" }, { key: "systems", label: "Systems" }, { key: "infrastructure", label: "Infrastructure" }];
+  const content = current.kind === "home" ? h(PortalHome) : current.kind === "systems" ? h(SystemsView) : current.kind === "memory" ? h(MemoryView) : h(ResourceView, { view: current.view, id: current.id });
+  const primary = [{ key: "home", label: "首頁" }, { key: "goals", label: "Goals" }, { key: "approvals", label: "Approvals" }, { key: "schedules", label: "Schedules" }, { key: "memory", label: "Memory" }, { key: "systems", label: "Systems" }];
   const secondary = views.filter((view) => !["goals", "approvals", "schedules"].includes(view.key));
   return h(React.Fragment, null,
     h("a", { className: "skip-link", href: "#main" }, "跳到主要內容"),

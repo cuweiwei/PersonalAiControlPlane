@@ -23,6 +23,8 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 
 如果只是單次、無副作用的簡短聊天，未來可由 Hermes 直接回答；需要修改資料、排程、跨機器、核准或 durable result 時，則應建立 Orchestrator Goal。
 
+目前正式入口由 Personal AI 自有輕量 edge 提供：Tailscale HTTPS `:443` 轉到 NAS loopback `127.0.0.1:9084`，再分流 Identity、Control Web、Orchestrator/SSE、Worker WSS 與 ContextHub Memory。AI Home Platform runtime、其共用 edge 與 `:9443` 入口已退役但保留可回復的資料、Compose 與 immutable image；Portal 不再提供 Infrastructure 頁面或 AI Home Platform API。基礎設施的部署、停止與 rollback 由 owner/operator 透過 root-owned deployment gateway 執行，Orchestrator 不持有 Docker socket、NAS root 或 gateway 權限。
+
 ## 2. 第一次使用：最快完成一個 Goal
 
 ### 2.1 登入前準備
@@ -58,7 +60,7 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 
 | 選單 | 主要用途 | 你可以做的事情 |
 | --- | --- | --- |
-| **首頁** | 單一日常入口 | 一次查看 Goal、服務、Memory 與 infrastructure 的 authority 摘要 |
+| **首頁** | 單一日常入口 | 一次查看 Goal、服務、Memory 與 Personal AI runtime 摘要 |
 | **Goals** | 提出與追蹤工作 | 新增 Goal、查看 plan/tasks/events、取消、重試可恢復工作 |
 | **Approvals** | 控制風險與資源邊界 | 檢查風險、plan digest、資源與權限範圍；Passkey 核准或拒絕 |
 | **Schedules** | 建立週期性工作 | 建立間隔排程、暫停、立即執行、延後一小時 |
@@ -71,7 +73,6 @@ Personal AI Control Plane 用來接收一個高階目標，將它保存成可追
 | **Audit** | 查核系統操作 | 查看最近的 actor、action、target、decision 與 hash chain 資訊 |
 | **System** | 查看整體狀態 | 查看 health、Goal/Approval/Worker/Provider/DLQ 數量與外部入口 |
 | **Systems** | 集中查看獨立服務 | 查看服務健康、版本與 evidence；Hermes 從卡片開啟其獨立 Dashboard |
-| **Infrastructure** | 查看基礎設施 authority | 在 Portal 讀取 AIHomePlatform 服務與 operation；部署與 rollback 仍維持原權責 |
 | **Memory** | 查看語意記憶 authority | 在 Portal 檢索 ContextHub accepted Memory；review 與 policy mutation 仍由 ContextHub 管理 |
 
 ## 4. 常見操作
@@ -260,8 +261,8 @@ Goal 或 task detail 可能出現以下狀態：
 | 查看 AI provider、worker 與 quota | **Control Web → Compute / Workers** |
 | 管理原始對話 | **Control Web → Conversations** |
 | 管理長期語意記憶 | **Portal → Memory**；進階治理仍屬 ContextHub |
-| 查看服務、release 或部署紀錄 | **Portal → Systems / Infrastructure** |
-| 執行部署或 rollback | AIHomePlatform 原本的核准、step-up 與 deployment gateway 路徑；Portal 目前不執行 mutation |
+| 查看 Personal AI 與獨立外部服務狀態 | **Portal → Systems** |
+| 執行部署或 rollback | owner/operator 依各 repository runbook，經 root-owned deployment gateway；Portal 不執行 mutation |
 | 日常聊天、通知或快速查狀態 | **Portal → Systems → Hermes Dashboard** 或 Telegram；Hermes 維持獨立發版 |
 | 讓另一個受信任系統建立 Goal | **REST API**；必須使用既有 workload auth 與 idempotency contract |
 
@@ -272,7 +273,7 @@ Goal 或 task detail 可能出現以下狀態：
 - 刪除、撤銷 worker、grant capability、修改 policy 與高風險 approval 都不是一般瀏覽操作。
 - `Health = OK` 只代表服務可回應，不代表 Goal、部署、connector、backup、restore 或 purge 已完成。
 - 外部整合 unavailable 時，系統應明確失敗；不要要求用假資料、fake readiness 或繞過權限完成。
-- Orchestrator 不直接擁有 NAS root 或 Docker 權限。基礎設施操作仍由 AIHomePlatform 與 root-owned deployment gateway 做最後驗證。
+- Orchestrator 不直接擁有 NAS root 或 Docker 權限。基礎設施操作由 owner/operator 經 root-owned deployment gateway 做最後驗證；AI Home Platform runtime 已退役。
 
 ## 9. 相關文件
 

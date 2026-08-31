@@ -12,6 +12,7 @@ services:
       PAI_OPERATIONAL_PROFILE: compatibility
       PAI_CONTROL_WEB_PORT: "8080"
       PAI_IDENTITY_PORT: "9084"
+      PAI_EDGE_PORT: "8081"
       PAI_IDENTITY_DB_PATH: /var/lib/pai/identity/identity.db
       PAI_CANONICAL_ORIGIN: https://gnest.taila77e5f.ts.net
       PAI_WEBAUTHN_RP_ID: ${PAI_WEBAUTHN_RP_ID:?PAI_WEBAUTHN_RP_ID is required}
@@ -20,6 +21,7 @@ services:
       # in the root-controlled production .env. It is never committed or logged.
       PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
       PAI_PORT: "9085"
+      PAI_MEMORY_ORIGIN: http://host.docker.internal:8788
       PAI_IDENTITY_HEALTH_URL: http://127.0.0.1:9084/health/ready
       PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator/orchestrator.db
       PAI_CONVERSATION_DB_PATH: /var/lib/pai/orchestrator/conversation.db
@@ -28,23 +30,16 @@ services:
     volumes:
       - ${PAI_IDENTITY_DATA_ROOT:?PAI_IDENTITY_DATA_ROOT must be project-scoped}/data:/var/lib/pai/identity
       - ${PAI_ORCHESTRATOR_DATA_ROOT:?PAI_ORCHESTRATOR_DATA_ROOT must be project-scoped}/data:/var/lib/pai/orchestrator
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:9083:8080"
+      - "127.0.0.1:9084:8081"
       - "127.0.0.1:9085:9085"
     healthcheck:
-      test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:8080/health/ready','http://127.0.0.1:9084/health/ready','http://127.0.0.1:9085/health/ready'].map(url=>fetch(url))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:8080/health/ready','http://127.0.0.1:8081/health/ready','http://127.0.0.1:9084/health/ready','http://127.0.0.1:9085/health/ready'].map(url=>fetch(url))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6
     networks:
       default: {}
-      aihp-edge:
-        aliases:
-          - pai-edge-control-web
-          - pai-edge-identity
-          - pai-edge-orchestrator
-
-networks:
-  aihp-edge:
-    external: true
-    name: ai-home-platform_edge

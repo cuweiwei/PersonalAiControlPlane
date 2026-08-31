@@ -41,13 +41,6 @@ export interface ContextHubAdapter {
   readChanges(cursor: string | null): Promise<{ cursor: string | null; changes: Record<string, unknown>[] }>;
 }
 
-export type ReleaseCoordinates = { repository: string; commit: string; imageDigest: string; composeDigest?: string };
-export interface InfrastructureAdapter {
-  getServiceCapability(serviceId: string): Promise<Record<string, unknown>>;
-  requestOperation(input: { serviceId: string; action: "deploy" | "rollback" | "backup" | "restore-test"; releaseCoordinates?: ReleaseCoordinates; actionGrant: string; idempotencyKey: string }): Promise<{ operationId: string }>;
-  getOperation(ref: { operationId: string }): Promise<Record<string, unknown>>;
-}
-
 export interface HermesAdapter {
   submitGoal(input: Record<string, unknown>, idempotencyKey: string): Promise<{ goalId: string }>;
   getGoalStatus(goalId: string): Promise<Record<string, unknown>>;
@@ -74,15 +67,6 @@ export class DisabledContextHubAdapter implements ContextHubAdapter {
   proposeSuccessor(): Promise<Record<string, unknown>> { return Promise.reject(this.denied()); }
   recordContextOutcome(): Promise<void> { return Promise.reject(this.denied()); }
   readChanges(): Promise<{ cursor: string | null; changes: Record<string, unknown>[] }> { return Promise.reject(this.denied()); }
-}
-
-export class DisabledInfrastructureAdapter implements InfrastructureAdapter {
-  private readonly reason: string;
-  constructor(reason = "AIHomePlatform manifest and gateway evidence are missing") { this.reason = reason; }
-  private denied(): DisabledAdapterError { return new DisabledAdapterError("AIHomePlatform", this.reason); }
-  getServiceCapability(): Promise<Record<string, unknown>> { return Promise.reject(this.denied()); }
-  requestOperation(): Promise<{ operationId: string }> { return Promise.reject(this.denied()); }
-  getOperation(): Promise<Record<string, unknown>> { return Promise.reject(this.denied()); }
 }
 
 export function classifyHermesMessage(text: string): { mode: "STATELESS_CHAT" | "DURABLE_GOAL"; reasons: string[] } {

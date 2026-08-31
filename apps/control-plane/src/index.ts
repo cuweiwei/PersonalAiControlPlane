@@ -14,6 +14,7 @@ import { TaskEngine } from "../../orchestrator/src/task-engine.ts";
 import { WorkerChannelService } from "../../orchestrator/src/worker-channel.ts";
 import { ContentAddressedArtifactStore } from "../../../packages/artifacts/src/index.ts";
 import { createControlWebServer } from "./control-web-server.ts";
+import { createPrivateEdgeServer } from "./private-edge.ts";
 
 function port(name: string, fallback: string): number {
   const value = Number.parseInt(process.env[name] ?? fallback, 10);
@@ -28,7 +29,9 @@ function close(server: Server): Promise<void> {
 const controlWebPort = port("PAI_CONTROL_WEB_PORT", "8080");
 const identityPort = port("PAI_IDENTITY_PORT", "9084");
 const orchestratorPort = port("PAI_PORT", "9085");
+const edgePort = port("PAI_EDGE_PORT", "8081");
 if (new Set([controlWebPort, identityPort, orchestratorPort]).size !== 3) throw new Error("Control Web, Identity, and Orchestrator ports must be distinct");
+if ([controlWebPort, identityPort, orchestratorPort].includes(edgePort)) throw new Error("Private edge port must be distinct from internal service ports");
 
 const bindHost = process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1";
 const compatibilityProfile = process.env.PAI_OPERATIONAL_PROFILE === "compatibility";
@@ -71,10 +74,18 @@ const identityReadyProbe = allowUnauthenticated
   : async () => { const response = await fetch(identityHealthUrl, { signal: AbortSignal.timeout(1_500) }); return response.ok; };
 const orchestratorServer = createHttpServer({ db: orchestratorDb, engine, allowUnauthenticated, identityReady: allowUnauthenticated, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService, workerChannel });
 const controlWebServer = createControlWebServer();
+const privateEdgeServer = createPrivateEdgeServer({
+  identityOrigin: `http://127.0.0.1:${identityPort}`,
+  orchestratorOrigin: `http://127.0.0.1:${orchestratorPort}`,
+  controlWebOrigin: `http://127.0.0.1:${controlWebPort}`,
+  memoryOrigin: process.env.PAI_MEMORY_ORIGIN,
+  publicProto: process.env.NODE_ENV === "production" ? "https" : "http",
+});
 
 identityServer.listen(identityPort, bindHost, () => console.log(JSON.stringify({ event: "identity.started", port: identityPort, dbPath: identityDbPath, bindHost, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined })));
 orchestratorServer.listen(orchestratorPort, bindHost, () => console.log(JSON.stringify({ event: "orchestrator.started", port: orchestratorPort, dbPath: orchestratorDbPath, archiveDbPath, artifactRoot, bindHost, authMode: allowUnauthenticated ? "development" : "identity-gateway", runtimeReady: runtime.isReady() })));
 controlWebServer.listen(controlWebPort, bindHost, () => console.log(JSON.stringify({ event: "control-web.started", port: controlWebPort, bindHost })));
+privateEdgeServer.listen(edgePort, bindHost, () => console.log(JSON.stringify({ event: "private-edge.started", port: edgePort, bindHost })));
 
 let shuttingDown = false;
 const shutdown = async () => {
@@ -83,7 +94,7 @@ const shutdown = async () => {
   runtime.stop();
   workerChannel.close();
   archiveRuntime.stop();
-  await Promise.all([close(controlWebServer), close(orchestratorServer), close(identityServer)]);
+  await Promise.all([close(privateEdgeServer), close(controlWebServer), close(orchestratorServer), close(identityServer)]);
   orchestratorDb.close();
   archiveDb.close();
   identityDb.close();

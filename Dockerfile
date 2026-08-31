@@ -22,5 +22,5 @@ ENV PAI_CONTROL_WEB_PORT=8080
 ENV PAI_IDENTITY_PORT=9084
 ENV PAI_PORT=9085
 USER node
-EXPOSE 8080 9084 9085
+EXPOSE 8080 8081 9084 9085
 CMD ["node", "--experimental-strip-types", "apps/control-plane/src/index.ts"]

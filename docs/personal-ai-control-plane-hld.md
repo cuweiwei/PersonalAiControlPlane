@@ -12,6 +12,10 @@ Detailed design: [Personal AI Control Plane — Detailed Design](personal-ai-con
 
 The Personal AI Control Plane will be a new, independently versioned product and repository. It will not absorb AIHomePlatform, ContextHub, Hermes Agent, or their data.
 
+### Current superseding decision (2026-08-31)
+
+The separation decision supersedes the original shared-edge deployment described below. Personal AI owns the complete private entry runtime inside its single non-root container. Tailscale HTTPS `:443` targets NAS loopback `127.0.0.1:9084`, which publishes the container edge listener on `8081`; the edge routes Identity/Passkey, Control Web, Orchestrator/SSE, signed Worker HTTP/WebSocket, and the safe-method ContextHub Memory projection. AI Home Platform, its Traefik/OpenBao/Prometheus/Grafana bundle, shared Docker network, Personal AI routes, and `:9443` Serve route are retired and remain only as independently recoverable repository/data/release assets. Infrastructure operations are performed by the owner/operator through the root-owned deployment gateway. The Orchestrator does not call AI Home Platform, Docker, NAS root, or the gateway.
+
 The target uses one durable decision-maker on the NAS and distributed execution on enrolled Mac and Windows workers:
 
 ```text
@@ -19,7 +23,7 @@ Single Brain       = Personal AI Orchestrator
 Execution Nodes    = trusted, sandboxed workers
 Memory Authority   = ContextHub
 Conversation Edge  = Hermes / Telegram
-Infrastructure     = AIHomePlatform
+Infrastructure     = owner/operator + root-owned deployment gateway
 Coding Specialist  = local Codex App runtime using ChatGPT subscription access
 ```
 
@@ -32,7 +36,7 @@ This design optimizes for a single owner, one NAS, fewer credentials, recoverabi
 This HLD implements the requirements in `docs/personal-ai-control-plane-requirements.md` plus the following accepted decisions:
 
 1. Every durable, scheduled, mutating, multi-step, cross-machine, or approval-sensitive goal is owned by the Orchestrator. Hermes may answer stateless conversational questions but does not become a second planner.
-2. AIHomePlatform's Passkey implementation is generalized into the shared entry boundary.
+2. The Passkey implementation is owned by Personal AI Identity and is exposed through the Personal AI private edge.
 3. `work` is a conceptual scope and provenance label, not a memory authorization boundary.
 4. Raw conversations are stored in a dedicated Conversation Archive, not in ContextHub semantic-memory tables.
 5. Conversation retention defaults to forever: `conversation_retention_days = null`.
@@ -123,8 +127,8 @@ flowchart TB
   U[Owner]
   TG[Telegram]
   WEB[Shared Web Portal]
-  EDGE[AIHomePlatform-owned private edge\nTailscale Serve + Traefik]
-  ID[Shared Identity Gateway\nPasskey · session · CSRF · step-up]
+  EDGE[Personal AI-owned private edge\nTailscale HTTPS :443 -> 127.0.0.1:9084]
+  ID[Personal AI Identity\nPasskey · session · CSRF · step-up]
   H[Hermes Interface Adapter]
 
   subgraph PAI[PersonalAiControlPlane repository and NAS stack]
@@ -144,8 +148,7 @@ flowchart TB
   end
 
   CH[ContextHub\nMemory Fabric]
-  AIHP[AIHomePlatform API\nInfrastructure authority]
-  OB[OpenBao]
+  OP[Owner/operator\nroot-owned deployment gateway]
 
   subgraph MESH[Personal Compute Mesh]
     MAC[Mac Worker\nCodex App · oMLX · CUA]
@@ -155,7 +158,6 @@ flowchart TB
 
   U --> TG --> H --> API
   U --> WEB --> EDGE --> ID --> API
-  EDGE --> AIHP
   EDGE --> CH
   ID --> IDDB
   API --> PLAN --> TASK --> DB
@@ -168,15 +170,15 @@ flowchart TB
   API <--> ARCH --> CDB
   ARCH --> ART
   API <--> CH
-  CRED <--> OB
   CRED -. capability handle .-> MESH
-  TASK -->|bounded infrastructure action| AIHP
+  OP -.->|validated deploy / rollback / status| PAI
 ```
 
 ### 6.1 Deployment shape
 
-The new NAS stack contains one `pai-control-plane` container and one Node process. It exposes three internal listeners so the existing private edge can keep stable routing aliases:
+The NAS stack contains one `pai-control-plane` container and one Node process. It exposes a Personal AI-owned edge listener plus the three internal module listeners:
 
+- `127.0.0.1:9084 -> :8081`: private edge; Tailscale HTTPS `:443` target.
 - `pai-edge-identity:9084`: Passkey authority and forward-auth module.
 - `pai-edge-orchestrator:9085`: modular core containing API, planner, scheduler, policy, approvals, compute broker, quota, worker coordination, proactive engine, connector coordination, and archive services.
 - `pai-edge-control-web:8080`: built static management portal.
@@ -196,11 +198,12 @@ PersonalAiControlPlane              new bounded product
 ├── web portal
 └── shared contracts
 
-AiHomePlatform                      remains separate
-├── private edge and infrastructure observability
-├── service registry and release evidence
-├── deployment/rollback/backup capability policy
-└── root-owned NAS gateway integration
+AiHomePlatform                      retired, recoverable repository/data
+├── retained Compose, immutable image and named volumes
+└── no Personal AI runtime dependency or active Serve route
+
+Root-owned deployment gateway          independent security boundary
+└── owner/operator validates, deploys, rolls back and reports status
 
 ContextHub                          remains separate
 ├── semantic Memory authority
@@ -237,17 +240,17 @@ The worker runtime stays in `PersonalAiControlPlane` initially because the job e
 | Dynamic capability discovery | New Component | PersonalAiControlPlane | Discovered and granted states remain distinct |
 | Computer Use | New Component | PersonalAiControlPlane worker | Isolated session by default; shared desktop explicitly approved |
 | Telegram interface | Extend Existing | Hermes | Thin goal/status/approval adapter; no peer planner |
-| Web management UI | Extend Existing | PersonalAiControlPlane portal | New shell reuses AIHomePlatform and ContextHub domain UIs |
+| Web management UI | Extend Existing | PersonalAiControlPlane portal | Self-owned shell; only ContextHub Memory is a safe-method external projection |
 | Context / memory APIs | Reuse As-Is | ContextHub | REST for deterministic services, MCP for agent tools; extend only for scope refactor |
 | Federated memory | Refactor Existing | ContextHub | One owner domain plus conceptual scopes |
 | External AI memory synchronization | Extend Existing | ContextHub + PersonalAiControlPlane | Existing connector/run primitives plus conversation/source adapters |
 | Conversation Archive | New Component | PersonalAiControlPlane | Raw history separate from semantic Memory; forever retention by default |
 | Credential broker | New Component | PersonalAiControlPlane | Reuses OpenBao and device-local vaults through opaque handles |
-| Passkey / shared entry boundary | Refactor Existing | PersonalAiControlPlane identity | Extract AIHomePlatform auth while keeping edge infrastructure in AIHomePlatform |
+| Passkey / shared entry boundary | Refactor Existing | PersonalAiControlPlane identity | Personal AI owns the active edge and Identity module |
 | Autonomy / approval policy | New Component | PersonalAiControlPlane | Pure, versioned decision engine and durable approval grants |
 | Proactive task engine | New Component | PersonalAiControlPlane | Every trigger creates a normal goal; no second execution path |
 | Self-extension | New Component | PersonalAiControlPlane | Proposal and approval before Codex development |
-| Deployment / service management | Extend Existing | AIHomePlatform | Orchestrator requests bounded actions; AIHomePlatform and gateway remain final authority |
+| Deployment / service management | Extend Existing | Owner/operator + root-owned gateway | Orchestrator has no infrastructure runtime adapter or privileged access |
 | Duplicated Hermes planning/task state | Replace / Retire | Hermes | Retire only after parity and migration; domain skills remain |
 | General Hermes cron scheduling | Replace / Retire | PersonalAiControlPlane | Migrate durable cross-system schedules; app-local polling may remain app-owned |
 
@@ -255,18 +258,18 @@ The worker runtime stays in `PersonalAiControlPlane` initially because the job e
 
 ### 9.1 Shared Identity Gateway
 
-The existing AIHomePlatform WebAuthn code is refactored, not copied, into the Control Plane's Identity module. Its protocol-level issuer name remains `pai-identity-gateway` for grant compatibility; it is not a separate container.
+The existing authentication contract is implemented in Personal AI Identity, not copied as a running AIHomePlatform dependency. Its protocol-level issuer name remains `pai-identity-gateway` for grant compatibility; it is not a separate container.
 
 Responsibilities:
 
 - Preserve the existing Passkey RP ID and canonical HTTPS origin so registered passkeys remain valid.
 - Own users, passkeys, challenges, recovery codes, sessions, CSRF state, and authentication time.
 - Issue one `HttpOnly; Secure; SameSite=Strict` owner session for the shared portal.
-- Provide forward-auth to the portal, AIHomePlatform, and ContextHub human UI.
+- Provide forward-auth to Control Web, Orchestrator, and the ContextHub Memory projection.
 - Require Passkey step-up for hard-stop approval and sensitive settings.
 - Strip all externally supplied identity headers before adding verified internal headers.
 
-The AIHomePlatform-owned edge remains the only private entry point. It routes `/` to the Personal AI portal, `/infrastructure` to AIHomePlatform, and `/memory` to ContextHub, with the shared Identity Gateway as forward-auth.
+The Personal AI-owned edge is the only active private entry point. It routes `/` and `/login` to Identity, protected Control Web/API/SSE paths through Identity forward-auth, signed worker paths directly to Orchestrator, and `/api/portal/v1/memory/*` to ContextHub safe-method projection. `/infrastructure` and its API are removed and return `404`.
 
 Background execution cannot reuse a browser cookie. For approved cross-service actions, the Identity Gateway signs a short-lived, audience-bound action grant containing:
 
@@ -562,9 +565,9 @@ Primary surfaces:
 - Conversation retention, archive search/export/delete, and connector status.
 - Credential health and reauthorization, never secret values.
 - Links/proxied routes to ContextHub Memory Control Center.
-- Links/proxied routes to AIHomePlatform infrastructure management.
+- Infrastructure operations are performed by the owner/operator through the root-owned deployment gateway; no infrastructure page is proxied into Portal.
 
-AIHomePlatform and ContextHub remain the APIs of record for their domain screens. The portal does not copy their tables into the Orchestrator database. The first integration slice is safe-method-only: the owner Passkey session is verified at the shared edge, client-supplied identity headers are stripped, and each downstream authority maps the forwarded owner to its own read policy. Mutations remain unavailable until a bounded signed action-grant contract exists.
+ContextHub remains the API of record for semantic Memory. The portal does not copy its tables into the Orchestrator database. The first integration slice is safe-method-only: the owner Passkey session is verified at the Personal AI edge, client-supplied identity headers are stripped, and ContextHub maps the forwarded owner to its own read policy. Memory mutations remain unavailable until a bounded signed action-grant contract exists.
 
 Hermes is deliberately not embedded as a micro-frontend or reverse-proxied subpath. Its Portal card shows registry health, version, and evidence, then opens the Hermes-owned Dashboard in a separate browser context. This keeps Hermes package updates, repository, image, data, deployment, and rollback independent from Portal releases.
 
@@ -581,17 +584,7 @@ There is no privileged “background agent” path. Autonomy levels are configur
 
 ### 9.17 Deployment and service management
 
-AIHomePlatform remains the only application-facing infrastructure control plane. The Orchestrator may request a typed deployment, rollback, backup, or restore-test only when:
-
-- The service manifest grants the capability.
-- Required release and live evidence exists.
-- A valid action grant covers the exact service, action, release coordinates, and budget.
-- AIHomePlatform accepts the request.
-- The root-owned deployment gateway validates and performs it.
-
-The Orchestrator never invokes Docker, edits production Compose, or bypasses the gateway. A successful readiness probe is not deployment authority.
-
-`PersonalAiControlPlane` itself receives an independent AIHomePlatform service manifest, image, Compose file, persistent data root, gateway project ID, backup/restore evidence, and rollback boundary.
+Infrastructure operations are owner/operator actions through the root-owned deployment gateway. The Orchestrator never invokes Docker, edits production Compose, calls AI Home Platform, or bypasses the gateway. A successful readiness probe is not deployment authority. Each repository retains its own image, Compose file, persistent data root, gateway project ID, backup/restore evidence, and rollback boundary; AI Home Platform is a recoverable retired project, not a Personal AI runtime dependency.
 
 ### 9.18 Self-extension
 
@@ -601,7 +594,7 @@ After explicit approval:
 
 ```text
 proposal -> Codex worktree -> tests -> review/CI -> merge policy
-         -> immutable release -> AIHomePlatform deployment
+         -> immutable release -> owner/operator gateway deployment
          -> live evidence -> capability discovery -> separate capability grant
 ```
 
@@ -964,7 +957,7 @@ Restore order:
 2. Restore Orchestrator DB and artifact index into an isolated path.
 3. Verify schema, foreign keys, audit chain, task/event consistency, and checkpoint hashes.
 4. Restore Conversation Archive and verify content hashes and retention policies.
-5. Reconnect ContextHub, AIHomePlatform, and workers through APIs; do not restore their state into the Orchestrator DB.
+5. Reconnect ContextHub and workers through APIs; do not restore their state into the Orchestrator DB. Keep AI Home Platform data and release assets in its independent recovery boundary.
 6. Reconcile leases as expired, external operations as uncertain until checked, and schedules according to misfire policy.
 
 The production release requires a successful isolated restore drill. Restore of live data remains a separate owner-authorized destructive operation.
@@ -972,14 +965,17 @@ The production release requires a successful isolated restore drill. Restore of 
 ## 17. Deployment topology
 
 ```text
-Tailscale Serve :443
+Tailscale HTTPS :443
         |
-AIHomePlatform-owned Traefik/private edge
+Personal AI private edge (container :8081)
         |
-        +-- /                  -> pai-control-plane :8080 / :9085
-        +-- /auth              -> pai-control-plane :9084
-        +-- /infrastructure    -> AIHomePlatform
-        +-- /memory            -> ContextHub Control Center
+        +-- /, /login, /api/v1/auth/* -> Identity :9084
+        +-- /health*                  -> Orchestrator :9085
+        +-- /api/v1/worker/*          -> signed Worker HTTP/WSS :9085
+        +-- /api/v1/*, Control Web    -> Identity forward-auth
+        +-- /api/portal/v1/memory/*   -> ContextHub :8788 (safe methods)
+
+Owner/operator -> root-owned deployment gateway -> independent Compose projects
 
 NAS independent stacks/data roots
 ├── ai-home-platform
@@ -1004,7 +1000,7 @@ Migration is capability-by-capability with explicit rollback, not a repository m
 - Initialize `PersonalAiControlPlane` as an independent Git repository.
 - Define versioned goal, task, worker, capability, approval, checkpoint, provider, conversation, and action-grant schemas.
 - Build the SQLite task/event/outbox foundation and read-only portal surfaces.
-- Register the service in AIHomePlatform as non-deployable until release and gateway evidence exists.
+- Register the independent project with the root-owned deployment gateway only after release and gateway evidence exists.
 
 Exit gate: schema compatibility, crash recovery, idempotency, backup, restore drill, and fail-closed policy tests.
 
@@ -1013,8 +1009,8 @@ Exit gate: schema compatibility, crash recovery, idempotency, backup, restore dr
 - Preserve current RP ID and canonical origin.
 - Snapshot and migrate AIHomePlatform passkey/recovery data into `identity.db`.
 - Invalidate old sessions and require a fresh Passkey login.
-- Place AIHomePlatform and ContextHub human UIs behind forward-auth.
-- Retain rollback to the previous AIHomePlatform-authenticated route until new login, CSRF, step-up, recovery, and route isolation are live-verified.
+- Place Control Web and the ContextHub Memory projection behind the Personal AI forward-auth edge.
+- Retain AI Home Platform Compose, data and immutable image for rollback, but do not restart its runtime as part of Personal AI login or routing.
 
 Constraint: changing RP ID or origin invalidates existing passkey usability and requires an explicit owner migration.
 
@@ -1165,10 +1161,10 @@ These are not blockers to the HLD, but each requires an implementation ADR or ma
 This HLD is ready to enter low-level design when the owner accepts:
 
 - The new repository and component ownership boundaries.
-- The shared-edge and Identity Gateway migration approach.
+- The Personal AI-owned edge and Identity Gateway approach.
 - The modular-monolith and separate-SQLite-store data architecture.
 - The app-backed ChatGPT-subscription Codex adapter with no automatic API-key fallback.
 - The ContextHub owner-domain plus conceptual-scope refactor.
 - Forever raw-conversation retention and its storage consequences.
-- AIHomePlatform as the unchanged final infrastructure authority.
+- Owner/operator control through the root-owned deployment gateway, with AI Home Platform retired and independently recoverable.
 - The worker trust, sandbox, approval, and action-grant model.
