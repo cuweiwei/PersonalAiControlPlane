@@ -2,7 +2,7 @@ name: personal-ai-control-plane
 
 services:
   pai-control-web:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:8960ab2bc19f19e639fceb1bbe8af27ffca548a4de2b13f3471b6c1ee61e6a45
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:69e4e7e1c67674ba6d30d3183091dde1b76fe9b7f8fb835eea53bd70ed7880f1
     restart: unless-stopped
     user: "101:101"
     ports:
@@ -19,7 +19,7 @@ services:
           - pai-edge-control-web
 
   pai-identity-gateway:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:c3e2e791db1ffacbdd10905939424d22bd416c85b47460da0e23bc02c2cf8616
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:4220ac027aad3ee27b876ee02d94d4ef3a308dcb83147b1fd5d52a812c091bef
     restart: unless-stopped
     # Synology bind roots grant write access to the non-root ContainerManager UID.
     user: "106808:106808"
@@ -49,7 +49,7 @@ services:
           - pai-edge-identity
 
   pai-orchestrator:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:c3e2e791db1ffacbdd10905939424d22bd416c85b47460da0e23bc02c2cf8616
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:4220ac027aad3ee27b876ee02d94d4ef3a308dcb83147b1fd5d52a812c091bef
     restart: unless-stopped
     # Keep the orchestrator non-root while matching the NAS ContainerManager ACL.
     user: "106808:106808"
