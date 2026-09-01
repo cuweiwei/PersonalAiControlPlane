@@ -346,7 +346,7 @@ export function createHttpServer(options: AppOptions) {
           const requestId = uuidv7(now);
           const challenge = randomBytes(32).toString("base64url");
           const expiresAt = now + 10 * 60_000;
-          options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
+          options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(safeWorkerMetadata(input.deviceSummary)), sha256(challenge), expiresAt, now);
           writeJson(response, 202, { requestId, fingerprint, status: "PENDING", challenge, expiresAt, approvalUrl: `/workers/enrollment-requests/${requestId}` });
           return;
         }
@@ -567,7 +567,7 @@ export function createHttpServer(options: AppOptions) {
         const requestId = uuidv7(now);
         const challenge = randomBytes(32).toString("base64url");
         const expiresAt = now + 10 * 60_000;
-        options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
+        options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(safeWorkerMetadata(input.deviceSummary)), sha256(challenge), expiresAt, now);
         const enrollment = options.db.one<Record<string, unknown>>("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, expires_at AS expiresAt, created_at AS createdAt FROM worker_enrollment_requests WHERE id = ?", requestId)!;
         writeJson(response, 202, { ...enrollment, deviceSummary: safeWorkerMetadata(jsonValue(enrollment.deviceSummary, {})), challenge });
         return;
