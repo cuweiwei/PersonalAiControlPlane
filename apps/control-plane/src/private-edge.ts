@@ -193,6 +193,7 @@ export function createPrivateEdgeServer(options: PrivateEdgeOptions): Server {
     socket.once("close", cleanup);
     upstream.once("close", cleanup);
     upstream.once("connect", () => {
+      upstream.setTimeout(0);
       const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/1.1`];
       const seen = new Set<string>();
       const excluded = headerExclusions(request.headers);
