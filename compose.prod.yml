@@ -2,7 +2,7 @@ name: personal-ai-control-plane
 
 services:
   pai-control-plane:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:81071542c62b605f1ebdb57bb613b3ab76a530ee47a69c4c9cd4a1e3cef0f6b3
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:570ec9720fc1e4a5c7ac2d58366fd4d55ba8a3222749663917afcb4714426db1
     restart: unless-stopped
     # Synology bind roots grant write access to the non-root ContainerManager UID.
     user: "106808:106808"
