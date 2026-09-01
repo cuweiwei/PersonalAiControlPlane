@@ -97,9 +97,12 @@ export class WorkerChannelService {
       if (this.db.one("SELECT id FROM worker_purge_tombstones WHERE enrollment_request_id = ?", input.requestId)) throw Object.assign(new Error("worker enrollment identity was removed; reset the local Agent"), { status: 410, code: "WORKER_REMOVED" });
       throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
     }
-    if (request.status !== "APPROVED") throw Object.assign(new Error("worker enrollment request is not approved"), { status: 409, code: "ENROLLMENT_NOT_APPROVED" });
     if (request.finalized_worker_id) throw Object.assign(new Error("worker enrollment request has already been finalized"), { status: 409, code: "ENROLLMENT_ALREADY_FINALIZED" });
-    if (request.expires_at <= now) throw Object.assign(new Error("worker enrollment request has expired"), { status: 409, code: "ENROLLMENT_EXPIRED" });
+    if (["PENDING", "APPROVED"].includes(request.status) && request.expires_at <= now) {
+      this.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND finalized_worker_id IS NULL AND status IN ('PENDING', 'APPROVED')", input.requestId);
+      throw Object.assign(new Error("worker enrollment request has expired"), { status: 409, code: "ENROLLMENT_EXPIRED" });
+    }
+    if (request.status !== "APPROVED") throw Object.assign(new Error("worker enrollment request is not approved"), { status: 409, code: "ENROLLMENT_NOT_APPROVED" });
     if (sha256(input.challenge) !== request.challenge_hash) throw Object.assign(new Error("worker enrollment challenge does not match"), { status: 409, code: "ENROLLMENT_CHALLENGE_MISMATCH" });
     let publicKey: KeyObject;
     try { publicKey = publicKeyFromPem(request.public_key_pem); } catch { throw Object.assign(new Error("worker public key is invalid"), { status: 400, code: "INVALID_ENROLLMENT_KEY" }); }

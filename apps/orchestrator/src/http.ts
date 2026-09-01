@@ -95,7 +95,11 @@ function workerProjection(db: OrchestratorDatabase, row: Record<string, unknown>
   });
   const credential = db.one<{ expires_at: number; revoked_at: number | null }>("SELECT expires_at, revoked_at FROM worker_credentials WHERE worker_id = ? ORDER BY issued_at DESC LIMIT 1", workerId);
   const trustState = String(row.trustState ?? row.trust_state ?? "UNKNOWN");
-  const drainState = String(row.drainState ?? row.drain_state ?? "UNKNOWN");
+  let drainState = String(row.drainState ?? row.drain_state ?? "UNKNOWN");
+  if (drainState === "DRAINING" && attempts.length === 0) {
+    drainState = "DRAINED";
+    db.run("UPDATE workers SET drain_state = 'DRAINED', updated_at = ? WHERE id = ? AND drain_state = 'DRAINING'", now, workerId);
+  }
   const connectionState = trustState === "REVOKED" ? "REMOVED" : !Number.isFinite(heartbeatAt) ? "NO_HEARTBEAT" : staleAt !== null && staleAt <= now ? "STALE" : connection?.state === "CONNECTED" ? "ONLINE" : "NO_HEARTBEAT";
   const healthyGranted = connectionState === "ONLINE" && capabilities.some((item) => item.grantState === "GRANTED" && item.health === "HEALTHY" && !item.supersededAt);
   const dispatchState = trustState !== "TRUSTED" ? "BLOCKED" : drainState === "DRAINING" ? "DRAINING" : drainState === "DRAINED" ? "DRAINED" : healthyGranted ? "READY" : "BLOCKED";
@@ -357,7 +361,7 @@ export function createHttpServer(options: AppOptions) {
             if (purged) throw Object.assign(new Error("worker enrollment identity was removed; reset the local Agent"), { status: 410, code: "WORKER_REMOVED" });
             throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
           }
-          const status = ["PENDING", "APPROVED"].includes(row.status) && row.expires_at <= Date.now() ? "EXPIRED" : row.status;
+          const status = ["PENDING", "APPROVED"].includes(row.status) && !row.finalized_worker_id && row.expires_at <= Date.now() ? "EXPIRED" : row.status;
           if (status === "EXPIRED") options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND status IN ('PENDING', 'APPROVED')", parts[4]);
           writeJson(response, 200, { requestId: row.id, fingerprint: row.fingerprint, status, lifecycleStage: enrollmentLifecycleStage(status, row.finalized_worker_id), expiresAt: row.expires_at, finalized: Boolean(row.finalized_worker_id), serverNonce: status === "APPROVED" && !row.finalized_worker_id ? randomBytes(32).toString("base64url") : null });
           return;
@@ -527,7 +531,7 @@ export function createHttpServer(options: AppOptions) {
       }
       if (method === "GET" && parts.length === 4 && parts[2] === "workers" && parts[3] === "enrollment-requests") {
         ownerId(req, options.allowUnauthenticated);
-        options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE status IN ('PENDING', 'APPROVED') AND expires_at <= ?", Date.now());
+        options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE status IN ('PENDING', 'APPROVED') AND finalized_worker_id IS NULL AND expires_at <= ?", Date.now());
         const status = query(req.url).get("status");
         const allowedStatuses = ["PENDING", "APPROVED", "REJECTED", "EXPIRED"];
         const rows = status && allowedStatuses.includes(status)
@@ -578,7 +582,10 @@ export function createHttpServer(options: AppOptions) {
         const input = await readJson(req) as Record<string, unknown>;
         const enrollment = options.db.one<{ fingerprint: string; status: string; expires_at: number }>("SELECT fingerprint, status, expires_at FROM worker_enrollment_requests WHERE id = ?", parts[4]);
         if (!enrollment) throw Object.assign(new Error("enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
-        if (enrollment.status !== "PENDING" || enrollment.expires_at <= Date.now()) throw Object.assign(new Error("enrollment request is not pending"), { status: 409, code: "ENROLLMENT_NOT_PENDING" });
+        if (enrollment.status !== "PENDING" || enrollment.expires_at <= Date.now()) {
+          if (enrollment.status === "PENDING" && enrollment.expires_at <= Date.now()) options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND status = 'PENDING'", parts[4]);
+          throw Object.assign(new Error("enrollment request is not pending"), { status: 409, code: "ENROLLMENT_NOT_PENDING" });
+        }
         if (input.fingerprint !== enrollment.fingerprint) throw Object.assign(new Error("enrollment fingerprint does not match"), { status: 409, code: "ENROLLMENT_FINGERPRINT_MISMATCH" });
         options.db.run("UPDATE worker_enrollment_requests SET status = 'APPROVED', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'PENDING'", Date.now(), owner, parts[4]);
         options.engine.appendAudit("worker.enrollment.approved", `worker-enrollment:${parts[4]}`, owner, "APPROVED", 1, { fingerprint: enrollment.fingerprint });
