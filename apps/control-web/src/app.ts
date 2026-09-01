@@ -229,6 +229,7 @@ function WorkerComposer({ onRefresh }: { onRefresh(): void }) {
 
 function EnrollmentRequestCard({ item, onRefresh }: { item: Item; onRefresh(): void }) {
   const summary = item.deviceSummary && typeof item.deviceSummary === "object" ? item.deviceSummary as Item : {};
+  const lifecycleStage = text(item.lifecycleStage ?? item.status);
   const approve = () => {
     if (!window.confirm("請確認畫面上的 fingerprint 與 worker 裝置一致，再進行 Passkey 核准。")) return;
     void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}/approve`, { method: "POST", body: { fingerprint: text(item.fingerprint) }, stepUpRequired: true }).then(onRefresh).catch(reportError);
@@ -238,9 +239,9 @@ function EnrollmentRequestCard({ item, onRefresh }: { item: Item; onRefresh(): v
     void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}`, { method: "DELETE", stepUpRequired: true }).then(onRefresh).catch(reportError);
   };
   return h("article", { className: "card enrollment-card" },
-    h("div", { className: "card-title-row" }, h("div", null, h("h3", null, text(summary.name ?? item.id)), h("p", { className: "service-id" }, text(summary.platform))), h(StatusPill, { value: item.status })),
+    h("div", { className: "card-title-row" }, h("div", null, h("h3", null, text(summary.name ?? item.id)), h("p", { className: "service-id" }, text(summary.platform))), h(StatusPill, { value: lifecycleStage })),
     h("dl", null, h("dt", null, "Fingerprint"), h("dd", null, text(item.fingerprint)), h("dt", null, "Expires"), h("dd", null, timestamp(item.expiresAt))),
-    item.status === "PENDING" ? h("div", { className: "actions" }, h("button", { type: "button", onClick: approve }, "Passkey 核准此 Worker"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : item.status === "APPROVED" ? h(React.Fragment, null, h("p", { className: "worker-help" }, "OWNER_APPROVED：等待 worker proof；尚未成為已註冊或可派工 Worker。"), h("div", { className: "actions" }, h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request"))) : item.status === "EXPIRED" ? h("div", { className: "actions" }, h("p", { className: "worker-help" }, "EXPIRED：此 request 已過期，未完成註冊。"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : null);
+    lifecycleStage === "PENDING" ? h("div", { className: "actions" }, h("button", { type: "button", onClick: approve }, "Passkey 核准此 Worker"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : lifecycleStage === "OWNER_APPROVED" ? h(React.Fragment, null, h("p", { className: "worker-help" }, "OWNER_APPROVED：等待 worker proof；尚未成為已註冊或可派工 Worker。"), h("div", { className: "actions" }, h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request"))) : lifecycleStage === "EXPIRED" ? h("div", { className: "actions" }, h("p", { className: "worker-help" }, "EXPIRED：此 request 已過期，未完成註冊。"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : null);
 }
 
 function GoalComposer({ onRefresh }: { onRefresh(): void }) {
@@ -324,7 +325,7 @@ function ResourceView({ view, id }: { view: View; id?: string }) {
     setState("loading"); setMessage("正在讀取 authority projection…");
     try {
       if (id) { const value = await detailRequests(view, id); setDetail(value); setResourceItems([]); setEnrollmentRequests([]); setWorkerProviders(items(value.providers)); }
-      else if (view.key === "workers") { const [body, requests, system] = await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/workers/enrollment-requests"), jsonRequest("/api/v1/system")]); setResourceItems(items(body)); setEnrollmentRequests(items(requests)); setWorkerProviders([]); setWorkerCounts(system.counts && typeof system.counts === "object" ? system.counts as Item : {}); setDetail(null); }
+      else if (view.key === "workers") { const [body, requests, system] = await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/workers/enrollment-requests"), jsonRequest("/api/v1/system")]); setResourceItems(items(body)); setEnrollmentRequests(items(requests).filter((item) => text(item.lifecycleStage ?? item.status) !== "REGISTERED")); setWorkerProviders([]); setWorkerCounts(system.counts && typeof system.counts === "object" ? system.counts as Item : {}); setDetail(null); }
       else { const body = view.key === "compute" ? await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/compute/routes")]).then(([providers, routes]) => ({ items: [...(providers.items as Item[] ?? []), { id: "effective-routes", ...routes }] })) : await jsonRequest(view.endpoint); const next = Array.isArray(body.items) ? body.items.filter((item): item is Item => Boolean(item) && typeof item === "object") : view.key === "system" ? [body] : []; setResourceItems(next); setEnrollmentRequests([]); setWorkerProviders([]); setDetail(null); }
       setState("ready"); setMessage("已從目前 authority 重建；SSE/polling 不取代 REST truth。");
     } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "讀取失敗"); }
