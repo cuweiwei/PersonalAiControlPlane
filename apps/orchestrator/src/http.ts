@@ -11,6 +11,7 @@ import { ScheduleService } from "./schedule-service.ts";
 import { TaskEngine } from "./task-engine.ts";
 import { WorkerChannelService } from "./worker-channel.ts";
 import { attachWorkerWebSocket } from "./worker-websocket.ts";
+import type { AuditHealth } from "./audit-monitor.ts";
 
 const MAX_BODY_BYTES = 1_048_576;
 
@@ -27,6 +28,7 @@ type AppOptions = {
   scheduleService?: ScheduleService;
   archiveService?: ArchiveService;
   workerChannel?: WorkerChannelService;
+  auditHealth?: () => AuditHealth;
 };
 
 type AppError = Error & { code?: string; retryable?: boolean; status?: number };
@@ -164,20 +166,23 @@ function publicEvent(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 async function health(options: AppOptions, kind: "live" | "ready" | "ops"): Promise<Record<string, unknown>> {
+  if (kind === "live") return { status: "ok" };
   const dbCheck = options.db.one<{ value: number }>("SELECT 1 AS value");
   const migration = options.db.one<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations");
-  const auditChain = options.engine.verifyAuditChain();
-  const identityReady = kind === "live" ? true : await resolveIdentityReady(options);
-  const runtimeReady = kind === "live" ? true : typeof options.runtimeReady === "function" ? options.runtimeReady() : options.runtimeReady !== false;
+  const audit = options.auditHealth?.() ?? { ok: options.engine.verifyAuditChain(), verifiedAt: Date.now(), eventCount: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM audit_events")?.count ?? 0), durationMs: null };
+  const identityReady = await resolveIdentityReady(options);
+  const runtimeReady = typeof options.runtimeReady === "function" ? options.runtimeReady() : options.runtimeReady !== false;
   const runtimeRequired = options.runtimeRequired !== false;
-  const ready = dbCheck?.value === 1 && migration?.version === 7 && auditChain && identityReady && (!runtimeRequired || runtimeReady);
-  if (kind === "live") return { status: "ok" };
-  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: auditChain ? "ok" : "error", identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required", schemaVersion: migration?.version ?? null };
+  const ready = dbCheck?.value === 1 && migration?.version === 7 && audit.ok && identityReady && (!runtimeRequired || runtimeReady);
+  if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: audit.ok ? "ok" : "error", auditVerifiedAt: audit.verifiedAt, auditEventCount: audit.eventCount, auditVerificationDurationMs: audit.durationMs, identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required", schemaVersion: migration?.version ?? null };
   return {
     status: ready ? "ok" : "degraded",
     evidenceLevel: "implemented_local",
     database: dbCheck?.value === 1 ? "ok" : "error",
-    auditChain: auditChain ? "ok" : "error",
+    auditChain: audit.ok ? "ok" : "error",
+    auditVerifiedAt: audit.verifiedAt,
+    auditEventCount: audit.eventCount,
+    auditVerificationDurationMs: audit.durationMs,
     identity: identityReady ? "ok" : "not_ready",
     runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required",
     schemaVersion: migration?.version ?? null,
@@ -290,8 +295,7 @@ export function createHttpServer(options: AppOptions) {
 
       if (method === "GET" && parts.length === 3 && parts[2] === "goals") {
         const owner = ownerId(req, options.allowUnauthenticated);
-        const goals = options.db.all<Record<string, unknown>>("SELECT * FROM goals WHERE owner_id = ? ORDER BY created_at DESC LIMIT 100", owner);
-        writeJson(response, 200, { items: goals.map((row) => options.engine.getGoal(String(row.id))) });
+        writeJson(response, 200, { items: options.engine.listGoals(owner) });
         return;
       }
 

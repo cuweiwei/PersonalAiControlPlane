@@ -4,11 +4,13 @@ import { resolve } from "node:path";
 const root = resolve(new URL("..", import.meta.url).pathname);
 const required = [
   "package.json",
+  "tsconfig.json",
   "apps/control-plane/src/index.ts",
   "apps/control-plane/src/control-web-server.ts",
   "apps/orchestrator/src/db.ts",
   "apps/orchestrator/src/task-engine.ts",
   "apps/orchestrator/src/http.ts",
+  "apps/orchestrator/src/audit-monitor.ts",
   "apps/orchestrator/src/outbox.ts",
   "apps/orchestrator/src/plan-service.ts",
   "apps/orchestrator/src/runtime.ts",
@@ -73,7 +75,7 @@ for (const relative of required) {
 
 const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 if (packageJson.name !== "personal-ai-control-plane") throw new Error("unexpected package name");
-if (!packageJson.scripts?.test || !packageJson.scripts?.start || !packageJson.scripts?.["build:web"]) throw new Error("required scripts are missing");
+if (!packageJson.scripts?.test || !packageJson.scripts?.start || !packageJson.scripts?.["build:web"] || !packageJson.scripts?.typecheck) throw new Error("required scripts are missing");
 
 const schemas = [
   "schemas/api/v1/goal-create.schema.json",

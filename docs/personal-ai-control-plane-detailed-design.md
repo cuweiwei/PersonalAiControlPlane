@@ -191,7 +191,7 @@ The Orchestrator portion of the unified process contains:
 - Conversation Archive and connector coordination.
 - Proactive trigger conversion.
 - Credential-handle coordination.
-- ContextHub, Hermes, and AIHomePlatform adapters.
+- ContextHub and Hermes adapters. Infrastructure operations remain outside the runtime and use the owner/operator root-owned deployment gateway.
 
 Only one active Orchestrator instance opens the databases read/write. Startup takes an exclusive process lock. A second instance fails readiness rather than becoming a second scheduler.
 
@@ -826,7 +826,7 @@ Verification is fail-closed:
 
 Default lifetime is five minutes and must not exceed the remaining approval-grant lifetime. A new action grant is minted for a retry; the approval grant itself is not exposed to a worker or provider.
 
-Every audience persists a replay record keyed by `jti` or the operation idempotency key until at least `exp`. `identity.db.grant_nonces` covers grants consumed by the Identity Gateway itself; AIHomePlatform, Orchestrator, and workers enforce replay protection inside their own authority or durable local job store rather than sharing the Identity database.
+Every audience persists a replay record keyed by `jti` or the operation idempotency key until at least `exp`. `identity.db.grant_nonces` covers grants consumed by the Identity Gateway itself; Orchestrator and workers enforce replay protection inside their own authority or durable local job store rather than sharing the Identity database.
 
 ### 10.4 Key rotation
 
@@ -836,9 +836,9 @@ Every audience persists a replay record keyed by `jti` or the operation idempote
 - Emergency revocation invalidates the key immediately and records an audit event.
 - Rotation requires a restore-safe key handle; losing all active private key material is an authentication incident, not a reason to disable verification.
 
-### 10.5 AIHomePlatform Passkey migration
+### 10.5 Historical AIHomePlatform Passkey migration
 
-The migration tool is schema-specific and must be completed only after inspecting the live source version. Its invariant workflow is:
+The migration was schema-specific and is retained here as an audit record. It is complete for the current Personal AI identity boundary; the retired source remains recoverable for rollback evidence. Its invariant workflow was:
 
 1. Verify the configured canonical origin and RP ID exactly match the credentials being migrated.
 2. Create and verify an AIHomePlatform authentication backup with rollback instructions.
@@ -2040,7 +2040,7 @@ Destructive migrations use expand/migrate/contract across releases. The first re
 | Database | Migrations, constraints, crash transactions, audit chain, online backup |
 | Integration | API/auth/CSRF/step-up, outbox retry, worker lease/fencing, connector replay |
 | End-to-end local | Goal -> approval -> worker -> checkpoint -> verify with fake external systems |
-| Live/provider | Real Passkey, Hermes, Codex, local model, CUA, wake, ContextHub, AIHomePlatform |
+| Live/provider | Real Passkey, Hermes, Codex, local model, CUA, wake, ContextHub |
 | Production | Gateway/status/health/auth, backup, isolated restore, evidence coordinates |
 
 ### 29.2 Mandatory fault injection
@@ -2079,7 +2079,7 @@ Post-restart assertions prove no lost durable goal, no duplicate committed trans
 | Context failure | Required Memory waits; preferred path records degraded context explicitly |
 | Conversation forever | `NULL` expiry survives pressure; ingestion backpressure without deletion |
 | Verified purge | Tombstone, byte removal, artifact GC, absence verification, safe audit proof |
-| Deployment request | Orchestrator cannot bypass AIHomePlatform/gateway; full evidence chain distinguished |
+| Deployment request | Orchestrator cannot bypass the root-owned deployment gateway; full evidence chain distinguished |
 | Credential expiry | `WAITING_AUTH`, owner reauthorization link, no token-paste path |
 | Self-extension | Development, deployment, discovery, and grant remain separate decisions |
 
@@ -2113,7 +2113,7 @@ Exit: schema compatibility, transition/property tests, idempotency, crash recove
 
 - Identity DB, Passkey/session/CSRF/step-up/recovery.
 - Action-grant signing/verification and pure policy evaluator.
-- AIHomePlatform auth migration tooling and rollback verification.
+- Historical AIHomePlatform auth migration and rollback verification (completed; retained as evidence).
 - Approval UI.
 
 Exit: existing passkey compatibility, fresh login, route isolation, grant replay tests, old route rollback.
@@ -2137,9 +2137,9 @@ Exit: real ChatGPT-authenticated execution/resume and no API fallback; real quot
 
 - Hermes durable-goal adapter and schedule cutover tooling.
 - ContextHub compile/proposal adapter behind compatibility gate.
-- AIHomePlatform typed infrastructure adapter.
+- No AIHomePlatform typed infrastructure adapter; current infrastructure remains outside the runtime.
 
-Exit: real Telegram flows, ContextHub conflict/successor behavior, AIHomePlatform denied/accepted operation without bypass.
+Exit: real Telegram flows, ContextHub conflict/successor behavior, and deployment denied/accepted without gateway bypass.
 
 ### Slice 6 — Compute mesh
 
@@ -2177,7 +2177,7 @@ Implementation can build the core contracts without these values, but the affect
 | `DD-05` | Supported external AI interfaces and deletion semantics | Provider documentation/live connector | Each external connector |
 | `DD-06` | Measured NAS thresholds and backup destination capacity | NAS inventory and restore planning | Forever-retention production acceptance |
 | `DD-07` | Codex human-priority operating policy beyond v1 concurrency/drain defaults | Owner plus observed usage | Higher autonomous Codex concurrency |
-| `DD-08` | Exact AIHomePlatform manifest and NAS gateway allowlist project ID | AIHomePlatform/gateway owner | Production deployment |
+| `DD-08` | Exact Personal AI manifest and NAS gateway allowlist project ID | Root-owned gateway owner | Production deployment |
 
 Failing one item does not justify bypassing its boundary. The corresponding route remains disabled and reports the missing gate.
 
@@ -2213,7 +2213,7 @@ This design is ready for implementation when the owner accepts:
 - Pure fail-closed policy evaluation with adapter-level hard-stop duplication.
 - Outbound signed worker protocol and discovery/grant separation.
 - ChatGPT-only Codex adapter, isolated worktree, one Orchestrator execution at a time, and no API-key fallback.
-- ContextHub and AIHomePlatform remaining external authorities behind typed adapters.
+- ContextHub remains an external semantic authority behind a typed adapter; retired AIHomePlatform assets remain independent recovery material only.
 - Forever conversation retention with backpressure instead of silent deletion.
 - Backup/restore, production gateway, live-health, auth, and provider evidence remaining separate gates.
 - Items in section 31 remaining disabled until real owner/machine/provider evidence resolves them.

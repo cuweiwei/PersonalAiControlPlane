@@ -3,6 +3,7 @@ import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { WorkerChannelService } from "./worker-channel.ts";
 
 type WorkerSocketMessage = { workerId?: unknown; credential?: unknown; connectionId?: unknown; hello?: unknown; frame?: unknown };
+const gateways = new WeakMap<HttpServer, WebSocketServer>();
 
 function isWorkerPath(url: string | undefined): boolean {
   return new URL(url ?? "/", "http://localhost").pathname === "/api/v1/worker/connect";
@@ -14,12 +15,7 @@ function send(socket: WebSocket, value: unknown): void {
 
 export function attachWorkerWebSocket(server: HttpServer, channel: WorkerChannelService): WebSocketServer {
   const gateway = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
-  server.on("close", () => {
-    for (const client of gateway.clients) {
-      if (typeof client.terminate === "function") client.terminate(); else client.close();
-    }
-    gateway.close();
-  });
+  gateways.set(server, gateway);
   server.on("upgrade", (request: IncomingMessage, socket, head) => {
     if (!isWorkerPath(request.url)) { socket.destroy(); return; }
     gateway.handleUpgrade(request, socket, head, (client) => gateway.emit("connection", client, request));
@@ -50,4 +46,13 @@ export function attachWorkerWebSocket(server: HttpServer, channel: WorkerChannel
     socket.on("close", () => { identity = undefined; });
   });
   return gateway;
+}
+
+export function closeWorkerWebSocket(server: HttpServer): Promise<void> {
+  const gateway = gateways.get(server);
+  if (!gateway) return Promise.resolve();
+  for (const client of gateway.clients) {
+    if (typeof client.terminate === "function") client.terminate(); else client.close();
+  }
+  return new Promise((resolve, reject) => gateway.close((error) => error ? reject(error) : resolve()));
 }

@@ -12,8 +12,8 @@ const CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
 };
 
-function headers(response: ServerResponse): void {
-  response.setHeader("cache-control", "no-store");
+function headers(response: ServerResponse, cacheControl = "no-store"): void {
+  response.setHeader("cache-control", cacheControl);
   response.setHeader("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
   response.setHeader("x-content-type-options", "nosniff");
 }
@@ -27,6 +27,7 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 export function createControlWebServer(assetRoot = process.env.PAI_CONTROL_WEB_ROOT ?? "./dist/control-web") {
   const root = resolve(assetRoot);
   const indexPath = join(root, "index.html");
+  const assetCache = new Map<string, Buffer>();
 
   return createServer(async (request, response) => {
     headers(response);
@@ -44,15 +45,21 @@ export function createControlWebServer(assetRoot = process.env.PAI_CONTROL_WEB_R
       if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { error: { code: "METHOD_NOT_ALLOWED", message: "Control Web accepts only GET and HEAD" } });
 
       const relative = pathname.replace(/^\/+/, "");
+      const immutableAsset = relative.startsWith("assets/");
       let filePath = resolve(root, relative || "index.html");
       if (filePath !== root && !filePath.startsWith(`${root}${sep}`)) return json(response, 404, { error: { code: "NOT_FOUND", message: "not found" } });
+      let content: Buffer;
       try {
         const fileStat = await stat(filePath);
         if (fileStat.isDirectory()) filePath = join(filePath, "index.html");
+        content = assetCache.get(filePath) ?? await readFile(filePath);
+        if (immutableAsset) assetCache.set(filePath, content);
       } catch {
+        if (immutableAsset) return json(response, 404, { error: { code: "NOT_FOUND", message: "not found" } });
         filePath = indexPath;
+        content = await readFile(filePath);
       }
-      const content = await readFile(filePath);
+      response.setHeader("cache-control", immutableAsset ? "public, max-age=31536000, immutable" : "no-cache");
       response.writeHead(200, { "content-type": CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream", "content-length": content.length });
       response.end(request.method === "HEAD" ? undefined : content);
     } catch {

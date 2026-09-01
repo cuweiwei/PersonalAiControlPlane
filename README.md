@@ -23,6 +23,7 @@ Requires Node.js 22.19+.
 
 ```bash
 npm run check
+npm run typecheck
 npm test
 npm run build:web
 npm start

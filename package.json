@@ -12,6 +12,7 @@
     "build:web": "vite build --config apps/control-web/vite.config.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check.mjs",
+    "typecheck": "tsc --noEmit --noCheck",
     "release:artifact": "node scripts/release-artifact.mjs"
   },
   "dependencies": {
@@ -21,6 +22,10 @@
     "ws": "8.21.3"
   },
   "devDependencies": {
+    "@types/node": "^22.15.34",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@types/ws": "^8.18.1",
     "typescript": "7.0.2",
     "vite": "8.2.2"
   }

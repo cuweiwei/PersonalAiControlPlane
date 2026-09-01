@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OrchestratorDatabase } from "../apps/orchestrator/src/db.ts";
+import { AuditIntegrityMonitor } from "../apps/orchestrator/src/audit-monitor.ts";
 import { PlanService } from "../apps/orchestrator/src/plan-service.ts";
 import { TaskEngine } from "../apps/orchestrator/src/task-engine.ts";
 import { parseGoalCreateInput, type GoalCreateInput } from "../packages/contracts/src/index.ts";
@@ -70,6 +71,20 @@ test("audit chain detects tampering", () => {
   assert.equal(engine.verifyAuditChain(), true);
   db.run("UPDATE audit_events SET metadata_json = '{\"tampered\":true}' WHERE sequence = 1");
   assert.equal(engine.verifyAuditChain(), false);
+  db.close();
+});
+
+test("audit integrity monitor caches verification and fails closed after tampering", () => {
+  const db = new OrchestratorDatabase(":memory:");
+  const engine = new TaskEngine(db, () => 1_700_000_000_000);
+  engine.createGoal(input(), "owner-1", "audit-monitor-key");
+  const monitor = new AuditIntegrityMonitor(db, engine, 10_000, () => 1_700_000_000_000);
+  monitor.start();
+  assert.deepEqual(monitor.health(), { ok: true, verifiedAt: 1_700_000_000_000, eventCount: 1, durationMs: 0 });
+  db.run("UPDATE audit_events SET metadata_json = '{\"tampered\":true}' WHERE sequence = 1");
+  assert.equal(monitor.verifyNow().ok, false);
+  assert.equal(monitor.health().eventCount, 1);
+  monitor.stop();
   db.close();
 });
 

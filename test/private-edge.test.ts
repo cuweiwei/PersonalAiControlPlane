@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
-import { createPrivateEdgeServer } from "../apps/control-plane/src/private-edge.ts";
+import { closePrivateEdgeConnections, createPrivateEdgeServer } from "../apps/control-plane/src/private-edge.ts";
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -14,7 +14,7 @@ async function close(server: Server): Promise<void> {
 }
 
 test("private edge routes auth, strips browser credentials, and removes infrastructure", async () => {
-  const observed: { auth?: Record<string, string | undefined>; upstream?: Record<string, string | undefined>; web?: Record<string, string | undefined>; memory?: Record<string, string | undefined> } = {};
+  const observed: { auth?: Record<string, string | string[] | undefined>; upstream?: Record<string, string | string[] | undefined>; web?: Record<string, string | string[] | undefined>; memory?: Record<string, string | string[] | undefined> } = {};
   const identity = createServer((request, response) => {
     if (request.url === "/api/v1/auth/forward") {
       observed.auth = { cookie: request.headers.cookie, origin: request.headers.origin, csrf: request.headers["x-pai-csrf-token"], method: request.headers["x-forwarded-method"] };
@@ -99,6 +99,70 @@ test("private edge proxies the worker WebSocket without browser identity", async
     assert.equal(message, "worker-frame");
     socket.close();
   } finally {
-    target.close(); await close(edge); await close(web); await close(orchestrator); await close(identity);
+    target.close(); closePrivateEdgeConnections(edge); await close(edge); await close(web); await close(orchestrator); await close(identity);
+  }
+});
+
+test("private edge rejects HTTPS upstream origins and strips hop-by-hop credentials", async () => {
+  assert.throws(() => createPrivateEdgeServer({ identityOrigin: "https://127.0.0.1:1", orchestratorOrigin: "http://127.0.0.1:1", controlWebOrigin: "http://127.0.0.1:1" }), /identityOrigin must use http/);
+
+  const identity = createServer((request, response) => {
+    if (request.url === "/api/v1/auth/forward") {
+      response.writeHead(204, { "x-pai-verified": "1", "x-pai-owner-id": "owner-real", "x-pai-session-id": "session-ref", "x-pai-auth-time": "1700000000000", "x-pai-request-id": "request-id" });
+      response.end();
+      return;
+    }
+    response.writeHead(404); response.end();
+  });
+  const observed: Record<string, string | string[] | undefined> = {};
+  const orchestrator = createServer((request, response) => {
+    observed.connection = request.headers.connection;
+    observed.secret = request.headers["x-edge-hop-secret"] as string | undefined;
+    observed.authorization = request.headers.authorization;
+    response.writeHead(200, { connection: "x-upstream-hop", "x-upstream-hop": "discard-me", "content-type": "application/json" });
+    response.end('{"ok":true}');
+  });
+  const web = createServer((_, response) => { response.writeHead(404); response.end(); });
+  const identityPort = await listen(identity);
+  const orchestratorPort = await listen(orchestrator);
+  const webPort = await listen(web);
+  const edge = createPrivateEdgeServer({ identityOrigin: `http://127.0.0.1:${identityPort}`, orchestratorOrigin: `http://127.0.0.1:${orchestratorPort}`, controlWebOrigin: `http://127.0.0.1:${webPort}` });
+  const edgePort = await listen(edge);
+  try {
+    const response = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+      const request = httpRequest({ hostname: "127.0.0.1", port: edgePort, path: "/api/v1/goals", method: "GET", headers: { cookie: "pai_session=raw-secret", connection: "x-edge-hop-secret", "x-edge-hop-secret": "must-not-forward", authorization: "Bearer raw-secret" } }, (upstream) => {
+        const chunks: Buffer[] = [];
+        upstream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        upstream.on("end", () => resolve({ status: upstream.statusCode ?? 0, headers: upstream.headers, body: Buffer.concat(chunks).toString() }));
+      });
+      request.on("error", reject);
+      request.end();
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.body, '{"ok":true}');
+    assert.notEqual(observed.connection, "x-edge-hop-secret");
+    assert.equal(observed.secret, undefined);
+    assert.equal(observed.authorization, undefined);
+    assert.equal(response.headers["x-upstream-hop"], undefined);
+  } finally {
+    closePrivateEdgeConnections(edge); await close(edge); await close(web); await close(orchestrator); await close(identity);
+  }
+});
+
+test("private edge times out stalled health upstreams with a gateway timeout", async () => {
+  const identity = createServer((_, response) => { response.writeHead(404); response.end(); });
+  const orchestrator = createServer(() => { /* intentionally stalled */ });
+  const web = createServer((_, response) => { response.writeHead(404); response.end(); });
+  const identityPort = await listen(identity);
+  const orchestratorPort = await listen(orchestrator);
+  const webPort = await listen(web);
+  const edge = createPrivateEdgeServer({ identityOrigin: `http://127.0.0.1:${identityPort}`, orchestratorOrigin: `http://127.0.0.1:${orchestratorPort}`, controlWebOrigin: `http://127.0.0.1:${webPort}` });
+  const edgePort = await listen(edge);
+  try {
+    const response = await fetch(`http://127.0.0.1:${edgePort}/health/ready`);
+    assert.equal(response.status, 504);
+    assert.match(await response.text(), /EDGE_UPSTREAM_TIMEOUT/);
+  } finally {
+    closePrivateEdgeConnections(edge); await close(edge); await close(web); await close(orchestrator); await close(identity);
   }
 });

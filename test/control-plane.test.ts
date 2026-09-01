@@ -27,7 +27,11 @@ test("unified Control Plane serves the static portal with SPA fallback and secur
 
     const asset = await fetch(`http://127.0.0.1:${port}/assets/app.js`);
     assert.equal(asset.headers.get("content-type"), "text/javascript; charset=utf-8");
+    assert.equal(asset.headers.get("cache-control"), "public, max-age=31536000, immutable");
     assert.match(await asset.text(), /ready/);
+
+    const missingAsset = await fetch(`http://127.0.0.1:${port}/assets/missing.js`);
+    assert.equal(missingAsset.status, 404);
 
     const rejected = await fetch(`http://127.0.0.1:${port}/goals`, { method: "POST" });
     assert.equal(rejected.status, 405);

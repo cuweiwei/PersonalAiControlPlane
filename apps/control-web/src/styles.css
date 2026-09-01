@@ -182,7 +182,7 @@ footer { padding: 1.5rem; color: var(--hud-muted); text-align: center; }
 .enrollment-result p { margin: .4rem 0 0; overflow-wrap: anywhere; }
 .enrollment-card dl { margin-top: .9rem; }
 .section-heading.compact { margin-top: 2rem; }
-.infrastructure-card p, .service-card > p { color: var(--hud-copy); line-height: 1.55; }
+.service-card > p { color: var(--hud-copy); line-height: 1.55; }
 .service-grid { grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); margin-block: 1rem 1.5rem; }
 .service-card { display: flex; min-height: 18rem; flex-direction: column; }
 .service-card .button-link { margin-top: auto; }

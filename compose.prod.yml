@@ -21,6 +21,7 @@ services:
       # in the root-controlled production .env. It is never committed or logged.
       PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
       PAI_PORT: "9085"
+      PAI_AUDIT_VERIFY_INTERVAL_MS: "300000"
       # ContextHub keeps its Tailscale-facing 8788 listener loopback-only. The
       # separate Docker-bridge ingress is private container-to-host plumbing;
       # ContextHub still enforces the forwarded personal-ai principal and
@@ -37,9 +38,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:9083:8080"
       - "127.0.0.1:9084:8081"
-      - "127.0.0.1:9085:9085"
     healthcheck:
       test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:8080/health/ready','http://127.0.0.1:8081/health/ready','http://127.0.0.1:9084/health/ready','http://127.0.0.1:9085/health/ready'].map(url=>fetch(url))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

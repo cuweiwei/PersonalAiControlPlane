@@ -179,6 +179,10 @@ export class TaskEngine {
     return row ? this.goalFromRow(row) : undefined;
   }
 
+  listGoals(ownerId: string, limit = 100): GoalRecord[] {
+    return this.db.all<StoredGoalRow>("SELECT * FROM goals WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?", ownerId, limit).map((row) => this.goalFromRow(row));
+  }
+
   beginPlanning(goalId: string): GoalRecord {
     const current = this.getGoal(goalId);
     if (!current) throw this.domainError("GOAL_NOT_FOUND", false);

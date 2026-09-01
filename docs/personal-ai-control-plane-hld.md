@@ -91,9 +91,9 @@ If conversation and artifact storage approach capacity, the system applies inges
 
 ## 5. Brownfield baseline
 
-### 5.1 AIHomePlatform
+### 5.1 AIHomePlatform historical baseline (retired runtime)
 
-AIHomePlatform is already a thin NAS service control plane. It owns a Git-backed service registry, strict Compose policy, GitHub-gated operations, OpenBao integration, platform monitoring, immutable release evidence, a root-owned gateway handoff, SQLite control state, an append-only audit chain, and production Passkey/CSRF/step-up authentication.
+AIHomePlatform was the former thin NAS service control plane. Its Git-backed service registry, strict Compose policy, GitHub-gated operations, OpenBao integration, platform monitoring, immutable release evidence, root-owned gateway handoff, SQLite control state, audit chain, and Passkey/CSRF/step-up authentication remain independently recoverable historical assets; none is a Personal AI runtime dependency.
 
 Reusable seams:
 
@@ -102,7 +102,7 @@ Reusable seams:
 - `ServiceManifestV1`, release manifests, deployment API, capability/evidence states, health probing, GitHub workflows, and NAS deployment gateway.
 - Prometheus/Grafana and OpenBao infrastructure.
 
-Boundary to preserve: AIHomePlatform authorizes infrastructure operations; it does not become the goal planner or store application data.
+Historical boundary: AIHomePlatform authorized infrastructure operations; it did not become the goal planner or store application data. Current infrastructure operations use the root-owned deployment gateway directly under the independent project boundary.
 
 ### 5.2 ContextHub
 
@@ -278,9 +278,9 @@ grant_id, owner_id, task_id, plan_digest, action, resource,
 capability_scope, budget, issued_at, expires_at, auth_time, nonce
 ```
 
-Downstream services validate the signature, audience, expiry, action, resource, and nonce. These grants are automatic runtime assertions, not owner-maintained bearer tokens. They never bypass AIHomePlatform or ContextHub domain authorization.
+Downstream services validate the signature, audience, expiry, action, resource, and nonce. These grants are automatic runtime assertions, not owner-maintained bearer tokens. They never bypass ContextHub domain authorization or the root-owned deployment gateway.
 
-Migration requires a consistent backup of AIHomePlatform auth tables, migration of passkey public material and hashed recovery data, session invalidation, and a fresh login. The old AIHomePlatform auth endpoints are retired only after rollback evidence exists.
+Historical migration completed: a consistent backup of the retired AIHomePlatform auth tables, migration of passkey public material and hashed recovery data, session invalidation, and a fresh login were verified before retiring the old endpoints.
 
 ### 9.2 Orchestrator API and goal planner
 
@@ -522,7 +522,7 @@ The Credential Broker presents opaque capability handles rather than secret valu
 
 Storage is hybrid:
 
-- NAS/server credentials use AIHomePlatform-operated OpenBao KV v2 or the root-owned production environment.
+- NAS/server credentials use the root-controlled production environment or an independently operated secret authority.
 - Corporate/source-local credentials remain in the work device's OS vault.
 - Codex ChatGPT credentials remain in the local Codex/OS credential store.
 - OAuth refresh and reauthorization are delegated to provider-specific adapters.
@@ -738,7 +738,7 @@ Every message includes protocol version, message ID, worker ID, timestamp, nonce
 ### 11.3 Adapter contracts
 
 - ContextHub adapter: `compile_context`, `save_memory`, `propose_successor`, `record_context_outcome`, and change-cursor operations through existing REST/MCP contracts.
-- AIHomePlatform adapter: existing service/deployment/operation APIs extended to validate signed action grants for background execution.
+- Retired AIHomePlatform adapter: historical service/deployment/operation integration is not loaded by the current runtime; infrastructure remains an owner/operator action through the root-owned deployment gateway.
 - Hermes adapter: workload-authenticated goal/status/approval operations; no database access.
 - Local model adapter: OpenAI-compatible endpoint discovery plus explicit capability probe; advertised compatibility is verified, not assumed.
 - Credential adapter: `status(handle)`, `lease(handle, purpose)`, `reauthorize(handle)`, and `revoke(handle)`; secret material never crosses the adapter boundary.
@@ -805,17 +805,14 @@ sequenceDiagram
 sequenceDiagram
   participant O as Orchestrator
   participant I as Identity Gateway
-  participant A as AIHomePlatform
   participant G as Root-owned Gateway
 
   O->>I: Request action grant for approved plan
   I-->>O: Signed short-lived grant
-  O->>A: Deployment request + release coordinates + grant
-  A->>A: Validate manifest, evidence, policy, grant, idempotency
-  A->>G: Existing GitHub-gated deployment workflow
-  G->>G: Validate staged Compose and security policy
-  G-->>A: Deploy/status/health evidence
-  A-->>O: Typed operation result
+  O->>G: Deployment request + release coordinates + grant
+  G->>G: Validate manifest, evidence, policy, grant, idempotency
+  G->>G: Existing GitHub-gated deployment workflow and staged Compose policy
+  G-->>O: Deploy/status/health evidence
   O->>O: Verify goal-level acceptance criteria
 ```
 
@@ -872,9 +869,9 @@ Tasks declare `memory_requirement = required | preferred | none`.
 
 Memory proposals use the outbox and ContextHub idempotency contract. The task result does not claim semantic-memory completion until ContextHub acknowledges the candidate.
 
-### 13.5 AIHomePlatform unavailability
+### 13.5 Retired AIHomePlatform unavailability (historical boundary)
 
-Running applications remain untouched. Infrastructure steps wait or fail without direct fallback. The Orchestrator cannot replace AIHomePlatform or the deployment gateway.
+Running applications remain untouched. Current infrastructure steps wait or fail without direct fallback at the root-owned gateway; the Orchestrator cannot replace the gateway. The retired AIHomePlatform runtime is not restarted for normal operation.
 
 ## 14. Security architecture
 
@@ -888,7 +885,7 @@ Running applications remain untouched. Infrastructure steps wait or fail without
 | Orchestrator | High-privilege coordinator without NAS root or Docker socket |
 | Worker | Trusted enrolled device; job-specific capability and sandbox enforcement |
 | LLM/provider | Untrusted reasoning component; receives data and capability descriptions, never raw secrets |
-| AIHomePlatform | Infrastructure authorization and evidence boundary |
+| Retired AIHomePlatform assets | Independent recovery material; not an active runtime authority |
 | ContextHub | Semantic-memory and provenance boundary |
 | Root deployment gateway | Final production privilege boundary |
 
@@ -927,7 +924,7 @@ The new service exports Prometheus metrics for:
 - Policy decisions, hard stops, grant expiry, and denied adapter calls.
 - SQLite WAL, disk space, backup, restore drill, audit-chain verification, and outbox lag.
 
-AIHomePlatform's Prometheus/Grafana infrastructure should scrape these endpoints. `GET /health` remains liveness/readiness only. `GET /health/ops` reports conservative release, database, backup/restore, credential-adapter, and worker-protocol evidence without secret values.
+An independently operated monitoring stack may scrape these endpoints. `GET /health` remains liveness/readiness only. `GET /health/ops` reports conservative release, database, backup/restore, credential-adapter, and worker-protocol evidence without secret values.
 
 Evidence levels remain distinct:
 
@@ -949,7 +946,7 @@ Required backup set:
 - Artifact directory with checksums.
 - Non-secret configuration and service manifests from Git.
 - OpenBao through its existing protected backup procedure.
-- ContextHub and AIHomePlatform through their own runbooks.
+- ContextHub through its own runbook; retired AIHomePlatform assets remain under their independent recovery runbook.
 
 Restore order:
 
@@ -1008,7 +1005,7 @@ Exit gate: schema compatibility, crash recovery, idempotency, backup, restore dr
 ### Phase B — Shared Passkey boundary
 
 - Preserve current RP ID and canonical origin.
-- Snapshot and migrate AIHomePlatform passkey/recovery data into `identity.db`.
+- Historical migration record: passkey/recovery data was migrated from the retired AIHomePlatform authority into `identity.db`.
 - Invalidate old sessions and require a fresh Passkey login.
 - Place Control Web and the ContextHub Memory projection behind the Personal AI forward-auth edge.
 - Retain AI Home Platform Compose, data and immutable image for rollback, but do not restart its runtime as part of Personal AI login or routing.
@@ -1083,7 +1080,7 @@ Constraint: current ContextHub `AGENTS.md`, ADR-001, policies, tests, and docs i
 - Orchestrator restart at every material task state.
 - Worker disconnect, duplicate result, stale fencing token, and uncertain side effect.
 - ContextHub compile/candidate/successor/conflict and scope migration.
-- AIHomePlatform deployment request accepted/denied without gateway bypass.
+- Deployment request accepted/denied without bypassing the root-owned gateway.
 - Conversation connector replay, edit, deletion, attachment, and extraction provenance.
 
 ### 19.3 Provider and live evidence
@@ -1109,7 +1106,7 @@ Constraint: current ContextHub `AGENTS.md`, ADR-001, policies, tests, and docs i
 | Trusted device plus sandbox | Low approval friction with failure containment | Sandbox implementation differs by OS |
 | ContextHub scope refactor | Matches one-owner conceptual memory model | Deliberately changes a current security invariant and requires a full migration |
 | Forever conversation retention | Complete reconstruction and provenance | Unbounded storage growth; needs capacity alerts and owner-driven pruning |
-| AIHomePlatform remains deployment authority | Preserves tested privilege boundary | Background deployment needs signed action-grant integration |
+| Root-owned gateway remains deployment authority | Preserves tested privilege boundary | Background deployment needs explicit owner/operator coordination |
 | Hermes remains interface | Reuses working Telegram/skills without a second brain | Existing planning/scheduling behavior needs careful retirement |
 
 ## 21. Items to revisit as the system grows
