@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { FileDeviceKeyStore, FileWorkerCredentialStore } from "./transport.ts";
 import { createWorkerDaemon } from "./service.ts";
 import { WorkerBootstrap } from "./bootstrap.ts";
+import { WorkerDatabase } from "./db.ts";
 
 function arg(name: string): string | undefined { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : undefined; }
 function json(value: unknown): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
@@ -28,7 +29,17 @@ async function finalize(): Promise<void> {
 
 async function status(): Promise<void> {
   const credential = credentialStore.read();
-  json({ origin, dataDir, platform: platform(), arch: arch(), credential: credential ? { workerId: credential.workerId, credentialId: credential.credentialId, expiresAt: credential.expiresAt } : null, deviceKeyStorage: keyStore.storageClass, credentialStorage: credentialStore.storageClass });
+  json({ origin, dataDir, platform: platform(), arch: arch(), removed: bootstrap.isRemoved(), credential: credential ? { workerId: credential.workerId, credentialId: credential.credentialId, expiresAt: credential.expiresAt } : null, deviceKeyStorage: keyStore.storageClass, credentialStorage: credentialStore.storageClass });
+}
+
+async function reset(): Promise<void> {
+  if (!process.argv.includes("--confirm")) throw new Error("reset requires explicit --confirm; this erases the local Worker identity and runtime state");
+  await bootstrap.resetLocalIdentity();
+  const db = new WorkerDatabase(join(dataDir, "worker.db"));
+  db.connection.exec("DELETE FROM accepted_jobs; DELETE FROM consumed_grants; DELETE FROM worker_state;");
+  db.connection.prepare("INSERT INTO worker_state(key, value) VALUES ('sequence', '-1')").run();
+  db.close();
+  json({ reset: true, dataDir, newIdentityRequired: true });
 }
 
 async function rotate(): Promise<void> {
@@ -59,6 +70,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (command === "enroll") await enroll();
     else if (command === "enroll-finalize") await finalize();
     else if (command === "rotate") await rotate();
+    else if (command === "reset") await reset();
     else if (command === "start") await start();
     else if (command === "status" || command === "diagnose") await status();
     else throw new Error(`unsupported command: ${command}`);

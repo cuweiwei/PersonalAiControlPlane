@@ -26,6 +26,11 @@ test("Worker tab exposes enrollment, status, provider, and lifecycle controls", 
   assert.match(markup, /Portal 不接收私鑰/);
   assert.match(markup, /Enrollment requests/);
   assert.match(markup, /LLM \/ Provider/);
+  const source = readFileSync(new URL("../apps/control-web/src/app.ts", import.meta.url), "utf8");
+  assert.match(source, /Needs attention/);
+  assert.match(source, /永久清除 request/);
+  assert.match(source, /Passkey Resume/);
+  assert.match(source, /Wake（未設定）/);
 });
 
 test("Control Web exposes one portal entry while preserving service authority boundaries", () => {

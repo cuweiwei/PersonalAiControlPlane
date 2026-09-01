@@ -5,6 +5,17 @@ import { canonicalJson, sha256, uuidv7, type JsonValue } from "../../crypto/src/
 
 export type WorkerEnvelopeType = "worker.hello" | "worker.heartbeat" | "job.accept" | "job.reject" | "job.event" | "job.checkpoint" | "job.result" | "capability.update";
 
+export type WorkerHeartbeatReport = {
+  health: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
+  capabilityId?: string;
+  capabilityDescriptorHash?: string;
+  agent?: { version?: string; platform?: string; architecture?: string; storageClass?: string };
+  transport?: "WSS" | "HTTP_FALLBACK";
+  resources?: { cpuCount?: number; load1?: number; memoryTotalBytes?: number; memoryFreeBytes?: number };
+  runtime?: { activeJobs?: number; queuedJobs?: number; maxConcurrency?: number };
+  lastErrorCode?: string;
+};
+
 export type WorkerCredential = {
   id: string;
   workerId: string;

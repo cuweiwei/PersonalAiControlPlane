@@ -10,6 +10,7 @@ import {
   type CapabilityDescriptor,
   type WorkerCredentialRecord,
   type WorkerEnvelope,
+  type WorkerHeartbeatReport,
 } from "../../../packages/worker/src/index.ts";
 import type { WorkerJobOffer } from "../../worker/src/runtime.ts";
 import { OrchestratorDatabase } from "./db.ts";
@@ -43,6 +44,43 @@ function publicKeyFromPem(pem: string): KeyObject {
   return createPublicKey(pem);
 }
 
+function boundedNumber(value: unknown, minimum: number, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= minimum && value <= maximum ? value : undefined;
+}
+
+function safeHeartbeatReport(value: unknown): WorkerHeartbeatReport {
+  const input = asRecord(value);
+  const report: WorkerHeartbeatReport = {
+    health: ["HEALTHY", "DEGRADED", "UNHEALTHY"].includes(String(input.health)) ? input.health as WorkerHeartbeatReport["health"] : "UNHEALTHY",
+  };
+  for (const key of ["capabilityId", "capabilityDescriptorHash"] as const) if (typeof input[key] === "string" && input[key].length <= 200) report[key] = input[key];
+  const agent = asRecord(input.agent);
+  const safeAgent: NonNullable<WorkerHeartbeatReport["agent"]> = {};
+  for (const key of ["version", "platform", "architecture", "storageClass"] as const) if (typeof agent[key] === "string" && agent[key].length <= 80) safeAgent[key] = agent[key];
+  if (Object.keys(safeAgent).length) report.agent = safeAgent;
+  if (input.transport === "WSS" || input.transport === "HTTP_FALLBACK") report.transport = input.transport;
+  const resources = asRecord(input.resources);
+  const safeResources: NonNullable<WorkerHeartbeatReport["resources"]> = {};
+  const cpuCount = boundedNumber(resources.cpuCount, 1, 512);
+  const load1 = boundedNumber(resources.load1, 0, 10_000);
+  const memoryTotalBytes = boundedNumber(resources.memoryTotalBytes, 0, 1e16);
+  const memoryFreeBytes = boundedNumber(resources.memoryFreeBytes, 0, 1e16);
+  if (cpuCount !== undefined) safeResources.cpuCount = Math.floor(cpuCount);
+  if (load1 !== undefined) safeResources.load1 = load1;
+  if (memoryTotalBytes !== undefined) safeResources.memoryTotalBytes = Math.floor(memoryTotalBytes);
+  if (memoryFreeBytes !== undefined) safeResources.memoryFreeBytes = Math.floor(memoryFreeBytes);
+  if (Object.keys(safeResources).length) report.resources = safeResources;
+  const runtime = asRecord(input.runtime);
+  const safeRuntime: NonNullable<WorkerHeartbeatReport["runtime"]> = {};
+  for (const key of ["activeJobs", "queuedJobs", "maxConcurrency"] as const) {
+    const value = boundedNumber(runtime[key], 0, 100_000);
+    if (value !== undefined) safeRuntime[key] = Math.floor(value);
+  }
+  if (Object.keys(safeRuntime).length) report.runtime = safeRuntime;
+  if (typeof input.lastErrorCode === "string" && /^[A-Z0-9_.:-]{1,100}$/.test(input.lastErrorCode)) report.lastErrorCode = input.lastErrorCode;
+  return report;
+}
+
 export class WorkerChannelService {
   private readonly db: OrchestratorDatabase;
   private readonly pending = new Map<string, PendingResult>();
@@ -55,7 +93,10 @@ export class WorkerChannelService {
   finalizeEnrollment(input: { requestId: string; challenge: string; serverNonce: string; workerSignature: string; now?: number }): { workerId: string; credential: string; credentialId: string; expiresAt: number; fingerprint: string } {
     const now = input.now ?? this.clocks();
     const request = this.db.one<{ id: string; public_key_pem: string; fingerprint: string; device_summary_json: string; challenge_hash: string; status: string; expires_at: number; finalized_worker_id: string | null }>("SELECT id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, finalized_worker_id FROM worker_enrollment_requests WHERE id = ?", input.requestId);
-    if (!request) throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
+    if (!request) {
+      if (this.db.one("SELECT id FROM worker_purge_tombstones WHERE enrollment_request_id = ?", input.requestId)) throw Object.assign(new Error("worker enrollment identity was removed; reset the local Agent"), { status: 410, code: "WORKER_REMOVED" });
+      throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
+    }
     if (request.status !== "APPROVED") throw Object.assign(new Error("worker enrollment request is not approved"), { status: 409, code: "ENROLLMENT_NOT_APPROVED" });
     if (request.finalized_worker_id) throw Object.assign(new Error("worker enrollment request has already been finalized"), { status: 409, code: "ENROLLMENT_ALREADY_FINALIZED" });
     if (request.expires_at <= now) throw Object.assign(new Error("worker enrollment request has expired"), { status: 409, code: "ENROLLMENT_EXPIRED" });
@@ -86,9 +127,18 @@ export class WorkerChannelService {
     try { return { publicKey: publicKeyFromPem(row.public_key_pem), fingerprint: row.fingerprint }; } catch { return undefined; }
   }
 
+  private requireAuthentication(workerId: string, credential: string, now = this.clocks()): { publicKey: KeyObject; fingerprint: string } {
+    const worker = this.db.one<{ trust_state: string }>("SELECT trust_state FROM workers WHERE id = ?", workerId);
+    const purged = this.db.one("SELECT id FROM worker_purge_tombstones WHERE worker_id = ?", workerId);
+    if (purged || worker?.trust_state === "REVOKED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+    const auth = this.authenticate(workerId, credential, now);
+    if (!auth) throw Object.assign(new Error("worker credential is invalid or expired"), { status: 401, code: "WORKER_AUTH_REQUIRED" });
+    return auth;
+  }
+
   rotateCredential(workerId: string, currentCredential: string): { credentialId: string; credential: string; expiresAt: number } {
     const now = this.clocks();
-    if (!this.authenticate(workerId, currentCredential, now)) throw Object.assign(new Error("worker credential is invalid or expired"), { status: 401, code: "WORKER_AUTH_REQUIRED" });
+    this.requireAuthentication(workerId, currentCredential, now);
     const next = createWorkerCredential(workerId, now);
     this.db.transaction(() => {
       this.db.run("UPDATE worker_credentials SET revoked_at = ? WHERE worker_id = ? AND revoked_at IS NULL", now, workerId);
@@ -99,8 +149,7 @@ export class WorkerChannelService {
 
   poll(input: WorkerPollInput): WorkerPollResult {
     const now = this.clocks();
-    const auth = this.authenticate(input.workerId, input.credential, now);
-    if (!auth) throw Object.assign(new Error("worker credential is invalid or expired"), { status: 401, code: "WORKER_AUTH_REQUIRED" });
+    const auth = this.requireAuthentication(input.workerId, input.credential, now);
     const current = this.db.one<{ connection_id: string; generation: number; last_sequence: number }>("SELECT connection_id, generation, last_sequence FROM worker_connections WHERE worker_id = ?", input.workerId);
     const connectionId = input.connectionId || current?.connection_id || randomBytes(16).toString("hex");
     let generation = current?.generation ?? 0;
@@ -122,13 +171,14 @@ export class WorkerChannelService {
     }
     this.db.run("UPDATE workers SET last_heartbeat_at = ?, stale_at = ?, updated_at = ? WHERE id = ?", now, now + 90_000, now, input.workerId);
     this.db.run("UPDATE worker_connections SET last_heartbeat_at = ?, state = 'CONNECTED', updated_at = ? WHERE worker_id = ?", now, now, input.workerId);
+    const activeAttempts = Number(this.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM attempts WHERE worker_id = ? AND state IN ('OFFERED', 'DISPATCHED', 'RUNNING', 'RESUMING')", input.workerId)?.count ?? 0);
+    if (activeAttempts === 0) this.db.run("UPDATE workers SET drain_state = 'DRAINED', updated_at = ? WHERE id = ? AND drain_state = 'DRAINING'", now, input.workerId);
     return { connectionId, generation, offers, heartbeatAt: now };
   }
 
   receive(workerId: string, credential: string, frame: WorkerEnvelope): void {
     const now = this.clocks();
-    const auth = this.authenticate(workerId, credential, now);
-    if (!auth) throw Object.assign(new Error("worker credential is invalid or expired"), { status: 401, code: "WORKER_AUTH_REQUIRED" });
+    const auth = this.requireAuthentication(workerId, credential, now);
     const connection = this.db.one<{ connection_id: string; last_sequence: number }>("SELECT connection_id, last_sequence FROM worker_connections WHERE worker_id = ?", workerId);
     if (!connection || connection.connection_id !== frame.connectionId) throw Object.assign(new Error("worker connection is not active"), { status: 409, code: "WORKER_CONNECTION_MISMATCH" });
     const verifier = new WorkerConnectionVerifier(frame.connectionId, workerId, auth.publicKey, () => now);
@@ -145,16 +195,23 @@ export class WorkerChannelService {
       let descriptorValid = false;
       try { descriptorValid = validateCapabilityDescriptor(descriptor).valid; } catch { /* malformed discovery must not tear down an authenticated channel */ }
       if (descriptorValid) {
+        this.db.run("UPDATE capabilities SET discovered_state = 'SUPERSEDED', grant_state = 'REVOKED', superseded_at = ?, updated_at = ? WHERE worker_id = ? AND kind = ? AND version = ? AND descriptor_hash <> ? AND superseded_at IS NULL", now, now, workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash);
         const existing = this.db.one<{ id: string; grant_state: string }>("SELECT id, grant_state FROM capabilities WHERE worker_id = ? AND kind = ? AND version = ? AND descriptor_hash = ?", workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash);
+        const capabilityId = existing?.id ?? uuidv7(now);
         if (existing) {
           this.db.run("UPDATE capabilities SET discovered_state = 'DISCOVERED', health = ?, descriptor_json = ?, updated_at = ? WHERE id = ?", descriptor.health, JSON.stringify(descriptor), now, existing.id);
         } else {
-          this.db.run("INSERT INTO capabilities(id, worker_id, kind, version, descriptor_hash, descriptor_json, discovered_state, grant_state, health, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'DISCOVERED', 'REVIEW_REQUIRED', ?, ?, ?)", uuidv7(now), workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash, JSON.stringify(descriptor), descriptor.health, now, now);
+          this.db.run("INSERT INTO capabilities(id, worker_id, kind, version, descriptor_hash, descriptor_json, discovered_state, grant_state, health, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'DISCOVERED', 'REVIEW_REQUIRED', ?, ?, ?)", capabilityId, workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash, JSON.stringify(descriptor), descriptor.health, now, now);
         }
+        this.db.run("UPDATE capabilities SET superseded_by = ? WHERE worker_id = ? AND kind = ? AND version = ? AND descriptor_hash <> ? AND superseded_at = ?", capabilityId, workerId, descriptor.kind, descriptor.version, descriptor.descriptorHash, now);
       }
     }
     if (frame.type === "worker.heartbeat" && typeof payload.capabilityId === "string" && typeof payload.capabilityDescriptorHash === "string" && ["HEALTHY", "DEGRADED", "UNHEALTHY"].includes(String(payload.health))) {
       this.db.run("UPDATE capabilities SET health = ?, updated_at = ? WHERE worker_id = ? AND kind = ? AND descriptor_hash = ?", String(payload.health), now, workerId, payload.capabilityId, payload.capabilityDescriptorHash);
+    }
+    if (frame.type === "worker.heartbeat") {
+      const report = safeHeartbeatReport(payload);
+      this.db.run("INSERT INTO worker_runtime_status(worker_id, report_json, health, transport, last_error_code, last_error_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET report_json = excluded.report_json, health = excluded.health, transport = excluded.transport, last_error_code = excluded.last_error_code, last_error_at = excluded.last_error_at, updated_at = excluded.updated_at", workerId, JSON.stringify(report), report.health, report.transport ?? "UNKNOWN", report.lastErrorCode ?? null, report.lastErrorCode ? now : null, now);
     }
     if (frame.type === "job.result" || frame.type === "job.reject") {
       const attemptId = typeof payload.attemptId === "string" ? payload.attemptId : undefined;
@@ -173,6 +230,9 @@ export class WorkerChannelService {
 
   queueOffer(job: WorkerJobOffer): void {
     const now = this.clocks();
+    const worker = this.db.one<{ trust_state: string; drain_state: string }>("SELECT trust_state, drain_state FROM workers WHERE id = ?", job.workerId);
+    if (!worker || worker.trust_state === "REVOKED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+    if (worker.drain_state !== "RUNNABLE") throw Object.assign(new Error("worker is draining and cannot receive new work"), { status: 409, code: "WORKER_NOT_RUNNABLE" });
     const payload = canonicalJson(job as unknown as JsonValue);
     this.db.run("INSERT INTO worker_channel_messages(id, worker_id, connection_id, attempt_id, type, payload_json, status, created_at) VALUES (?, ?, NULL, ?, 'job.offer', ?, 'QUEUED', ?)", uuidv7(now), job.workerId, job.attemptId, payload, now);
   }

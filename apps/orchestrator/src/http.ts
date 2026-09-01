@@ -35,6 +35,100 @@ type AppOptions = {
 
 type AppError = Error & { code?: string; retryable?: boolean; status?: number };
 
+type WorkerProjectionOptions = { now?: number };
+
+function jsonValue(value: unknown, fallback: unknown): unknown {
+  try { return JSON.parse(String(value ?? "")); } catch { return fallback; }
+}
+
+function safeWorkerMetadata(value: unknown): Record<string, unknown> {
+  const input = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const output: Record<string, unknown> = {};
+  for (const key of ["name", "platform", "arch", "architecture", "version", "loginMode", "storageClass", "provider", "providerId", "modelId", "region", "evidenceLevel"] as const) {
+    if (typeof input[key] === "string" && input[key].length <= 120) output[key] = input[key];
+  }
+  return output;
+}
+
+function safeCapabilityDescriptor(value: unknown): Record<string, unknown> {
+  const input = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const output: Record<string, unknown> = {};
+  for (const key of ["kind", "version", "descriptorHash", "health"] as const) if (typeof input[key] === "string" && input[key].length <= 200) output[key] = input[key];
+  const properties = input.properties !== null && typeof input.properties === "object" && !Array.isArray(input.properties) ? input.properties as Record<string, unknown> : {};
+  const safeProperties: Record<string, unknown> = {};
+  for (const key of ["loginMode", "sandboxModes", "maxConcurrency", "networkModes", "desktopMode", "profile", "indicatorRequired", "maxBytes"] as const) {
+    const value = properties[key];
+    if (typeof value === "string" && value.length <= 120) safeProperties[key] = value;
+    else if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1e9) safeProperties[key] = value;
+    else if (Array.isArray(value) && value.length <= 20 && value.every((item) => typeof item === "string" && item.length <= 120)) safeProperties[key] = value;
+    else if (typeof value === "boolean") safeProperties[key] = value;
+  }
+  output.properties = safeProperties;
+  return output;
+}
+
+function enrollmentLifecycleStage(status: string, finalizedWorkerId: string | null | undefined): string {
+  if (status === "PENDING") return "PENDING";
+  if (status === "APPROVED" && !finalizedWorkerId) return "OWNER_APPROVED";
+  if (status === "APPROVED" && finalizedWorkerId) return "REGISTERED";
+  return status;
+}
+
+function workerProjection(db: OrchestratorDatabase, row: Record<string, unknown>, options: WorkerProjectionOptions = {}): Record<string, unknown> {
+  const now = options.now ?? Date.now();
+  const workerId = String(row.id);
+  const heartbeatValue = row.last_heartbeat_at ?? row.lastHeartbeatAt;
+  const staleValue = row.stale_at ?? row.staleAt;
+  const heartbeatAt = heartbeatValue === null || heartbeatValue === undefined ? null : Number(heartbeatValue);
+  const staleAt = staleValue === null || staleValue === undefined ? null : Number(staleValue);
+  const connection = db.one<{ connection_id: string; generation: number; state: string; last_heartbeat_at: number | null }>("SELECT connection_id, generation, state, last_heartbeat_at FROM worker_connections WHERE worker_id = ?", workerId);
+  const runtime = db.one<{ report_json: string; health: string; transport: string; last_error_code: string | null; last_error_at: number | null; updated_at: number }>("SELECT report_json, health, transport, last_error_code, last_error_at, updated_at FROM worker_runtime_status WHERE worker_id = ?", workerId);
+  const attempts = db.all<Record<string, unknown>>("SELECT a.id, a.task_id AS taskId, t.goal_id AS goalId, t.title, a.state, a.started_at AS startedAt FROM attempts a JOIN tasks t ON t.id = a.task_id WHERE a.worker_id = ? AND a.state IN ('OFFERED', 'DISPATCHED', 'RUNNING', 'RESUMING') ORDER BY a.started_at", workerId);
+  const queuedOffers = Number(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM worker_channel_messages WHERE worker_id = ? AND status IN ('QUEUED', 'DELIVERED')", workerId)?.count ?? 0);
+  const liveReservations = Number(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM resource_reservations WHERE resource_type = 'worker' AND resource_id = ? AND status = 'HELD' AND expires_at > ?", workerId, now)?.count ?? 0);
+  const liveLeases = Number(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM leases WHERE resource_type = 'worker' AND resource_id = ? AND released_at IS NULL", workerId)?.count ?? 0);
+  const capabilities = db.all<Record<string, unknown>>("SELECT id, worker_id AS workerId, kind, version, descriptor_hash AS descriptorHash, descriptor_json AS descriptor, discovered_state AS discoveredState, grant_state AS grantState, health, superseded_by AS supersededBy, superseded_at AS supersededAt, updated_at AS updatedAt FROM capabilities WHERE worker_id = ? ORDER BY kind, version, updated_at DESC", workerId).map((item) => ({ ...item, descriptor: safeCapabilityDescriptor(jsonValue(item.descriptor, {})) }));
+  const providers = db.all<Record<string, unknown>>("SELECT id, class, adapter, status, descriptor_json AS descriptor, last_probe_at AS lastProbeAt, evidence_json AS evidence, updated_at AS updatedAt FROM providers WHERE worker_id = ? ORDER BY id", workerId).map((item) => {
+    const evidence = safeWorkerMetadata(jsonValue(item.evidence, {}));
+    if ((String(item.class).toLowerCase().includes("codex") || String(item.adapter).toLowerCase().includes("cli")) && String(evidence.evidenceLevel).toLowerCase() === "provider_verified") evidence.evidenceLevel = "implemented_local";
+    return { id: item.id, class: item.class, adapter: item.adapter, status: item.status, descriptor: safeWorkerMetadata(jsonValue(item.descriptor, {})), lastProbeAt: item.lastProbeAt, evidence, updatedAt: item.updatedAt };
+  });
+  const credential = db.one<{ expires_at: number; revoked_at: number | null }>("SELECT expires_at, revoked_at FROM worker_credentials WHERE worker_id = ? ORDER BY issued_at DESC LIMIT 1", workerId);
+  const trustState = String(row.trustState ?? row.trust_state ?? "UNKNOWN");
+  const drainState = String(row.drainState ?? row.drain_state ?? "UNKNOWN");
+  const connectionState = trustState === "REVOKED" ? "REMOVED" : !Number.isFinite(heartbeatAt) ? "NO_HEARTBEAT" : staleAt !== null && staleAt <= now ? "STALE" : connection?.state === "CONNECTED" ? "ONLINE" : "NO_HEARTBEAT";
+  const healthyGranted = connectionState === "ONLINE" && capabilities.some((item) => item.grantState === "GRANTED" && item.health === "HEALTHY" && !item.supersededAt);
+  const dispatchState = trustState !== "TRUSTED" ? "BLOCKED" : drainState === "DRAINING" ? "DRAINING" : drainState === "DRAINED" ? "DRAINED" : healthyGranted ? "READY" : "BLOCKED";
+  const dispatchReason = dispatchState === "BLOCKED" ? (trustState !== "TRUSTED" ? "WORKER_NOT_TRUSTED" : "NO_HEALTHY_GRANTED_CAPABILITY") : null;
+  const report = jsonValue(runtime?.report_json, {}) as Record<string, unknown>;
+  return {
+    id: row.id,
+    identitySubject: row.identitySubject ?? row.identity_subject,
+    name: row.name,
+    platform: row.platform,
+    trustState,
+    protocolMin: row.protocolMin ?? row.protocol_min,
+    protocolMax: row.protocolMax ?? row.protocol_max,
+    lifecycleStage: connectionState === "REMOVED" ? "REMOVED" : connectionState === "ONLINE" ? "ONLINE" : "REGISTERED",
+    connection: { state: connectionState, heartbeatAt, staleAt, ageMs: Number.isFinite(heartbeatAt) ? Math.max(0, now - Number(heartbeatAt)) : null, connectionId: connection?.connection_id ?? null, generation: connection?.generation ?? null, transport: runtime?.transport ?? report.transport ?? "UNKNOWN" },
+    dispatch: { state: dispatchState, reason: dispatchReason, drainState },
+    activity: { activeAttempts: attempts.length, attempts, queuedOffers, liveReservations, liveLeases },
+    credential: { state: !credential ? "MISSING" : credential.revoked_at !== null ? "REVOKED" : credential.expires_at <= now ? "EXPIRED" : credential.expires_at <= now + 60 * 60_000 ? "EXPIRING" : "ACTIVE", expiresAt: credential?.expires_at ?? null },
+    metadata: safeWorkerMetadata(jsonValue(row.metadata ?? row.metadata_json, {})),
+    capabilities,
+    providers,
+    diagnostics: { ...report, health: runtime?.health ?? report.health ?? "UNKNOWN", transport: runtime?.transport ?? report.transport ?? "UNKNOWN", lastErrorCode: runtime?.last_error_code ?? report.lastErrorCode ?? null, lastErrorAt: runtime?.last_error_at ?? null, updatedAt: runtime?.updated_at ?? null },
+    availableActions: { rename: trustState !== "REVOKED", drain: trustState === "TRUSTED" && drainState === "RUNNABLE", drainReason: trustState !== "TRUSTED" ? "WORKER_NOT_TRUSTED" : drainState !== "RUNNABLE" ? "WORKER_ALREADY_DRAINING" : null, resume: trustState === "TRUSTED" && (drainState === "DRAINING" || drainState === "DRAINED"), resumeReason: drainState === "RUNNABLE" ? "WORKER_NOT_DRAINED" : null, purge: attempts.length === 0 && liveReservations === 0 && liveLeases === 0, purgeReason: attempts.length || liveReservations || liveLeases ? "WORKER_BUSY" : null, wake: false, wakeReason: "WAKE_ADAPTER_NOT_CONFIGURED" },
+    createdAt: row.createdAt ?? row.created_at,
+    updatedAt: row.updatedAt ?? row.updated_at,
+  };
+}
+
+function listWorkers(db: OrchestratorDatabase, state: string | null): Record<string, unknown>[] {
+  const where = state === "removed" ? "WHERE trust_state = 'REVOKED'" : state === "all" ? "" : "WHERE trust_state <> 'REVOKED'";
+  return db.all<Record<string, unknown>>(`SELECT id, identity_subject AS identitySubject, name, platform, trust_state AS trustState, protocol_min AS protocolMin, protocol_max AS protocolMax, last_heartbeat_at AS lastHeartbeatAt, stale_at AS staleAt, drain_state AS drainState, metadata_json AS metadata, created_at AS createdAt, updated_at AS updatedAt FROM workers ${where} ORDER BY name`).map((row) => workerProjection(db, row));
+}
+
 const workloadAuthByRequest = new WeakMap<IncomingMessage, WorkloadRequestVerifier | undefined>();
 
 function requestId(req: IncomingMessage): string {
@@ -180,7 +274,7 @@ async function health(options: AppOptions, kind: "live" | "ready" | "ops"): Prom
   const identityReady = await resolveIdentityReady(options);
   const runtimeReady = typeof options.runtimeReady === "function" ? options.runtimeReady() : options.runtimeReady !== false;
   const runtimeRequired = options.runtimeRequired !== false;
-  const ready = dbCheck?.value === 1 && migration?.version === 7 && audit.ok && identityReady && (!runtimeRequired || runtimeReady);
+  const ready = dbCheck?.value === 1 && migration?.version === 8 && audit.ok && identityReady && (!runtimeRequired || runtimeReady);
   if (kind === "ready") return { status: ready ? "ok" : "not_ready", database: dbCheck?.value === 1 ? "ok" : "error", auditChain: audit.ok ? "ok" : "error", auditVerifiedAt: audit.verifiedAt, auditEventCount: audit.eventCount, auditVerificationDurationMs: audit.durationMs, identity: identityReady ? "ok" : "not_ready", runtime: runtimeReady ? "ok" : runtimeRequired ? "not_ready" : "not_required", schemaVersion: migration?.version ?? null };
   return {
     status: ready ? "ok" : "degraded",
@@ -246,27 +340,33 @@ export function createHttpServer(options: AppOptions) {
           if (typeof input.publicKeyPem !== "string" || input.publicKeyPem.length > 20_000 || !input.deviceSummary || typeof input.deviceSummary !== "object" || Array.isArray(input.deviceSummary)) throw Object.assign(new Error("worker enrollment request is invalid"), { status: 400, code: "INVALID_ENROLLMENT_REQUEST" });
           let key;
           try { key = createPublicKey(input.publicKeyPem); } catch { throw Object.assign(new Error("worker public key is invalid"), { status: 400, code: "INVALID_ENROLLMENT_KEY" }); }
+          const fingerprint = publicKeyFingerprint(key);
+          if (options.db.one("SELECT id FROM worker_purge_tombstones WHERE fingerprint_digest = ?", sha256(fingerprint))) throw Object.assign(new Error("worker identity was permanently removed; reset the local Agent before enrolling again"), { status: 410, code: "WORKER_ENROLLMENT_BLOCKED" });
           const now = Date.now();
           const requestId = uuidv7(now);
           const challenge = randomBytes(32).toString("base64url");
           const expiresAt = now + 10 * 60_000;
-          options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, publicKeyFingerprint(key), JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
-          writeJson(response, 202, { requestId, fingerprint: publicKeyFingerprint(key), status: "PENDING", challenge, expiresAt, approvalUrl: `/workers/enrollment-requests/${requestId}` });
+          options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
+          writeJson(response, 202, { requestId, fingerprint, status: "PENDING", challenge, expiresAt, approvalUrl: `/workers/enrollment-requests/${requestId}` });
           return;
         }
         if (method === "GET" && parts.length === 6 && parts[3] === "enrollment-requests" && parts[5] === "status") {
           const row = options.db.one<{ id: string; fingerprint: string; status: string; expires_at: number; finalized_worker_id: string | null }>("SELECT id, fingerprint, status, expires_at, finalized_worker_id FROM worker_enrollment_requests WHERE id = ?", parts[4]);
-          if (!row) throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
-          const status = row.status === "PENDING" && row.expires_at <= Date.now() ? "EXPIRED" : row.status;
-          if (status === "EXPIRED") options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND status = 'PENDING'", parts[4]);
-          writeJson(response, 200, { requestId: row.id, fingerprint: row.fingerprint, status, expiresAt: row.expires_at, finalized: Boolean(row.finalized_worker_id), serverNonce: status === "APPROVED" && !row.finalized_worker_id ? randomBytes(32).toString("base64url") : null });
+          if (!row) {
+            const purged = options.db.one("SELECT id FROM worker_purge_tombstones WHERE enrollment_request_id = ?", parts[4]);
+            if (purged) throw Object.assign(new Error("worker enrollment identity was removed; reset the local Agent"), { status: 410, code: "WORKER_REMOVED" });
+            throw Object.assign(new Error("worker enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
+          }
+          const status = ["PENDING", "APPROVED"].includes(row.status) && row.expires_at <= Date.now() ? "EXPIRED" : row.status;
+          if (status === "EXPIRED") options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE id = ? AND status IN ('PENDING', 'APPROVED')", parts[4]);
+          writeJson(response, 200, { requestId: row.id, fingerprint: row.fingerprint, status, lifecycleStage: enrollmentLifecycleStage(status, row.finalized_worker_id), expiresAt: row.expires_at, finalized: Boolean(row.finalized_worker_id), serverNonce: status === "APPROVED" && !row.finalized_worker_id ? randomBytes(32).toString("base64url") : null });
           return;
         }
         if (method === "POST" && parts.length === 6 && parts[3] === "enrollment-requests" && parts[5] === "finalize") {
           const input = await readJson(req) as Record<string, unknown>;
           if (typeof input.challenge !== "string" || typeof input.serverNonce !== "string" || typeof input.workerSignature !== "string") throw Object.assign(new Error("worker enrollment proof is incomplete"), { status: 400, code: "INVALID_ENROLLMENT_PROOF" });
           const finalized = workerChannel.finalizeEnrollment({ requestId: parts[4], challenge: input.challenge, serverNonce: input.serverNonce, workerSignature: input.workerSignature });
-          writeJson(response, 201, { workerId: finalized.workerId, credentialId: finalized.credentialId, credential: finalized.credential, expiresAt: finalized.expiresAt, fingerprint: finalized.fingerprint });
+          writeJson(response, 201, { workerId: finalized.workerId, credentialId: finalized.credentialId, credential: finalized.credential, expiresAt: finalized.expiresAt, fingerprint: finalized.fingerprint, lifecycleStage: "PROOF_COMPLETED", registrationStage: "REGISTERED" });
           return;
         }
         if (method === "POST" && parts.length === 4 && parts[3] === "poll") {
@@ -422,36 +522,37 @@ export function createHttpServer(options: AppOptions) {
       }
       if (method === "GET" && parts.length === 3 && parts[2] === "workers") {
         ownerId(req, options.allowUnauthenticated);
-        writeJson(response, 200, { items: options.db.all("SELECT id, identity_subject AS identitySubject, name, platform, trust_state AS trustState, protocol_min AS protocolMin, protocol_max AS protocolMax, last_heartbeat_at AS lastHeartbeatAt, stale_at AS staleAt, drain_state AS drainState, metadata_json AS metadata, updated_at AS updatedAt FROM workers ORDER BY name").map((row) => ({ ...row, metadata: JSON.parse(String(row.metadata)) })) });
+        writeJson(response, 200, { items: listWorkers(options.db, query(req.url).get("state")) });
         return;
       }
       if (method === "GET" && parts.length === 4 && parts[2] === "workers" && parts[3] === "enrollment-requests") {
         ownerId(req, options.allowUnauthenticated);
+        options.db.run("UPDATE worker_enrollment_requests SET status = 'EXPIRED' WHERE status IN ('PENDING', 'APPROVED') AND expires_at <= ?", Date.now());
         const status = query(req.url).get("status");
         const allowedStatuses = ["PENDING", "APPROVED", "REJECTED", "EXPIRED"];
         const rows = status && allowedStatuses.includes(status)
-          ? options.db.all("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests WHERE status = ? ORDER BY created_at DESC LIMIT 50", status)
-          : options.db.all("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests ORDER BY created_at DESC LIMIT 50");
-        writeJson(response, 200, { items: rows.map((row) => ({ ...row, deviceSummary: JSON.parse(String(row.deviceSummary)) })) });
+          ? options.db.all("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, finalized_worker_id AS finalizedWorkerId, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests WHERE status = ? ORDER BY created_at DESC LIMIT 50", status)
+          : options.db.all("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, finalized_worker_id AS finalizedWorkerId, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests ORDER BY created_at DESC LIMIT 50");
+        writeJson(response, 200, { items: rows.map((row) => ({ ...row, lifecycleStage: enrollmentLifecycleStage(String(row.status), row.finalizedWorkerId as string | null | undefined), deviceSummary: safeWorkerMetadata(jsonValue(row.deviceSummary, {})) })) });
         return;
       }
       if (method === "GET" && parts.length === 4 && parts[2] === "workers" && parts[3] !== "enrollment-requests") {
         ownerId(req, options.allowUnauthenticated);
         const worker = options.db.one<Record<string, unknown>>("SELECT id, identity_subject AS identitySubject, name, platform, trust_state AS trustState, protocol_min AS protocolMin, protocol_max AS protocolMax, last_heartbeat_at AS lastHeartbeatAt, stale_at AS staleAt, wake_policy_json AS wakePolicy, drain_state AS drainState, metadata_json AS metadata, created_at AS createdAt, updated_at AS updatedAt FROM workers WHERE id = ?", parts[3]);
         if (!worker) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
-        writeJson(response, 200, { ...worker, wakePolicy: JSON.parse(String(worker.wakePolicy)), metadata: JSON.parse(String(worker.metadata)), capabilities: options.db.all("SELECT id, worker_id AS workerId, kind, version, descriptor_hash AS descriptorHash, descriptor_json AS descriptor, discovered_state AS discoveredState, grant_state AS grantState, health, updated_at AS updatedAt FROM capabilities WHERE worker_id = ? ORDER BY kind, version", parts[3]).map((row) => ({ ...row, descriptor: JSON.parse(String(row.descriptor)) })) });
+        writeJson(response, 200, { ...workerProjection(options.db, worker), wakePolicy: jsonValue(worker.wakePolicy, {}) });
         return;
       }
       if (method === "GET" && parts.length === 5 && parts[2] === "workers" && parts[4] === "capabilities") {
         ownerId(req, options.allowUnauthenticated);
-        writeJson(response, 200, { items: options.db.all("SELECT id, worker_id AS workerId, kind, version, descriptor_hash AS descriptorHash, descriptor_json AS descriptor, discovered_state AS discoveredState, grant_state AS grantState, health, updated_at AS updatedAt FROM capabilities WHERE worker_id = ? ORDER BY kind, version", parts[3]).map((row) => ({ ...row, descriptor: JSON.parse(String(row.descriptor)) })) });
+        writeJson(response, 200, { items: options.db.all("SELECT id, worker_id AS workerId, kind, version, descriptor_hash AS descriptorHash, descriptor_json AS descriptor, discovered_state AS discoveredState, grant_state AS grantState, health, superseded_by AS supersededBy, superseded_at AS supersededAt, updated_at AS updatedAt FROM capabilities WHERE worker_id = ? ORDER BY kind, version", parts[3]).map((row) => ({ ...row, descriptor: safeCapabilityDescriptor(jsonValue(row.descriptor, {})) })) });
         return;
       }
       if (method === "GET" && parts.length === 5 && parts[2] === "workers" && parts[3] === "enrollment-requests") {
         ownerId(req, options.allowUnauthenticated);
-        const enrollment = options.db.one<Record<string, unknown>>("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests WHERE id = ?", parts[4]);
+        const enrollment = options.db.one<Record<string, unknown>>("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, finalized_worker_id AS finalizedWorkerId, expires_at AS expiresAt, created_at AS createdAt, decided_at AS decidedAt, decided_by AS decidedBy FROM worker_enrollment_requests WHERE id = ?", parts[4]);
         if (!enrollment) throw Object.assign(new Error("enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
-        writeJson(response, 200, { ...enrollment, deviceSummary: JSON.parse(String(enrollment.deviceSummary)) });
+        writeJson(response, 200, { ...enrollment, lifecycleStage: enrollmentLifecycleStage(String(enrollment.status), enrollment.finalizedWorkerId as string | null | undefined), deviceSummary: safeWorkerMetadata(jsonValue(enrollment.deviceSummary, {})) });
         return;
       }
       if (method === "POST" && parts.length === 4 && parts[2] === "workers" && parts[3] === "enrollment-requests") {
@@ -460,13 +561,15 @@ export function createHttpServer(options: AppOptions) {
         if (typeof input.publicKeyPem !== "string" || !input.deviceSummary || typeof input.deviceSummary !== "object" || Array.isArray(input.deviceSummary)) throw Object.assign(new Error("worker enrollment request is invalid"), { status: 400, code: "INVALID_ENROLLMENT_REQUEST" });
         let key;
         try { key = createPublicKey(input.publicKeyPem); } catch { throw Object.assign(new Error("worker public key is invalid"), { status: 400, code: "INVALID_ENROLLMENT_KEY" }); }
+        const fingerprint = publicKeyFingerprint(key);
+        if (options.db.one("SELECT id FROM worker_purge_tombstones WHERE fingerprint_digest = ?", sha256(fingerprint))) throw Object.assign(new Error("worker identity was permanently removed; reset the local Agent before enrolling again"), { status: 410, code: "WORKER_ENROLLMENT_BLOCKED" });
         const now = Date.now();
         const requestId = uuidv7(now);
         const challenge = randomBytes(32).toString("base64url");
         const expiresAt = now + 10 * 60_000;
-        options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, publicKeyFingerprint(key), JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
+        options.db.run("INSERT INTO worker_enrollment_requests(id, public_key_pem, fingerprint, device_summary_json, challenge_hash, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", requestId, input.publicKeyPem, fingerprint, JSON.stringify(input.deviceSummary), sha256(challenge), expiresAt, now);
         const enrollment = options.db.one<Record<string, unknown>>("SELECT id, fingerprint, device_summary_json AS deviceSummary, status, expires_at AS expiresAt, created_at AS createdAt FROM worker_enrollment_requests WHERE id = ?", requestId)!;
-        writeJson(response, 202, { ...enrollment, deviceSummary: JSON.parse(String(enrollment.deviceSummary)), challenge });
+        writeJson(response, 202, { ...enrollment, deviceSummary: safeWorkerMetadata(jsonValue(enrollment.deviceSummary, {})), challenge });
         return;
       }
       if (method === "POST" && parts.length === 6 && parts[2] === "workers" && parts[3] === "enrollment-requests" && parts[5] === "approve") {
@@ -479,44 +582,102 @@ export function createHttpServer(options: AppOptions) {
         if (input.fingerprint !== enrollment.fingerprint) throw Object.assign(new Error("enrollment fingerprint does not match"), { status: 409, code: "ENROLLMENT_FINGERPRINT_MISMATCH" });
         options.db.run("UPDATE worker_enrollment_requests SET status = 'APPROVED', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'PENDING'", Date.now(), owner, parts[4]);
         options.engine.appendAudit("worker.enrollment.approved", `worker-enrollment:${parts[4]}`, owner, "APPROVED", 1, { fingerprint: enrollment.fingerprint });
-        writeJson(response, 200, { id: parts[4], status: "APPROVED", fingerprint: enrollment.fingerprint, next: "AWAITING_WORKER_PROOF" });
+        writeJson(response, 200, { id: parts[4], status: "APPROVED", lifecycleStage: "OWNER_APPROVED", fingerprint: enrollment.fingerprint, next: "AWAITING_WORKER_PROOF" });
         return;
       }
       if (method === "DELETE" && parts.length === 5 && parts[2] === "workers" && parts[3] === "enrollment-requests") {
         const owner = ownerId(req, options.allowUnauthenticated);
         requireFreshStepUp(req);
-        const enrollment = options.db.one<{ status: string; expires_at: number }>("SELECT status, expires_at FROM worker_enrollment_requests WHERE id = ?", parts[4]);
-        if (!enrollment) throw Object.assign(new Error("enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
-        if (enrollment.status !== "PENDING" || enrollment.expires_at <= Date.now()) throw Object.assign(new Error("enrollment request is not pending"), { status: 409, code: "ENROLLMENT_NOT_PENDING" });
+        const enrollment = options.db.one<{ id: string; status: string; expires_at: number; fingerprint: string; finalized_worker_id: string | null }>("SELECT id, status, expires_at, fingerprint, finalized_worker_id FROM worker_enrollment_requests WHERE id = ?", parts[4]);
+        if (!enrollment) {
+          const already = options.db.one("SELECT id FROM worker_purge_tombstones WHERE enrollment_request_id = ?", parts[4]);
+          if (already) { writeJson(response, 200, { id: parts[4], deleted: true, alreadyPurged: true }); return; }
+          throw Object.assign(new Error("enrollment request not found"), { status: 404, code: "ENROLLMENT_NOT_FOUND" });
+        }
+        if (enrollment.finalized_worker_id) throw Object.assign(new Error("enrollment request was finalized; permanently remove the Worker instead"), { status: 409, code: "ENROLLMENT_ALREADY_FINALIZED" });
         const now = Date.now();
-        options.db.run("UPDATE worker_enrollment_requests SET status = 'REJECTED', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'PENDING'", now, owner, parts[4]);
-        options.engine.appendAudit("worker.enrollment.cancelled", `worker-enrollment:${parts[4]}`, owner, "REJECTED", 1, {});
-        writeJson(response, 200, { id: parts[4], cancelled: true, status: "REJECTED" });
+        const purgedNow = options.db.transaction(() => {
+          const inserted = options.db.connection.prepare("INSERT OR IGNORE INTO worker_purge_tombstones(id, enrollment_request_id, fingerprint_digest, purged_at, purged_by, reason) VALUES (?, ?, ?, ?, ?, 'enrollment-request-removed')").run(uuidv7(now), parts[4], sha256(enrollment.fingerprint), now, owner);
+          if (Number(inserted.changes) !== 1) return false;
+          options.db.run("DELETE FROM worker_enrollment_requests WHERE id = ? AND finalized_worker_id IS NULL", parts[4]);
+          options.engine.appendAudit("worker.enrollment.purged", `worker-enrollment:${parts[4]}`, owner, "PURGED", 1, { previousStatus: enrollment.status });
+          return true;
+        });
+        writeJson(response, 200, { id: parts[4], deleted: true, alreadyPurged: !purgedNow, retention: "audit-event-preserved" });
+        return;
+      }
+      if (method === "PATCH" && parts.length === 4 && parts[2] === "workers") {
+        const input = await readJson(req) as Record<string, unknown>;
+        const owner = ownerId(req, options.allowUnauthenticated, input);
+        if (typeof input.name !== "string" || input.name.trim().length < 1 || input.name.trim().length > 120) throw Object.assign(new Error("worker name is invalid"), { status: 400, code: "INVALID_WORKER_NAME" });
+        const worker = options.db.one<{ id: string; trust_state: string; name: string }>("SELECT id, trust_state, name FROM workers WHERE id = ?", parts[3]);
+        if (!worker) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        if (worker.trust_state !== "TRUSTED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+        const name = input.name.trim();
+        options.db.run("UPDATE workers SET name = ?, updated_at = ? WHERE id = ?", name, Date.now(), parts[3]);
+        options.engine.appendAudit("worker.renamed", `worker:${parts[3]}`, owner, "ACCEPTED", 1, { previousName: worker.name, name });
+        writeJson(response, 200, { id: parts[3], name });
         return;
       }
       if (method === "DELETE" && parts.length === 4 && parts[2] === "workers") {
         const owner = ownerId(req, options.allowUnauthenticated);
         requireFreshStepUp(req);
-        const worker = options.db.one<{ id: string; trust_state: string }>("SELECT id, trust_state FROM workers WHERE id = ?", parts[3]);
-        if (!worker) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        const worker = options.db.one<{ id: string; trust_state: string; fingerprint: string | null }>("SELECT id, trust_state, fingerprint FROM workers WHERE id = ?", parts[3]);
+        if (!worker) {
+          const already = options.db.one("SELECT id FROM worker_purge_tombstones WHERE worker_id = ?", parts[3]);
+          if (already) { writeJson(response, 200, { id: parts[3], deleted: true, alreadyPurged: true }); return; }
+          throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        }
         const active = Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM attempts WHERE worker_id = ? AND state IN ('OFFERED', 'DISPATCHED', 'RUNNING', 'RESUMING')", parts[3])?.count ?? 0);
-        if (active > 0) throw Object.assign(new Error("worker has active attempts; drain it and wait for completion"), { status: 409, code: "WORKER_BUSY" });
+        const liveLeases = Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM leases WHERE resource_type = 'worker' AND resource_id = ? AND released_at IS NULL", parts[3])?.count ?? 0);
+        const liveReservations = Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM resource_reservations WHERE resource_type = 'worker' AND resource_id = ? AND status = 'HELD' AND expires_at > ?", parts[3], Date.now())?.count ?? 0);
+        if (active > 0 || liveLeases > 0 || liveReservations > 0) throw Object.assign(new Error("worker has active work or reservations; drain it and wait for completion"), { status: 409, code: "WORKER_BUSY", activeAttempts: active, liveLeases, liveReservations });
         const now = Date.now();
-        options.db.transaction(() => {
-          options.db.run("UPDATE workers SET trust_state = 'REVOKED', drain_state = 'DRAINED', updated_at = ? WHERE id = ?", now, parts[3]);
-          options.db.run("UPDATE capabilities SET grant_state = 'REVOKED', updated_at = ? WHERE worker_id = ?", now, parts[3]);
+        const providers = options.db.all<{ id: string }>("SELECT id FROM providers WHERE worker_id = ?", parts[3]).map((item) => item.id);
+        const purgedNow = options.db.transaction(() => {
+          const inserted = options.db.connection.prepare("INSERT OR IGNORE INTO worker_purge_tombstones(id, worker_id, fingerprint_digest, purged_at, purged_by, reason) VALUES (?, ?, ?, ?, ?, 'worker-removed')").run(uuidv7(now), parts[3], sha256(worker.fingerprint ?? parts[3]), now, owner);
+          if (Number(inserted.changes) !== 1) return false;
+          options.engine.appendAudit("worker.deleted", `worker:${parts[3]}`, owner, "PURGED", 1, { purge: true, historicalEvidencePreserved: true });
+          if (providers.length) {
+            const placeholders = providers.map(() => "?").join(",");
+            options.db.run(`DELETE FROM quota_observations WHERE provider_id IN (${placeholders})`, ...providers);
+            options.db.run(`DELETE FROM providers WHERE id IN (${placeholders})`, ...providers);
+          }
+          options.db.run("DELETE FROM worker_runtime_status WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM worker_channel_inbound_messages WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM worker_channel_messages WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM worker_connections WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM worker_credentials WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM capabilities WHERE worker_id = ?", parts[3]);
+          options.db.run("DELETE FROM resource_reservations WHERE resource_type = 'worker' AND resource_id = ?", parts[3]);
+          options.db.run("DELETE FROM worker_enrollment_requests WHERE finalized_worker_id = ? OR fingerprint = ?", parts[3], worker.fingerprint);
+          options.db.run("DELETE FROM workers WHERE id = ?", parts[3]);
+          return true;
         });
-        options.engine.appendAudit("worker.deleted", `worker:${parts[3]}`, owner, "REVOKED", 1, { logicalDelete: true });
-        writeJson(response, 200, { id: parts[3], deleted: true, trustState: "REVOKED", drainState: "DRAINED", retention: "historical-evidence-preserved" });
+        writeJson(response, 200, { id: parts[3], deleted: true, alreadyPurged: !purgedNow, retention: "historical-task-and-audit-evidence-preserved", localCleanupRequired: true });
         return;
       }
       if (method === "POST" && parts.length === 5 && parts[2] === "workers" && parts[4] === "drain") {
         const owner = ownerId(req, options.allowUnauthenticated);
-        const existing = options.db.one("SELECT id FROM workers WHERE id = ?", parts[3]);
+        const existing = options.db.one<{ id: string; trust_state: string }>("SELECT id, trust_state FROM workers WHERE id = ?", parts[3]);
         if (!existing) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
-        options.db.run("UPDATE workers SET drain_state = 'DRAINING', updated_at = ? WHERE id = ?", Date.now(), parts[3]);
-        options.engine.appendAudit("worker.drain.requested", `worker:${parts[3]}`, owner, "ACCEPTED", 1, {});
-        writeJson(response, 202, { id: parts[3], drainState: "DRAINING" });
+        if (existing.trust_state !== "TRUSTED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+        const active = Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM attempts WHERE worker_id = ? AND state IN ('OFFERED', 'DISPATCHED', 'RUNNING', 'RESUMING')", parts[3])?.count ?? 0);
+        const drainState = active > 0 ? "DRAINING" : "DRAINED";
+        options.db.run("UPDATE workers SET drain_state = ?, updated_at = ? WHERE id = ?", drainState, Date.now(), parts[3]);
+        options.engine.appendAudit("worker.drain.requested", `worker:${parts[3]}`, owner, "ACCEPTED", 1, { activeAttempts: active, drainState });
+        writeJson(response, 202, { id: parts[3], drainState, activeAttempts: active });
+        return;
+      }
+      if (method === "POST" && parts.length === 5 && parts[2] === "workers" && parts[4] === "resume") {
+        const owner = ownerId(req, options.allowUnauthenticated);
+        requireFreshStepUp(req);
+        const existing = options.db.one<{ id: string; trust_state: string }>("SELECT id, trust_state FROM workers WHERE id = ?", parts[3]);
+        if (!existing) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        if (existing.trust_state !== "TRUSTED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+        options.db.run("UPDATE workers SET drain_state = 'RUNNABLE', updated_at = ? WHERE id = ?", Date.now(), parts[3]);
+        options.engine.appendAudit("worker.resume.requested", `worker:${parts[3]}`, owner, "ACCEPTED", 1, {});
+        writeJson(response, 200, { id: parts[3], drainState: "RUNNABLE" });
         return;
       }
       if (method === "POST" && parts.length === 5 && parts[2] === "workers" && parts[4] === "revoke") {
@@ -527,6 +688,8 @@ export function createHttpServer(options: AppOptions) {
         options.db.transaction(() => {
           options.db.run("UPDATE workers SET trust_state = 'REVOKED', drain_state = 'DRAINED', updated_at = ? WHERE id = ?", Date.now(), parts[3]);
           options.db.run("UPDATE capabilities SET grant_state = 'REVOKED', updated_at = ? WHERE worker_id = ?", Date.now(), parts[3]);
+          options.db.run("UPDATE worker_credentials SET revoked_at = ? WHERE worker_id = ? AND revoked_at IS NULL", Date.now(), parts[3]);
+          options.db.run("UPDATE worker_connections SET state = 'CLOSED', updated_at = ? WHERE worker_id = ?", Date.now(), parts[3]);
         });
         options.engine.appendAudit("worker.revoked", `worker:${parts[3]}`, owner, "REVOKED", 1, {});
         writeJson(response, 200, { id: parts[3], trustState: "REVOKED", drainState: "DRAINED" });
@@ -539,13 +702,32 @@ export function createHttpServer(options: AppOptions) {
       if (method === "POST" && parts.length === 7 && parts[2] === "workers" && parts[4] === "capabilities" && parts[6] === "grant") {
         const owner = ownerId(req, options.allowUnauthenticated);
         requireFreshStepUp(req);
-        const capability = options.db.one<{ descriptor_hash: string; grant_state: string }>("SELECT descriptor_hash, grant_state FROM capabilities WHERE id = ? AND worker_id = ?", parts[5], parts[3]);
+        const worker = options.db.one<{ trust_state: string }>("SELECT trust_state FROM workers WHERE id = ?", parts[3]);
+        if (!worker) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        if (worker.trust_state !== "TRUSTED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+        const capability = options.db.one<{ descriptor_hash: string; grant_state: string; superseded_at: number | null }>("SELECT descriptor_hash, grant_state, superseded_at FROM capabilities WHERE id = ? AND worker_id = ?", parts[5], parts[3]);
         if (!capability) throw Object.assign(new Error("capability not found"), { status: 404, code: "CAPABILITY_NOT_FOUND" });
+        if (capability.superseded_at !== null) throw Object.assign(new Error("capability descriptor was superseded"), { status: 409, code: "CAPABILITY_SUPERSEDED" });
         const input = await readJson(req) as Record<string, unknown>;
         if (input.descriptorHash !== capability.descriptor_hash) throw Object.assign(new Error("capability descriptor changed"), { status: 409, code: "CAPABILITY_DESCRIPTOR_CHANGED" });
         options.db.run("UPDATE capabilities SET grant_state = 'GRANTED', updated_at = ? WHERE id = ? AND worker_id = ?", Date.now(), parts[5], parts[3]);
         options.engine.appendAudit("worker.capability.granted", `capability:${parts[5]}`, owner, "GRANTED", 1, { workerId: parts[3], descriptorHash: capability.descriptor_hash });
         writeJson(response, 200, { id: parts[5], workerId: parts[3], grantState: "GRANTED", descriptorHash: capability.descriptor_hash });
+        return;
+      }
+      if (method === "POST" && parts.length === 7 && parts[2] === "workers" && parts[4] === "capabilities" && parts[6] === "revoke") {
+        const owner = ownerId(req, options.allowUnauthenticated);
+        requireFreshStepUp(req);
+        const worker = options.db.one<{ trust_state: string }>("SELECT trust_state FROM workers WHERE id = ?", parts[3]);
+        if (!worker) throw Object.assign(new Error("worker not found"), { status: 404, code: "WORKER_NOT_FOUND" });
+        if (worker.trust_state !== "TRUSTED") throw Object.assign(new Error("worker has been removed"), { status: 410, code: "WORKER_REMOVED" });
+        const capability = options.db.one<{ descriptor_hash: string; grant_state: string }>("SELECT descriptor_hash, grant_state FROM capabilities WHERE id = ? AND worker_id = ?", parts[5], parts[3]);
+        if (!capability) throw Object.assign(new Error("capability not found"), { status: 404, code: "CAPABILITY_NOT_FOUND" });
+        const input = await readJson(req) as Record<string, unknown>;
+        if (input.descriptorHash !== capability.descriptor_hash) throw Object.assign(new Error("capability descriptor changed"), { status: 409, code: "CAPABILITY_DESCRIPTOR_CHANGED" });
+        options.db.run("UPDATE capabilities SET grant_state = 'REVOKED', updated_at = ? WHERE id = ? AND worker_id = ?", Date.now(), parts[5], parts[3]);
+        options.engine.appendAudit("worker.capability.revoked", `capability:${parts[5]}`, owner, "REVOKED", 1, { workerId: parts[3], descriptorHash: capability.descriptor_hash });
+        writeJson(response, 200, { id: parts[5], workerId: parts[3], grantState: "REVOKED", descriptorHash: capability.descriptor_hash });
         return;
       }
       if (method === "GET" && parts.length === 3 && parts[2] === "credentials") {
@@ -642,7 +824,7 @@ export function createHttpServer(options: AppOptions) {
       }
       if (method === "GET" && parts.length === 3 && parts[2] === "system") {
         ownerId(req, options.allowUnauthenticated);
-        writeJson(response, 200, { health: await health(options, "ops"), counts: { goals: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM goals")?.count ?? 0), openApprovals: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM approval_requests WHERE status = 'OPEN'")?.count ?? 0), workers: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM workers")?.count ?? 0), providers: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM providers")?.count ?? 0), deadLetters: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM outbox WHERE dead_lettered_at IS NOT NULL")?.count ?? 0) }, external: { memory: "/memory/" } });
+        writeJson(response, 200, { health: await health(options, "ops"), counts: { goals: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM goals")?.count ?? 0), openApprovals: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM approval_requests WHERE status = 'OPEN'")?.count ?? 0), workers: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM workers WHERE trust_state <> 'REVOKED'")?.count ?? 0), removedWorkers: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM workers WHERE trust_state = 'REVOKED'")?.count ?? 0), pendingEnrollments: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM worker_enrollment_requests WHERE status IN ('PENDING', 'APPROVED')")?.count ?? 0), providers: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM providers")?.count ?? 0), deadLetters: Number(options.db.one<{ count: number }>("SELECT COUNT(*) AS count FROM outbox WHERE dead_lettered_at IS NOT NULL")?.count ?? 0) }, external: { memory: "/memory/" } });
         return;
       }
       if (method === "GET" && parts.length === 3 && parts[2] === "events") {

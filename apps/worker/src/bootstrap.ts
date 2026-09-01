@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { enrollmentProofPayload } from "../../../packages/worker/src/index.ts";
+import { WorkerTransportError } from "./transport.ts";
 import type { CredentialStoreFile, DeviceKeyStore, WorkerCredentialStore } from "./transport.ts";
 
 type EnrollmentState = { requestId: string; challenge: string; expiresAt: number };
@@ -11,6 +12,7 @@ export type WorkerBootstrapOptions = {
   keyStore: DeviceKeyStore;
   credentialStore: WorkerCredentialStore;
   enrollmentPath: string;
+  removedPath?: string;
   deviceSummary: Record<string, unknown>;
   fetchImpl?: typeof fetch;
   onEvent?: (event: Record<string, unknown>) => void;
@@ -34,10 +36,12 @@ export class WorkerBootstrap {
   }
 
   async requestEnrollment(): Promise<EnrollmentState & { fingerprint: string; status: string }> {
+    if (this.isRemoved()) throw new WorkerTransportError("worker enrollment", 410, "WORKER_REMOVED");
     await this.options.keyStore.ensure();
     const response = await this.request(`${this.baseUrl()}/api/v1/worker/enrollment-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicKeyPem: await this.options.keyStore.publicKeyPem(), deviceSummary: this.options.deviceSummary }) });
     const body = safeJson(await response.json());
-    if (!response.ok || typeof body.requestId !== "string" || typeof body.challenge !== "string" || typeof body.expiresAt !== "number") throw new Error(`enrollment request failed: ${response.status} ${JSON.stringify(body)}`);
+    if (!response.ok) throw this.responseError("enrollment request", response.status, body);
+    if (typeof body.requestId !== "string" || typeof body.challenge !== "string" || typeof body.expiresAt !== "number") throw new Error(`enrollment request failed: ${response.status} invalid response`);
     const state = { requestId: body.requestId, challenge: body.challenge, expiresAt: body.expiresAt };
     this.writeEnrollment(state);
     this.options.onEvent?.({ event: "worker.enrollment.requested", requestId: state.requestId, fingerprint: typeof body.fingerprint === "string" ? body.fingerprint : undefined, expiresAt: state.expiresAt });
@@ -59,7 +63,8 @@ export class WorkerBootstrap {
     const signature = (await this.options.keyStore.sign(enrollmentProofPayload(challenge, serverNonce))).toString("base64url");
     const response = await this.request(`${this.baseUrl()}/api/v1/worker/enrollment-requests/${encodeURIComponent(requestId)}/finalize`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge, serverNonce, workerSignature: signature }) });
     const body = safeJson(await response.json());
-    if (!response.ok || typeof body.workerId !== "string" || typeof body.credentialId !== "string" || typeof body.credential !== "string" || typeof body.expiresAt !== "number") throw new Error(`enrollment finalize failed: ${response.status} ${JSON.stringify(body)}`);
+    if (!response.ok) throw this.responseError("enrollment finalize", response.status, body);
+    if (typeof body.workerId !== "string" || typeof body.credentialId !== "string" || typeof body.credential !== "string" || typeof body.expiresAt !== "number") throw new Error(`enrollment finalize failed: ${response.status} invalid response`);
     const credential: CredentialStoreFile = { workerId: body.workerId, credentialId: body.credentialId, credential: body.credential, expiresAt: body.expiresAt, origin: this.options.origin };
     this.options.credentialStore.write(credential);
     this.clearEnrollment();
@@ -68,6 +73,7 @@ export class WorkerBootstrap {
   }
 
   async ensureCredential(now = Date.now()): Promise<CredentialStoreFile | undefined> {
+    if (this.isRemoved()) return undefined;
     await this.options.keyStore.ensure();
     const current = this.options.credentialStore.read();
     if (current && current.expiresAt > now + 5 * 60_000) return current;
@@ -92,6 +98,27 @@ export class WorkerBootstrap {
     return undefined;
   }
 
+  isRemoved(): boolean { return existsSync(this.removedPath()); }
+
+  /** Mark this identity terminal after the server has permanently removed it. */
+  markRemoved(reason = "WORKER_REMOVED"): void {
+    mkdirSync(dirname(this.removedPath()), { recursive: true });
+    writeFileSync(this.removedPath(), JSON.stringify({ reason, markedAt: Date.now() }), { mode: 0o600 });
+    chmodSync(this.removedPath(), 0o600);
+    this.options.credentialStore.clear();
+    this.clearEnrollment();
+    this.options.onEvent?.({ event: "worker.removed", reason });
+  }
+
+  /** Explicit operator action: erase local identity and runtime enrollment state. */
+  async resetLocalIdentity(): Promise<void> {
+    await this.options.keyStore.clear?.();
+    this.options.credentialStore.clear();
+    this.clearEnrollment();
+    try { unlinkSync(this.removedPath()); } catch { /* reset may run before a marker exists */ }
+    this.options.onEvent?.({ event: "worker.reset" });
+  }
+
   readEnrollment(): EnrollmentState | undefined {
     try {
       const value = JSON.parse(readFileSync(this.options.enrollmentPath, "utf8")) as Partial<EnrollmentState>;
@@ -108,7 +135,8 @@ export class WorkerBootstrap {
     const response = await this.request(`${this.baseUrl()}/api/v1/worker/credentials/rotate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workerId: current.workerId, credential: current.credential }) });
     const body = safeJson(await response.json());
     if (response.status === 401) return undefined;
-    if (!response.ok || typeof body.credentialId !== "string" || typeof body.credential !== "string" || typeof body.expiresAt !== "number") throw new Error(`credential rotation failed: ${response.status} ${JSON.stringify(body)}`);
+    if (!response.ok) throw this.responseError("credential rotation", response.status, body);
+    if (typeof body.credentialId !== "string" || typeof body.credential !== "string" || typeof body.expiresAt !== "number") throw new Error(`credential rotation failed: ${response.status} invalid response`);
     const next = { ...current, credentialId: body.credentialId, credential: body.credential, expiresAt: body.expiresAt };
     this.options.credentialStore.write(next);
     return next;
@@ -117,7 +145,10 @@ export class WorkerBootstrap {
   private async enrollmentStatus(requestId: string): Promise<EnrollmentStatus> {
     const response = await this.request(`${this.baseUrl()}/api/v1/worker/enrollment-requests/${encodeURIComponent(requestId)}/status`, { headers: { accept: "application/json" } });
     const body = safeJson(await response.json());
-    if (!response.ok) throw new Error(`enrollment status failed: ${response.status} ${JSON.stringify(body)}`);
+    if (!response.ok) {
+      if (response.status === 404) { this.clearEnrollment(); return { status: "EXPIRED" }; }
+      throw this.responseError("enrollment status", response.status, body);
+    }
     return { status: typeof body.status === "string" ? body.status : undefined, serverNonce: typeof body.serverNonce === "string" ? body.serverNonce : null, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : undefined, finalized: body.finalized === true };
   }
 
@@ -128,4 +159,15 @@ export class WorkerBootstrap {
   }
 
   private baseUrl(): string { return this.options.origin.replace(/\/$/, ""); }
+
+  private responseError(operation: string, status: number, body: Record<string, unknown>): WorkerTransportError {
+    const candidate = body.error && typeof body.error === "object" && !Array.isArray(body.error) ? (body.error as Record<string, unknown>).code : body.code;
+    const code = typeof candidate === "string" ? candidate : status === 410 ? "WORKER_REMOVED" : "WORKER_BOOTSTRAP_ERROR";
+    const error = new WorkerTransportError(operation, status, code);
+    if (status === 410 || code === "WORKER_ENROLLMENT_BLOCKED" || code === "WORKER_REMOVED") this.markRemoved(code);
+    else if (["ENROLLMENT_EXPIRED", "ENROLLMENT_NOT_APPROVED", "ENROLLMENT_ALREADY_FINALIZED"].includes(code)) this.clearEnrollment();
+    return error;
+  }
+
+  private removedPath(): string { return this.options.removedPath ?? `${this.options.enrollmentPath}.removed`; }
 }

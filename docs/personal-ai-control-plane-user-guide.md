@@ -134,20 +134,25 @@ Schedule 不會直接執行工具；每次觸發都會建立普通 Goal，並重
 2. 開啟 **Workers**。常駐 worker 會自動建立 enrollment request；本頁每 5 秒同步一次，不需要複製 public key 或私鑰。
 3. 核對 request 卡片上的 fingerprint 與裝置一致後，按「Passkey 核准此 Worker」。
 4. Worker 會自動輪詢核准結果、完成 proof、取得短期 credential，接著透過 WSS（無法建立時使用簽名 HTTP fallback）連線並送出 heartbeat。
-5. 等待卡片顯示 `ONLINE`；`APPROVED` 只代表 owner 已核准，仍須等待 proof、heartbeat 與 capability evidence 才能派工。
-6. 若 fingerprint 不正確或不再需要，可在同一張 request 卡片按「取消 request」。`pai-worker enroll` / `enroll-finalize` 僅作為無法使用常駐流程時的 recovery。
+5. 等待卡片顯示 `ONLINE`；`APPROVED` 只代表 owner 已核准，仍須等待 proof、heartbeat 與 capability evidence 才能派工。未完成流程依序為 `PENDING → OWNER_APPROVED → PROOF_COMPLETED → REGISTERED → ONLINE`；過期的 approved request 會顯示 `EXPIRED`，不會被當作已連接 Worker。
+6. 若 fingerprint 不正確、已過期或不再需要，可在同一張 request 卡片按「永久清除 request」。這會刪除 request 並留下不可重用的 tombstone；`pai-worker enroll` / `enroll-finalize` 僅作為無法使用常駐流程時的 recovery。
 
 Worker 卡片會顯示：
 
-- 連線：`ONLINE`、`STALE` 或 `NO_HEARTBEAT`。
-- 信任與派工狀態：`TRUSTED`、`DRAINING`、`DRAINED` 或 `REVOKED`。
-- 已發現的 capability 及其 `GRANTED` / `REVIEW_REQUIRED` 狀態。
-- 綁定的 LLM / provider；沒有 provider 只能表示尚未驗證，不能直接宣稱是 LLM worker。
+- 連線：`ONLINE`、`STALE`、`NO_HEARTBEAT`；另顯示 heartbeat 年齡、WSS/HTTP fallback、credential 到期與 Agent/OS/architecture/version。
+- 派工：`READY`、`DRAINING`、`DRAINED` 或 `BLOCKED`，並顯示 active attempts、queued offers、reservations、最大併發與不可派工原因。
+- 已發現的 capability 及其 `GRANTED` / `REVIEW_REQUIRED` / `REVOKED` / `SUPERSEDED` 狀態、descriptor hash 與健康度。
+- 綁定的 LLM / provider 與 evidence level；Codex CLI 可用不得冒充 `provider_verified`，沒有 provider 可能只是 tool-only worker。
 
 - **Drain**：停止派發新工作，讓現有工作安全收尾。
-- **Wake**：要求喚醒 worker；如果尚未接上 accepted wake adapter，系統會明確回報不可用。
+- **Resume**：以 Passkey 重新啟用派工；Drain 後工作歸零會自動進入 `DRAINED`。
+- **修改名稱**：只更新 Worker 顯示名稱，不更改身分。
+- **Wake**：只有設定 accepted wake adapter 才會啟用；未設定時按鈕停用並顯示原因，不是假操作入口。
 - **Passkey grant capability**：核准該 worker 的特定 capability。系統會綁定目前的 descriptor hash，避免能力內容變更後沿用舊核准。
-- **Passkey 刪除 Worker**：安全撤銷 worker 與其 capabilities；這是 logical delete，會保留歷史 attempt、audit 與 evidence。仍有執行中工作時，系統會回報 `WORKER_BUSY`，必須先 Drain 並等待工作結束。
+- **Passkey revoke capability**：撤銷單一 capability；descriptor 改變時舊 grant 會自動撤銷並標記 `SUPERSEDED`，必須重新審核。
+- **Passkey 永久清除 Worker**：原子清除身分、credential、connection、capability、provider/quota、queue、runtime 與 enrollment 資料；執行中 attempt、live lease 或 reservation 會回 `WORKER_BUSY` 且零變更。task、attempt、lease 歷史與 append-only audit 保留，主清單不再顯示此 Worker。
+
+永久清除後，舊 Agent 會收到 `410 WORKER_REMOVED` 並停止重新註冊。裝置端若要重新加入，使用者必須明確執行 `pai-worker reset --confirm` 清除本機 key、credential、enrollment 與 runtime DB，再以新 key 建立 enrollment。
 
 「worker 宣告發現某能力」不等於「該能力已授權」。如果沒有實體 worker、OS vault 或 capability adapter 的 live evidence，不要把列表中的 proposal 當成可執行能力。
 

@@ -1,6 +1,6 @@
 import { canonicalJson, sha256, uuidv7, type JsonValue } from "../../../packages/crypto/src/index.ts";
 import { verifyActionGrant, type ActionGrantVerificationKey } from "../../../packages/identity/src/index.ts";
-import { signWorkerEnvelopeWithSigner, validateJobOffer, type CapabilityDescriptor, type WorkerEnvelope } from "../../../packages/worker/src/index.ts";
+import { signWorkerEnvelopeWithSigner, validateJobOffer, type CapabilityDescriptor, type WorkerEnvelope, type WorkerHeartbeatReport } from "../../../packages/worker/src/index.ts";
 import { WorkerDatabase } from "./db.ts";
 
 export type WorkerJobOffer = {
@@ -32,6 +32,7 @@ export type WorkerCapabilityAdapter = {
 export type OutboundWorkerTransport = {
   poll(): Promise<WorkerJobOffer[]>;
   send(frame: WorkerEnvelope): Promise<void>;
+  transportMode?: () => "WSS" | "HTTP_FALLBACK";
   close?: () => void;
 };
 
@@ -43,6 +44,7 @@ export type WorkerRuntimeOptions = {
   adapter: WorkerCapabilityAdapter;
   resolveGrantKey(kid: string): ActionGrantVerificationKey | undefined;
   signFrame(payload: Buffer): Buffer | Promise<Buffer>;
+  statusReport?: () => Promise<Partial<WorkerHeartbeatReport>> | Partial<WorkerHeartbeatReport>;
   clock?: () => number;
 };
 
@@ -58,10 +60,14 @@ export class OutboundWorkerRuntime {
   }
 
   async heartbeat(): Promise<void> {
+    const health = await this.options.adapter.probe();
+    const extra = await this.options.statusReport?.() ?? {};
     await this.send("worker.heartbeat", {
-      health: await this.options.adapter.probe(),
-      capabilityId: this.options.adapter.capabilityId,
-      capabilityDescriptorHash: this.options.adapter.descriptor.descriptorHash,
+      ...extra,
+      health: extra.health ?? health,
+      capabilityId: extra.capabilityId ?? this.options.adapter.capabilityId,
+      capabilityDescriptorHash: extra.capabilityDescriptorHash ?? this.options.adapter.descriptor.descriptorHash,
+      transport: extra.transport ?? this.options.transport.transportMode?.() ?? "HTTP_FALLBACK",
     });
   }
 

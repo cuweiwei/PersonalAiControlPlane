@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { dirname } from "node:path";
 import { WebSocket as NodeWebSocket } from "ws";
@@ -15,6 +15,7 @@ export interface DeviceKeyStore {
   ensure(): Promise<void>;
   publicKeyPem(): Promise<string>;
   sign(payload: Buffer): Promise<Buffer>;
+  clear?(): void | Promise<void>;
 }
 
 export interface WorkerCredentialStore {
@@ -24,6 +25,27 @@ export interface WorkerCredentialStore {
   clear(): void;
 }
 
+export class WorkerTransportError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(operation: string, status: number, code = "WORKER_TRANSPORT_ERROR") {
+    super(`${operation} failed: ${status} ${code}`);
+    this.name = "WorkerTransportError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwResponseError(response: Response, operation: string): Promise<never> {
+  let code = "WORKER_TRANSPORT_ERROR";
+  try {
+    const body = await response.clone().json() as { error?: { code?: unknown }; code?: unknown };
+    const candidate = body.error?.code ?? body.code;
+    if (typeof candidate === "string" && /^[A-Z0-9_.-]{1,80}$/.test(candidate)) code = candidate;
+  } catch { /* preserve a bounded generic code when the edge did not return JSON */ }
+  throw new WorkerTransportError(operation, response.status, code);
+}
+
 /** Development bootstrap store. Production packages must replace this with the native helper. */
 export class FileDeviceKeyStore implements DeviceKeyStore {
   readonly storageClass = "file-fallback" as const;
@@ -31,13 +53,15 @@ export class FileDeviceKeyStore implements DeviceKeyStore {
   private readonly path: string;
   constructor(path: string) { this.path = path; }
   async ensure(): Promise<void> {
-    if (!existsSync(this.path)) {
+    let raw: KeyStoreFile | undefined;
+    try { raw = JSON.parse(readFileSync(this.path, "utf8")) as KeyStoreFile; } catch { raw = undefined; }
+    if (!raw?.privateKeyPem) {
       const { privateKey } = generateKeyPairSync("ed25519");
       mkdirSync(dirname(this.path), { recursive: true });
       writeFileSync(this.path, JSON.stringify({ privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString() }), { mode: 0o600 });
       chmodSync(this.path, 0o600);
+      raw = { privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString() };
     }
-    const raw = JSON.parse(readFileSync(this.path, "utf8")) as KeyStoreFile;
     this.privateKey = createPrivateKey(raw.privateKeyPem);
   }
   async publicKeyPem(): Promise<string> {
@@ -48,6 +72,10 @@ export class FileDeviceKeyStore implements DeviceKeyStore {
     await this.ensure();
     const { sign } = await import("node:crypto");
     return sign(null, payload, this.privateKey!);
+  }
+  clear(): void {
+    this.privateKey = undefined;
+    try { unlinkSync(this.path); } catch { /* already absent */ }
   }
 }
 
@@ -89,6 +117,7 @@ export class WorkerHttpTransport implements OutboundWorkerTransport {
     if (options.resetSequence !== false) this.writeState("sequence", "-1");
   }
   get activeConnectionId(): string { return this.connectionId; }
+  transportMode(): "HTTP_FALLBACK" { return "HTTP_FALLBACK"; }
   markHelloSent(): void { this.helloSent = true; }
   private writeState(key: string, value: string): void { this.options.db.connection.prepare("INSERT INTO worker_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value); }
   private credential(): string { return this.options.credentialProvider?.() ?? this.options.credential; }
@@ -100,7 +129,7 @@ export class WorkerHttpTransport implements OutboundWorkerTransport {
     const body: Record<string, unknown> = { workerId: this.options.workerId, credential: this.credential(), connectionId: this.connectionId };
     if (!this.helloSent) body.hello = await this.hello();
     const response = await this.fetchImpl(`${this.options.origin.replace(/\/$/, "")}/api/v1/worker/poll`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(30_000), this.closeController.signal]) });
-    if (!response.ok) throw new Error(`worker poll failed: ${response.status}`);
+    if (!response.ok) await throwResponseError(response, "worker poll");
     const result = await response.json() as { connectionId: string; offers: WorkerJobOffer[] };
     if (typeof result.connectionId !== "string" || !Array.isArray(result.offers)) throw new Error("worker poll response is invalid");
     this.connectionId = result.connectionId;
@@ -113,7 +142,7 @@ export class WorkerHttpTransport implements OutboundWorkerTransport {
   }
   async send(frame: WorkerEnvelope): Promise<void> {
     const response = await this.fetchImpl(`${this.options.origin.replace(/\/$/, "")}/api/v1/worker/events`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ workerId: this.options.workerId, credential: this.credential(), frame }), signal: AbortSignal.any([AbortSignal.timeout(30_000), this.closeController.signal]) });
-    if (!response.ok) throw new Error(`worker event failed: ${response.status}`);
+    if (!response.ok) await throwResponseError(response, "worker event");
   }
   close(): void { this.closeController.abort(); }
 }
@@ -141,6 +170,7 @@ export class WorkerWebSocketTransport implements OutboundWorkerTransport {
     if (options.resetSequence !== false) options.db.connection.prepare("INSERT INTO worker_state(key, value) VALUES ('sequence', '-1') ON CONFLICT(key) DO UPDATE SET value = '-1'").run();
   }
   get activeConnectionId(): string { return this.connectionId; }
+  transportMode(): "WSS" | "HTTP_FALLBACK" { return this.failed ? "HTTP_FALLBACK" : "WSS"; }
   private terminateSocket(): void { if (this.socket?.terminate) this.socket.terminate(); else this.socket?.close(); this.socket = undefined; }
   private async connect(): Promise<void> {
     if (this.failed) throw new Error("WSS_DISABLED");
@@ -158,7 +188,10 @@ export class WorkerWebSocketTransport implements OutboundWorkerTransport {
       socket.addEventListener("message", (event) => {
         try {
           const body = JSON.parse(typeof event.data === "string" ? event.data : String(event.data)) as { connectionId?: string; offers?: WorkerJobOffer[] };
-          if ("error" in body) throw new Error(String((body as { error?: { code?: unknown } }).error?.code ?? "WORKER_CHANNEL_ERROR"));
+          if ("error" in body) {
+            const errorBody = (body as { error?: { code?: unknown; status?: unknown } }).error;
+            throw new WorkerTransportError("worker websocket", Number(errorBody?.status) || 400, typeof errorBody?.code === "string" ? errorBody.code : "WORKER_CHANNEL_ERROR");
+          }
           if (body.connectionId && body.connectionId !== this.connectionId) throw new Error("WSS_CONNECTION_CHANGED");
           if (this.pollResolver) { const resolvePoll = this.pollResolver; this.pollResolver = undefined; this.pollRejecter = undefined; if (this.pollTimer) clearTimeout(this.pollTimer); this.pollTimer = undefined; resolvePoll(Array.isArray(body.offers) ? body.offers : []); }
         } catch (error) {
@@ -192,7 +225,8 @@ export class WorkerWebSocketTransport implements OutboundWorkerTransport {
       });
       if (this.helloSent) this.fallback.markHelloSent();
       return offers;
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkerTransportError && error.status === 410) { this.failed = true; this.terminateSocket(); throw error; }
       this.failed = true;
       this.terminateSocket();
       return this.fallback.poll();
@@ -201,7 +235,7 @@ export class WorkerWebSocketTransport implements OutboundWorkerTransport {
   async send(frame: WorkerEnvelope): Promise<void> {
     if (this.failed) { await this.fallback.send(frame); return; }
     try { await this.connect(); this.socket!.send(JSON.stringify({ workerId: this.options.workerId, credential: this.options.credentialProvider?.() ?? this.options.credential, frame })); }
-    catch { this.failed = true; this.terminateSocket(); await this.fallback.send(frame); }
+    catch (error) { if (error instanceof WorkerTransportError && error.status === 410) { this.failed = true; this.terminateSocket(); throw error; } this.failed = true; this.terminateSocket(); await this.fallback.send(frame); }
   }
   close(): void {
     this.failed = true;

@@ -239,7 +239,13 @@ test("owner management API exposes safe projections and keeps external adapters 
   try {
     const worker = await fetch(`${baseUrl}/api/v1/workers/worker-1`);
     assert.equal(worker.status, 200);
-    assert.equal((await worker.json()).capabilities[0].grantState, "REVIEW_REQUIRED");
+    const workerBody = await worker.json() as { capabilities: Array<{ grantState: string }>; connection: { state: string }; dispatch: { state: string; reason: string }; availableActions: { wake: boolean; purge: boolean } };
+    assert.equal(workerBody.capabilities[0].grantState, "REVIEW_REQUIRED");
+    assert.equal(workerBody.connection.state, "NO_HEARTBEAT");
+    assert.equal(workerBody.dispatch.state, "BLOCKED");
+    assert.equal(workerBody.dispatch.reason, "NO_HEALTHY_GRANTED_CAPABILITY");
+    assert.equal(workerBody.availableActions.wake, false);
+    assert.equal(workerBody.availableActions.purge, true);
     const wake = await fetch(`${baseUrl}/api/v1/workers/worker-1/wake`, { method: "POST" });
     assert.equal(wake.status, 503);
     assert.equal((await wake.json()).error.code, "WAKE_ADAPTER_NOT_CONFIGURED");
@@ -248,15 +254,28 @@ test("owner management API exposes safe projections and keeps external adapters 
     assert.equal((await grant.json()).grantState, "GRANTED");
     const drained = await fetch(`${baseUrl}/api/v1/workers/worker-1/drain`, { method: "POST" });
     assert.equal(drained.status, 202);
-    assert.equal((await drained.json()).drainState, "DRAINING");
+    assert.equal((await drained.json()).drainState, "DRAINED");
+    const resumed = await fetch(`${baseUrl}/api/v1/workers/worker-1/resume`, { method: "POST", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(resumed.status, 200);
+    assert.equal((await resumed.json()).drainState, "RUNNABLE");
+    const renamed = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Renamed worker" }) });
+    assert.equal(renamed.status, 200);
+    assert.equal((await renamed.json()).name, "Renamed worker");
+    const revokedCapability = await fetch(`${baseUrl}/api/v1/workers/worker-1/capabilities/cap-1/revoke`, { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(now) }, body: JSON.stringify({ descriptorHash: "sha256:descriptor" }) });
+    assert.equal(revokedCapability.status, 200);
     const unsteppedDelete = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "DELETE" });
     assert.equal(unsteppedDelete.status, 403);
     assert.equal((await unsteppedDelete.json()).error.code, "STEP_UP_REQUIRED");
     const deleted = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
     assert.equal(deleted.status, 200);
-    assert.equal((await deleted.json()).retention, "historical-evidence-preserved");
+    assert.equal((await deleted.json()).retention, "historical-task-and-audit-evidence-preserved");
     const retained = await fetch(`${baseUrl}/api/v1/workers/worker-1`);
-    assert.equal((await retained.json()).trustState, "REVOKED");
+    assert.equal(retained.status, 404);
+    const repeatedDelete = await fetch(`${baseUrl}/api/v1/workers/worker-1`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(repeatedDelete.status, 200);
+    assert.equal((await repeatedDelete.json()).alreadyPurged, true);
+    assert.equal(db.one("SELECT id FROM providers WHERE id = 'provider-1'"), undefined);
+    assert.equal(db.one("SELECT id FROM quota_observations WHERE id = 'quota-1'"), undefined);
 
     const { publicKey } = generateKeyPairSync("ed25519");
     const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -272,7 +291,7 @@ test("owner management API exposes safe projections and keeps external adapters 
     const secondEnrollment = await (await fetch(`${baseUrl}/api/v1/workers/enrollment-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicKeyPem: secondKey, deviceSummary: { name: "Cancelled Laptop", platform: "macOS" } }) })).json();
     const cancelled = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${secondEnrollment.id}`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
     assert.equal(cancelled.status, 200);
-    assert.equal((await cancelled.json()).status, "REJECTED");
+    assert.equal((await cancelled.json()).deleted, true);
     const approved = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${enrollment.id}/approve`, { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(now) }, body: JSON.stringify({ fingerprint: enrollment.fingerprint }) });
     assert.equal(approved.status, 200);
     assert.equal((await approved.json()).next, "AWAITING_WORKER_PROOF");
@@ -285,16 +304,74 @@ test("owner management API exposes safe projections and keeps external adapters 
     assert.equal((await (await fetch(`${baseUrl}/api/v1/policies`)).json()).items.length, 1);
     const routes = await fetch(`${baseUrl}/api/v1/compute/routes`);
     assert.equal(routes.status, 200);
-    assert.equal((await routes.json()).providers[0].remaining.tokens, 100);
+    assert.deepEqual((await routes.json()).providers, []);
     const system = await fetch(`${baseUrl}/api/v1/system`);
     assert.equal(system.status, 200);
-    assert.equal((await system.json()).counts.workers, 1);
+    assert.equal((await system.json()).counts.workers, 0);
     const audit = await fetch(`${baseUrl}/api/v1/audit`);
     assert.equal(audit.status, 200);
     assert.ok((await audit.json()).items.length >= 4);
     const connectorRun = await fetch(`${baseUrl}/api/v1/connectors/ContextHub/run`, { method: "POST" });
     assert.equal(connectorRun.status, 503);
     assert.equal((await connectorRun.json()).error.code, "CONNECTOR_NOT_CONFIGURED");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    db.close();
+  }
+});
+
+test("expired approved enrollment requests can be permanently purged and are idempotent", async () => {
+  const now = Date.now();
+  const db = new OrchestratorDatabase(":memory:");
+  const engine = new TaskEngine(db, () => now);
+  const server = createHttpServer({ db, engine, allowUnauthenticated: true });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const created = await (await fetch(`${baseUrl}/api/v1/workers/enrollment-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicKeyPem, deviceSummary: { name: "Expired", platform: "macOS" } }) })).json() as { id: string };
+    db.run("UPDATE worker_enrollment_requests SET status = 'APPROVED', expires_at = ? WHERE id = ?", now - 1, created.id);
+    const list = await (await fetch(`${baseUrl}/api/v1/workers/enrollment-requests`)).json() as { items: Array<{ id: string; status: string }> };
+    assert.equal(list.items[0].status, "EXPIRED");
+    const deleted = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${created.id}`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(deleted.status, 200);
+    assert.equal((await deleted.json()).deleted, true);
+    assert.equal(db.one("SELECT id FROM worker_enrollment_requests WHERE id = ?", created.id), undefined);
+    assert.ok(db.one("SELECT id FROM worker_purge_tombstones WHERE enrollment_request_id = ?", created.id));
+    const removedStatus = await fetch(`${baseUrl}/api/v1/worker/enrollment-requests/${created.id}/status`);
+    assert.equal(removedStatus.status, 410);
+    const repeated = await fetch(`${baseUrl}/api/v1/workers/enrollment-requests/${created.id}`, { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(repeated.status, 200);
+    assert.equal((await repeated.json()).alreadyPurged, true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    db.close();
+  }
+});
+
+test("busy worker purge is rejected without partial changes", async () => {
+  const now = Date.now();
+  const db = new OrchestratorDatabase(":memory:");
+  const engine = new TaskEngine(db, () => now);
+  db.run("INSERT INTO workers(id, identity_subject, name, platform, trust_state, protocol_min, protocol_max, metadata_json, created_at, updated_at) VALUES ('busy-worker', 'worker:busy-worker', 'Busy', 'macOS', 'TRUSTED', '1.0', '1.0', '{}', ?, ?)", now, now);
+  const goal = engine.createGoal({ intent: "busy worker", source: { kind: "web" }, memoryRequirement: "none" }, "owner", "busy-worker-goal");
+  const goalId = String(goal.body.goalId);
+  new PlanService(db, () => now).activate(goalId, { schemaVersion: 1, goalId, revision: 1, intent: "busy worker", acceptanceCriteria: [{ id: "done", description: "done", verificationTaskId: "busy-task" }], tasks: [{ taskId: "busy-task", type: "fake", title: "Busy task", required: true, sideEffectClass: "READ_ONLY" }] });
+  db.run("INSERT INTO attempts(id, task_id, generation, worker_id, state, usage_json, started_at) VALUES ('busy-attempt', 'busy-task', 1, 'busy-worker', 'RUNNING', '{}', ?)", now);
+  const server = createHttpServer({ db, engine, allowUnauthenticated: true });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind");
+  try {
+    const response = await fetch("http://127.0.0.1:" + address.port + "/api/v1/workers/busy-worker", { method: "DELETE", headers: { "x-pai-auth-time": String(now) } });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, "WORKER_BUSY");
+    assert.ok(db.one("SELECT id FROM workers WHERE id = 'busy-worker'"));
+    assert.ok(db.one("SELECT id FROM attempts WHERE id = 'busy-attempt'"));
+    assert.equal(db.one("SELECT id FROM worker_purge_tombstones WHERE worker_id = 'busy-worker'"), undefined);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     db.close();

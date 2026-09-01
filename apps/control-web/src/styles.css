@@ -170,6 +170,10 @@ footer { padding: 1.5rem; color: var(--hud-muted); text-align: center; }
 .status-pill.bad { color: #ffb1bb; background: rgba(121, 35, 53, .34); border-color: rgba(255, 121, 137, .48); }
 
 .worker-management { margin-block: 1rem 2rem; }
+.worker-toolbar { display: grid; grid-template-columns: minmax(14rem, 1.5fr) minmax(12rem, .7fr); align-items: end; gap: .8rem; margin-block: 1rem 1.4rem; padding: 1rem; background: var(--hud-surface); border: 1px solid var(--hud-line); border-radius: .45rem; }
+.worker-toolbar label { display: grid; gap: .4rem; color: var(--hud-copy); font-weight: 700; }
+.worker-toolbar input, .worker-toolbar select { width: 100%; min-height: 2.7rem; padding: .65rem .75rem; color: var(--hud-text); background: rgba(2, 10, 17, .9); border: 1px solid rgba(76, 203, 236, .5); border-radius: .35rem; font: inherit; }
+.worker-toolbar input:focus, .worker-toolbar select:focus { border-color: var(--hud-line-bright); outline: 2px solid rgba(67, 232, 255, .48); outline-offset: 1px; }
 .worker-help { color: var(--hud-copy); line-height: 1.55; }
 .command-block { margin: 1rem 0; padding: .9rem 1rem; overflow-x: auto; color: var(--hud-text); background: rgba(2, 10, 17, .92); border: 1px solid var(--hud-line); border-radius: .35rem; font: .95rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .worker-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin-block: 1rem; }
@@ -177,6 +181,8 @@ footer { padding: 1.5rem; color: var(--hud-muted); text-align: center; }
 .worker-status-grid span { color: var(--hud-muted); font-size: .78rem; }
 .worker-status-grid strong { overflow-wrap: anywhere; font-size: .82rem; }
 .worker-capabilities, .worker-providers { color: var(--hud-copy); line-height: 1.5; }
+.worker-attempts { margin: .6rem 0; padding-left: 1.2rem; color: var(--hud-copy); }
+.worker-attempts li { margin-block: .25rem; }
 .worker-capabilities strong, .worker-providers strong { color: var(--hud-text); }
 .worker-revoked { display: flex; align-items: center; justify-content: space-between; gap: .7rem; margin: 1rem 0 0; color: #ffb1bb; }
 .enrollment-result p { margin: .4rem 0 0; overflow-wrap: anywhere; }
@@ -226,6 +232,7 @@ footer { padding: 1.5rem; color: var(--hud-muted); text-align: center; }
   .hero-actions { min-width: 0; }
   .metric-grid, .quick-grid, .memory-metrics, .worker-status-grid { grid-template-columns: 1fr; }
   .memory-toolbar { grid-template-columns: 1fr; }
+  .worker-toolbar { grid-template-columns: 1fr; }
   .section-heading { align-items: stretch; flex-direction: column; }
   .section-heading button, .actions button { width: 100%; }
   dl { grid-template-columns: 1fr; }

@@ -38,8 +38,9 @@ export function attachWorkerWebSocket(server: HttpServer, channel: WorkerChannel
           send(socket, { type: "poll", ...result });
         } catch (error) {
           const status = typeof error === "object" && error !== null && "status" in error ? Number((error as { status: number }).status) : 400;
-          send(socket, { error: { code: error instanceof Error ? error.message : "WORKER_CHANNEL_ERROR", status } });
-          if (status === 401 || status === 409) socket.close(1008, "worker channel rejected message");
+          const code = typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : error instanceof Error ? error.message : "WORKER_CHANNEL_ERROR";
+          send(socket, { error: { code, status } });
+          if (status === 401 || status === 409 || status === 410) socket.close(1008, "worker channel rejected message");
         }
       })();
     });

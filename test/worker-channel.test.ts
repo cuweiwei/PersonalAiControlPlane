@@ -8,6 +8,7 @@ import { OrchestratorDatabase } from "../apps/orchestrator/src/db.ts";
 import { WorkerChannelService } from "../apps/orchestrator/src/worker-channel.ts";
 import { createHttpServer } from "../apps/orchestrator/src/http.ts";
 import { TaskEngine } from "../apps/orchestrator/src/task-engine.ts";
+import { canonicalJson, sha256 } from "../packages/crypto/src/index.ts";
 import { signWorkerEnvelope, signEnrollmentProof } from "../packages/worker/src/index.ts";
 import type { WorkerEnvelope } from "../packages/worker/src/index.ts";
 import { WorkerDatabase } from "../apps/worker/src/db.ts";
@@ -99,6 +100,26 @@ test("worker daemon starts from an uncredentialed install and connects after app
   });
 });
 
+test("removed bootstrap enters terminal state until explicit reset creates a new key", async () => {
+  await withServer(async (baseUrl, _channel, db) => {
+    const temp = mkdtempSync(join(tmpdir(), "pai-worker-removed-"));
+    const keyStore = new FileDeviceKeyStore(join(temp, "device-key.json"));
+    const credentialStore = new FileWorkerCredentialStore(join(temp, "credential.json"));
+    const bootstrap = new WorkerBootstrap({ origin: baseUrl, keyStore, credentialStore, enrollmentPath: join(temp, "enrollment.json"), removedPath: join(temp, "removed.json"), deviceSummary: { name: "Removed", platform: "darwin" } });
+    await bootstrap.requestEnrollment();
+    const firstKey = await keyStore.publicKeyPem();
+    bootstrap.markRemoved();
+    assert.equal(bootstrap.isRemoved(), true);
+    assert.equal(await bootstrap.ensureCredential(), undefined);
+    assert.equal(db.one("SELECT COUNT(*) AS count FROM worker_enrollment_requests")?.count, 1);
+    await bootstrap.resetLocalIdentity();
+    assert.equal(bootstrap.isRemoved(), false);
+    await bootstrap.requestEnrollment();
+    assert.notEqual(await keyStore.publicKeyPem(), firstKey);
+    assert.equal(db.one("SELECT COUNT(*) AS count FROM worker_enrollment_requests")?.count, 2);
+  });
+});
+
 test("worker poll and events authenticate signed frames and resolve a queued result", async () => {
   await withServer(async (baseUrl, channel, db) => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -136,6 +157,42 @@ test("worker poll and events authenticate signed frames and resolve a queued res
     assert.equal(oldPoll.status, 401);
     const newPoll = await fetch(`${baseUrl}/api/v1/worker/poll`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workerId: credentials.workerId, credential: rotatedBody.credential, connectionId: "connection-new" }) });
     assert.equal(newPoll.status, 200);
+  });
+});
+
+test("worker purge rejects old channel credentials, drains offers, and supersedes capability grants", async () => {
+  await withServer(async (baseUrl, channel, db) => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const created = await (await fetch(baseUrl + "/api/v1/worker/enrollment-requests", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicKeyPem, deviceSummary: { name: "Purge", platform: "darwin" } }) })).json() as { requestId: string; challenge: string; fingerprint: string };
+    await fetch(baseUrl + "/api/v1/workers/enrollment-requests/" + created.requestId + "/approve", { method: "POST", headers: { "content-type": "application/json", "x-pai-auth-time": String(Date.now()) }, body: JSON.stringify({ fingerprint: created.fingerprint }) });
+    const status = await (await fetch(baseUrl + "/api/v1/worker/enrollment-requests/" + created.requestId + "/status")).json() as { serverNonce: string };
+    const credentials = await (await fetch(baseUrl + "/api/v1/worker/enrollment-requests/" + created.requestId + "/finalize", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: created.challenge, serverNonce: status.serverNonce, workerSignature: signEnrollmentProof(created.challenge, status.serverNonce, privateKey) }) })).json() as { workerId: string; credential: string };
+    const connectionId = "purge-connection";
+    assert.equal(channel.poll({ workerId: credentials.workerId, credential: credentials.credential, connectionId }).offers.length, 0);
+    const descriptorBase = { kind: "codex.execute", version: "1.0.0", health: "HEALTHY" as const, properties: { loginMode: "chatgpt", sandboxModes: ["workspace_write"], maxConcurrency: 1 } };
+    const descriptorOne = { ...descriptorBase, descriptorHash: sha256(canonicalJson(descriptorBase)) };
+    const descriptorTwoBase = { ...descriptorBase, properties: { ...descriptorBase.properties, maxConcurrency: 2 } };
+    const descriptorTwo = { ...descriptorTwoBase, descriptorHash: sha256(canonicalJson(descriptorTwoBase)) };
+    channel.receive(credentials.workerId, credentials.credential, signWorkerEnvelope({ protocolVersion: "1.0", messageId: "purge-hello-1", connectionId, sequence: 0, workerId: credentials.workerId, sentAt: new Date().toISOString(), nonce: "0123456789abcdef", type: "worker.hello", payload: descriptorOne }, privateKey));
+    const firstCapability = db.one<{ id: string }>("SELECT id FROM capabilities WHERE worker_id = ?", credentials.workerId);
+    assert.ok(firstCapability);
+    db.run("UPDATE capabilities SET grant_state = 'GRANTED' WHERE id = ?", firstCapability!.id);
+    channel.receive(credentials.workerId, credentials.credential, signWorkerEnvelope({ protocolVersion: "1.0", messageId: "purge-hello-2", connectionId, sequence: 1, workerId: credentials.workerId, sentAt: new Date().toISOString(), nonce: "0123456789abcdef", type: "capability.update", payload: descriptorTwo }, privateKey));
+    assert.equal(db.one<{ grant_state: string; superseded_by: string | null }>("SELECT grant_state, superseded_by FROM capabilities WHERE id = ?", firstCapability!.id)?.grant_state, "REVOKED");
+    assert.ok(db.one("SELECT id FROM capabilities WHERE worker_id = ? AND descriptor_hash = ?", credentials.workerId, descriptorTwo.descriptorHash));
+    const heartbeat = signWorkerEnvelope({ protocolVersion: "1.0", messageId: "purge-heartbeat", connectionId, sequence: 2, workerId: credentials.workerId, sentAt: new Date().toISOString(), nonce: "0123456789abcdef", type: "worker.heartbeat", payload: { health: "HEALTHY", transport: "HTTP_FALLBACK", resources: { cpuCount: 2, memoryFreeBytes: 1234 }, runtime: { activeJobs: 0, queuedJobs: 0, maxConcurrency: 2 } } }, privateKey);
+    channel.receive(credentials.workerId, credentials.credential, heartbeat);
+    assert.equal(db.one<{ health: string; transport: string }>("SELECT health, transport FROM worker_runtime_status WHERE worker_id = ?", credentials.workerId)?.transport, "HTTP_FALLBACK");
+    db.run("UPDATE workers SET drain_state = 'DRAINING' WHERE id = ?", credentials.workerId);
+    assert.throws(() => channel.queueOffer({ workerId: credentials.workerId } as never), (error: unknown) => (error as { status?: number; code?: string }).status === 409 && (error as { code?: string }).code === "WORKER_NOT_RUNNABLE");
+    const deleted = await fetch(baseUrl + "/api/v1/workers/" + credentials.workerId, { method: "DELETE", headers: { "x-pai-auth-time": String(Date.now()) } });
+    assert.equal(deleted.status, 200);
+    const oldPoll = await fetch(baseUrl + "/api/v1/worker/poll", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workerId: credentials.workerId, credential: credentials.credential, connectionId }) });
+    assert.equal(oldPoll.status, 410);
+    assert.equal((await oldPoll.json()).error.code, "WORKER_REMOVED");
+    const oldRotate = await fetch(baseUrl + "/api/v1/worker/credentials/rotate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workerId: credentials.workerId, credential: credentials.credential }) });
+    assert.equal(oldRotate.status, 410);
   });
 });
 

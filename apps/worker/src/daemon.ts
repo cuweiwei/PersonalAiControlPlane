@@ -1,6 +1,6 @@
 import { OutboundWorkerRuntime, type WorkerCapabilityAdapter } from "./runtime.ts";
 
-export type WorkerDaemonOptions = { runtime?: OutboundWorkerRuntime; createRuntime?: () => Promise<OutboundWorkerRuntime | undefined>; beforePoll?: () => Promise<boolean | void>; pollIntervalMs?: number; heartbeatIntervalMs?: number; onError?: (error: unknown) => void };
+export type WorkerDaemonOptions = { runtime?: OutboundWorkerRuntime; createRuntime?: () => Promise<OutboundWorkerRuntime | undefined>; beforePoll?: () => Promise<boolean | void>; isTerminal?: () => boolean; pollIntervalMs?: number; heartbeatIntervalMs?: number; onError?: (error: unknown) => void };
 
 export class WorkerDaemon {
   private timer?: ReturnType<typeof setTimeout>;
@@ -26,6 +26,7 @@ export class WorkerDaemon {
   private async tick(): Promise<void> {
     if (!this.running) return;
     try {
+      if (this.options.isTerminal?.()) { this.stop(); return; }
       if (!this.runtime && this.options.createRuntime) {
         const created = await this.options.createRuntime();
         if (!this.running) { created?.close(); return; }

@@ -473,6 +473,29 @@ CREATE TABLE IF NOT EXISTS worker_channel_inbound_messages (
 );
 `;
 
+const WORKER_MANAGEMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS worker_runtime_status (
+  worker_id TEXT PRIMARY KEY REFERENCES workers(id),
+  report_json TEXT NOT NULL DEFAULT '{}',
+  health TEXT NOT NULL DEFAULT 'UNKNOWN',
+  transport TEXT NOT NULL DEFAULT 'UNKNOWN',
+  last_error_code TEXT,
+  last_error_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_purge_tombstones (
+  id TEXT PRIMARY KEY,
+  worker_id TEXT UNIQUE,
+  enrollment_request_id TEXT UNIQUE,
+  fingerprint_digest TEXT NOT NULL,
+  purged_at INTEGER NOT NULL,
+  purged_by TEXT NOT NULL,
+  reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS worker_purge_fingerprint_idx ON worker_purge_tombstones(fingerprint_digest);
+`;
+
 export type SqlRow = Record<string, unknown>;
 
 export class OrchestratorDatabase {
@@ -559,6 +582,16 @@ export class OrchestratorDatabase {
         this.connection.prepare(
           "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(7, ?, ?)",
         ).run("worker-channel-v7", Date.now());
+      }
+      const eighthMigration = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 8").get();
+      if (!eighthMigration) {
+        this.connection.exec(WORKER_MANAGEMENT_SCHEMA);
+        const capabilityColumns = this.connection.prepare("PRAGMA table_info(capabilities)").all() as Array<{ name: string }>;
+        if (!capabilityColumns.some((column) => column.name === "superseded_by")) this.connection.exec("ALTER TABLE capabilities ADD COLUMN superseded_by TEXT");
+        if (!capabilityColumns.some((column) => column.name === "superseded_at")) this.connection.exec("ALTER TABLE capabilities ADD COLUMN superseded_at INTEGER");
+        this.connection.prepare(
+          "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(8, ?, ?)",
+        ).run("worker-management-v8", Date.now());
       }
       this.connection.exec("COMMIT");
     } catch (error) {
