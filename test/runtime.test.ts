@@ -64,6 +64,37 @@ test("background runtime drives a durable fake goal through planning, dispatch, 
   db.close();
 });
 
+test("preferred ContextHub memory degrades explicitly while required memory fails closed", async () => {
+  let now = 1_700_000_000_000;
+  const preferredDb = new OrchestratorDatabase(":memory:");
+  const preferredEngine = new TaskEngine(preferredDb, () => now);
+  let receivedContext: Record<string, unknown> | undefined;
+  const delegate = planner();
+  const preferredPlanner: PlannerPort = { async createPlan(goal, context) { receivedContext = context; return delegate.createPlan(goal, context); } };
+  const unavailableContextHub = {
+    async compileContext() { throw new Error("upstream unavailable"); },
+    async proposeCandidate() { throw new Error("unused"); },
+    async proposeSuccessor() { throw new Error("unused"); },
+    async recordContextOutcome() { throw new Error("unused"); },
+    async readChanges() { throw new Error("unused"); },
+  };
+  const preferred = preferredEngine.createGoal({ intent: "preferred memory", source: { kind: "web" }, memoryRequirement: "preferred" }, "owner", "preferred-memory");
+  const preferredRuntime = new OrchestratorRuntime(preferredDb, preferredEngine, { planner: preferredPlanner, executor: executor(), contextHub: unavailableContextHub, clock: () => now });
+  await preferredRuntime.runUntilIdle();
+  assert.deepEqual(receivedContext, { status: "UNAVAILABLE", reason: "CONTEXT_HUB_UNAVAILABLE" });
+  assert.equal(preferredEngine.getGoal(String(preferred.body.goalId))?.status, "COMPLETED");
+  preferredDb.close();
+
+  const requiredDb = new OrchestratorDatabase(":memory:");
+  const requiredEngine = new TaskEngine(requiredDb, () => now);
+  const required = requiredEngine.createGoal({ intent: "required memory", source: { kind: "web" }, memoryRequirement: "required" }, "owner", "required-memory");
+  const requiredRuntime = new OrchestratorRuntime(requiredDb, requiredEngine, { planner: planner(), executor: executor(), clock: () => now });
+  await requiredRuntime.runCycle();
+  assert.equal(requiredEngine.getGoal(String(required.body.goalId))?.status, "PLANNING");
+  assert.match(String(requiredDb.one("SELECT last_error FROM outbox WHERE topic = 'goal.plan.requested'")?.last_error), /CONTEXT_HUB_REQUIRED/);
+  requiredDb.close();
+});
+
 test("runtime leaves missing ports pending and never dispatches a mutation without an action-grant path", async () => {
   const now = 1_700_000_000_000;
   const noPortDb = new OrchestratorDatabase(":memory:");

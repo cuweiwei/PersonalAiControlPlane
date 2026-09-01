@@ -22,6 +22,17 @@ services:
       PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
       PAI_PORT: "9085"
       PAI_AUDIT_VERIFY_INTERVAL_MS: "300000"
+      # Optional Hermes workload ingress. The edge verifies the detached
+      # Ed25519 proof in Orchestrator; these values remain root-controlled.
+      PAI_HERMES_WORKLOAD_ID: ${PAI_HERMES_WORKLOAD_ID:-}
+      PAI_HERMES_WORKLOAD_OWNER_ID: ${PAI_HERMES_WORKLOAD_OWNER_ID:-}
+      PAI_HERMES_WORKLOAD_SUBJECT: ${PAI_HERMES_WORKLOAD_SUBJECT:-hermes-agent}
+      PAI_HERMES_WORKLOAD_PUBLIC_KEY: ${PAI_HERMES_WORKLOAD_PUBLIC_KEY:-}
+      # The deterministic ContextHub adapter stays fail-closed until the
+      # owner has enrolled a namespace-bound client and selected this gate.
+      PAI_CONTEXT_HUB_ADAPTER_ENABLED: ${PAI_CONTEXT_HUB_ADAPTER_ENABLED:-false}
+      PAI_CONTEXT_HUB_API_ORIGIN: ${PAI_CONTEXT_HUB_API_ORIGIN:-http://host.docker.internal:18788}
+      PAI_CONTEXT_HUB_API_KEY: ${PAI_CONTEXT_HUB_API_KEY:-}
       # ContextHub keeps its Tailscale-facing 8788 listener loopback-only. The
       # separate Docker-bridge ingress is private container-to-host plumbing;
       # ContextHub still enforces the forwarded personal-ai principal and
@@ -39,6 +50,8 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:9084:8081"
+      # Container-to-container service ingress; not LAN/public-facing.
+      - "172.17.0.1:19084:8081"
     healthcheck:
       test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:8080/health/ready','http://127.0.0.1:8081/health/ready','http://127.0.0.1:9084/health/ready','http://127.0.0.1:9085/health/ready'].map(url=>fetch(url))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

@@ -12,6 +12,7 @@ export type PrivateEdgeOptions = {
 };
 
 const identityHeaders = ["x-pai-verified", "x-pai-owner-id", "x-pai-session-id", "x-pai-auth-time", "x-pai-request-id"] as const;
+const workloadHeaders = new Set(["x-pai-workload-id", "x-pai-workload-timestamp", "x-pai-workload-nonce", "x-pai-workload-signature", "x-pai-workload-body-digest"]);
 const securityHeaders: Record<string, string> = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -33,7 +34,7 @@ function parseOrigin(value: string, field: string): EdgeOrigin {
 
 function isIdentityHeader(name: string): boolean {
   const normalized = name.toLowerCase();
-  return normalized.startsWith("x-pai-") && normalized !== "x-pai-csrf-token";
+  return normalized.startsWith("x-pai-") && !workloadHeaders.has(normalized) && normalized !== "x-pai-csrf-token";
 }
 
 function appendSecurityHeaders(headers: Record<string, string | string[] | undefined>): Record<string, string | string[]> {
@@ -159,6 +160,10 @@ export function createPrivateEdgeServer(options: PrivateEdgeOptions): Server {
       if (path.startsWith("/api/v1/auth/")) return proxy(request, response, identity, request.url ?? "/", undefined, true);
       if (path.startsWith("/health")) return proxy(request, response, orchestrator, request.url ?? "/", undefined, false, 2_000);
       if (path.startsWith("/api/v1/worker/")) return proxy(request, response, orchestrator, request.url ?? "/");
+      // Workload-authenticated service calls are verified by Orchestrator. The
+      // edge may route them without browser forward-auth, but never trusts the
+      // caller-supplied owner or identity headers itself.
+      if (path.startsWith("/api/v1/") && typeof request.headers["x-pai-workload-id"] === "string") return proxy(request, response, orchestrator, request.url ?? "/");
       if (path.startsWith("/api/portal/v1/memory/")) {
         if (!memory || !safeMethod(request.method)) return writeError(response, 405, "METHOD_NOT_ALLOWED", "Memory projection is read-only");
         const target = `/v1/control/${path.slice("/api/portal/v1/memory/".length)}${new URL(request.url ?? "/", "http://edge.invalid").search}`;

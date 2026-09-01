@@ -14,7 +14,9 @@ import { TaskEngine } from "../../orchestrator/src/task-engine.ts";
 import { WorkerChannelService } from "../../orchestrator/src/worker-channel.ts";
 import { closeWorkerWebSocket } from "../../orchestrator/src/worker-websocket.ts";
 import { AuditIntegrityMonitor } from "../../orchestrator/src/audit-monitor.ts";
+import { allowHermesWorkloadOperation, WorkloadRequestVerifier } from "../../orchestrator/src/workload-auth.ts";
 import { ContentAddressedArtifactStore } from "../../../packages/artifacts/src/index.ts";
+import { ContextHubHttpAdapter } from "../../../packages/adapters/src/context-hub-http.ts";
 import { createControlWebServer } from "./control-web-server.ts";
 import { closePrivateEdgeConnections, createPrivateEdgeServer } from "./private-edge.ts";
 
@@ -47,6 +49,16 @@ const compatibilityProfile = process.env.PAI_OPERATIONAL_PROFILE === "compatibil
 const allowUnauthenticated = process.env.NODE_ENV !== "production" && process.env.PAI_DEV_ALLOW_UNAUTHENTICATED !== "false";
 const auditVerificationIntervalMs = durationMs("PAI_AUDIT_VERIFY_INTERVAL_MS", String(5 * 60_000));
 
+function optionalWorkloadVerifier(): WorkloadRequestVerifier | undefined {
+  const workloadId = process.env.PAI_HERMES_WORKLOAD_ID;
+  const ownerId = process.env.PAI_HERMES_WORKLOAD_OWNER_ID;
+  const subject = process.env.PAI_HERMES_WORKLOAD_SUBJECT ?? "hermes-agent";
+  const publicKeyPem = process.env.PAI_HERMES_WORKLOAD_PUBLIC_KEY?.replaceAll("\\n", "\n");
+  if (!workloadId && !ownerId && !publicKeyPem) return undefined;
+  if (!workloadId || !ownerId || !publicKeyPem) throw new Error("PAI_HERMES_WORKLOAD_ID, PAI_HERMES_WORKLOAD_OWNER_ID, and PAI_HERMES_WORKLOAD_PUBLIC_KEY must be configured together");
+  return new WorkloadRequestVerifier({ workloadId, ownerId, subject, publicKeyPem }, Date.now, allowHermesWorkloadOperation);
+}
+
 const identityDbPath = process.env.PAI_IDENTITY_DB_PATH ?? "./data/identity.db";
 const identityDb = new IdentityDatabase(identityDbPath);
 const identity = new IdentityService(identityDb);
@@ -70,7 +82,11 @@ const artifactStore = new ContentAddressedArtifactStore(artifactRoot);
 const engine = new TaskEngine(orchestratorDb);
 const auditMonitor = new AuditIntegrityMonitor(orchestratorDb, engine, auditVerificationIntervalMs);
 auditMonitor.start();
-const runtime = new OrchestratorRuntime(orchestratorDb, engine, { scheduleOwnerId: process.env.PAI_SCHEDULE_OWNER_ID });
+const workloadAuth = optionalWorkloadVerifier();
+const contextHubAdapter = process.env.PAI_CONTEXT_HUB_ADAPTER_ENABLED === "true"
+  ? new ContextHubHttpAdapter({ origin: process.env.PAI_CONTEXT_HUB_API_ORIGIN ?? process.env.PAI_MEMORY_ORIGIN ?? "", apiKey: process.env.PAI_CONTEXT_HUB_API_KEY ?? "" })
+  : undefined;
+const runtime = new OrchestratorRuntime(orchestratorDb, engine, { scheduleOwnerId: process.env.PAI_SCHEDULE_OWNER_ID, contextHub: contextHubAdapter });
 runtime.start();
 const workerChannel = new WorkerChannelService(orchestratorDb);
 const archiveService = new ArchiveService(archiveDb, Date.now, (digests) => {
@@ -84,7 +100,7 @@ const identityHealthUrl = process.env.PAI_IDENTITY_HEALTH_URL ?? `http://127.0.0
 const identityReadyProbe = allowUnauthenticated
   ? undefined
   : async () => { const response = await fetch(identityHealthUrl, { signal: AbortSignal.timeout(1_500) }); return response.ok; };
-const orchestratorServer = createHttpServer({ db: orchestratorDb, engine, allowUnauthenticated, identityReady: allowUnauthenticated, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService, workerChannel, auditHealth: () => auditMonitor.health() });
+const orchestratorServer = createHttpServer({ db: orchestratorDb, engine, allowUnauthenticated, identityReady: allowUnauthenticated, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService, workerChannel, auditHealth: () => auditMonitor.health(), workloadAuth });
 const controlWebServer = createControlWebServer();
 const privateEdgeServer = createPrivateEdgeServer({
   identityOrigin: `http://127.0.0.1:${identityPort}`,

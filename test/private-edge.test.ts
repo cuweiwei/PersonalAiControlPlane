@@ -27,7 +27,7 @@ test("private edge routes auth, strips browser credentials, and removes infrastr
     response.end(request.url === "/" ? "identity-root" : "identity-auth");
   });
   const orchestrator = createServer((request, response) => {
-    observed.upstream = { cookie: request.headers.cookie, csrf: request.headers["x-pai-csrf-token"], owner: request.headers["x-pai-owner-id"], verified: request.headers["x-pai-verified"], proto: request.headers["x-forwarded-proto"] };
+    observed.upstream = { cookie: request.headers.cookie, csrf: request.headers["x-pai-csrf-token"], owner: request.headers["x-pai-owner-id"], verified: request.headers["x-pai-verified"], workload: request.headers["x-pai-workload-id"], workloadExtra: request.headers["x-pai-workload-spoof"], proto: request.headers["x-forwarded-proto"] };
     if (request.url === "/api/v1/events") { response.writeHead(200, { "content-type": "text/event-stream" }); response.end("event: ready\\ndata: {}\\n\\n"); return; }
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ path: request.url }));
@@ -50,7 +50,10 @@ test("private edge routes auth, strips browser credentials, and removes infrastr
     assert.equal(api.status, 200);
     assert.deepEqual(observed.auth, { cookie: "pai_session=raw-secret", origin: "https://pai.example.test", csrf: "csrf", method: "GET" });
     assert.equal(await api.text(), JSON.stringify({ path: "/api/v1/goals" }));
-    assert.deepEqual(observed.upstream, { cookie: undefined, csrf: undefined, owner: "owner-real", verified: "1", proto: "https" });
+    assert.deepEqual(observed.upstream, { cookie: undefined, csrf: undefined, owner: "owner-real", verified: "1", workload: undefined, workloadExtra: undefined, proto: "https" });
+    const workload = await fetch(`${base}/api/v1/goals`, { headers: { "x-pai-workload-id": "hermes-test", "x-pai-workload-spoof": "drop-me" } });
+    assert.equal(workload.status, 200);
+    assert.deepEqual(observed.upstream, { cookie: undefined, csrf: undefined, owner: undefined, verified: undefined, workload: "hermes-test", workloadExtra: undefined, proto: "https" });
     const home = await fetch(`${base}/home`, { headers: { cookie: "pai_session=raw-secret", origin: "https://pai.example.test", "x-pai-owner-id": "spoofed", "x-pai-csrf-token": "csrf" } });
     assert.equal(home.status, 200);
     assert.equal(await home.text(), "web:/home");

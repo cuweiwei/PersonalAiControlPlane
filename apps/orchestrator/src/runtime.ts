@@ -8,6 +8,7 @@ import { ReconciliationService, type ReconciliationRecord, type ReconciliationSt
 import { ScheduleService } from "./schedule-service.ts";
 import { TaskEngine, type AttemptBinding } from "./task-engine.ts";
 import { ApprovalService, type ApprovalBounds } from "./approval-service.ts";
+import type { ContextHubAdapter } from "../../../packages/adapters/src/index.ts";
 
 export type RuntimeTask = {
   id: string;
@@ -26,7 +27,7 @@ export type RuntimeTask = {
 };
 
 export type PlannerPort = {
-  createPlan(goal: GoalRecord): Promise<PlanInput>;
+  createPlan(goal: GoalRecord, contextPackage?: Record<string, unknown>): Promise<PlanInput>;
 };
 
 export type ExecutionRequest = {
@@ -138,6 +139,7 @@ export type OrchestratorRuntimeOptions = {
   clock?: () => number;
   tickMs?: number;
   maxOutboxAttempts?: number;
+  contextHub?: ContextHubAdapter;
 };
 
 export class OrchestratorRuntime {
@@ -154,6 +156,7 @@ export class OrchestratorRuntime {
   private readonly clock: () => number;
   private readonly tickMs: number;
   private readonly dispatcher: OutboxDispatcher;
+  private readonly contextHub?: ContextHubAdapter;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
 
@@ -168,6 +171,7 @@ export class OrchestratorRuntime {
     this.planner = options.planner;
     this.executor = options.executor;
     this.reconciliation = options.reconciliation;
+    this.contextHub = options.contextHub;
     this.scheduleOwnerId = options.scheduleOwnerId;
     this.tickMs = options.tickMs ?? 1_000;
     const handlers = new Map<string, (record: OutboxRecord) => Promise<void>>();
@@ -230,7 +234,26 @@ export class OrchestratorRuntime {
     if (!existing) throw new Error("GOAL_NOT_FOUND");
     if (existing.activePlanRevision !== null) return;
     const goal = this.engine.beginPlanning(goalId);
-    const plan = await this.planner!.createPlan(goal);
+    let contextPackage: Record<string, unknown> | undefined;
+    if (goal.memoryRequirement !== "none") {
+      if (!this.contextHub) {
+        if (goal.memoryRequirement === "required") throw new Error("CONTEXT_HUB_REQUIRED");
+      } else {
+        try {
+          // `intent` is already the primary retrieval query; do not send it a
+          // second time in `queries`, which wastes ContextHub audit/budget
+          // accounting and can duplicate retrieval work.
+          contextPackage = await this.contextHub.compileContext({ intent: goal.intent, targetAgent: "generic", tokenBudget: 4_000, includePrivate: false, runtimeInputs: [{ kind: "system_constraint", value: `goal:${goal.id}` }] }, `context:${goal.id}:${goal.stateVersion}`);
+        } catch (error) {
+          if (goal.memoryRequirement === "required") throw error;
+          // Preferred memory is allowed to continue only with an explicit,
+          // non-content sentinel. Planners must not mistake this for an empty
+          // successful package or claim that ContextHub supplied Memory.
+          contextPackage = { status: "UNAVAILABLE", reason: "CONTEXT_HUB_UNAVAILABLE" };
+        }
+      }
+    }
+    const plan = await this.planner!.createPlan(goal, contextPackage);
     this.plannerService.activate(goalId, plan, "background-planner");
   }
 

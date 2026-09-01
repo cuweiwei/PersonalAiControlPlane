@@ -12,6 +12,7 @@ import { TaskEngine } from "./task-engine.ts";
 import { WorkerChannelService } from "./worker-channel.ts";
 import { attachWorkerWebSocket } from "./worker-websocket.ts";
 import type { AuditHealth } from "./audit-monitor.ts";
+import type { WorkloadRequestVerifier } from "./workload-auth.ts";
 
 const MAX_BODY_BYTES = 1_048_576;
 
@@ -29,9 +30,12 @@ type AppOptions = {
   archiveService?: ArchiveService;
   workerChannel?: WorkerChannelService;
   auditHealth?: () => AuditHealth;
+  workloadAuth?: WorkloadRequestVerifier;
 };
 
 type AppError = Error & { code?: string; retryable?: boolean; status?: number };
+
+const workloadAuthByRequest = new WeakMap<IncomingMessage, WorkloadRequestVerifier | undefined>();
 
 function requestId(req: IncomingMessage): string {
   const supplied = req.headers["x-request-id"];
@@ -89,11 +93,14 @@ function idempotencyKey(req: IncomingMessage): string {
   return value;
 }
 
-function ownerId(req: IncomingMessage, allowUnauthenticated: boolean): string {
+function ownerId(req: IncomingMessage, allowUnauthenticated: boolean, body?: unknown): string {
   if (allowUnauthenticated) {
     const supplied = req.headers["x-pai-dev-owner-id"];
     return typeof supplied === "string" && supplied.length > 0 && supplied.length <= 200 ? supplied : "local-owner";
   }
+  const workloadBody = body === undefined && ["GET", "HEAD", "OPTIONS"].includes(req.method ?? "GET") ? {} : body;
+  const workload = workloadAuthByRequest.get(req)?.verify(req, workloadBody);
+  if (workload) return workload.ownerId;
   const marker = req.headers["x-pai-verified"];
   const owner = req.headers["x-pai-owner-id"];
   const session = req.headers["x-pai-session-id"];
@@ -205,6 +212,7 @@ export function createHttpServer(options: AppOptions) {
   const schedules = options.scheduleService ?? new ScheduleService(options.db);
   const workerChannel = options.workerChannel ?? new WorkerChannelService(options.db);
   const server = createServer(async (req, response) => {
+    workloadAuthByRequest.set(req, options.workloadAuth);
     const id = requestId(req);
     response.setHeader("x-request-id", id);
     try {
@@ -285,9 +293,10 @@ export function createHttpServer(options: AppOptions) {
       }
 
       if (method === "POST" && parts.length === 3 && parts[2] === "goals") {
-        const owner = ownerId(req, options.allowUnauthenticated);
         const key = idempotencyKey(req);
-        const input = parseGoalCreateInput(await readJson(req));
+        const raw = await readJson(req);
+        const owner = ownerId(req, options.allowUnauthenticated, raw);
+        const input = parseGoalCreateInput(raw);
         const created = options.engine.createGoal(input, owner, key);
         writeJson(response, created.status, created.body, { "x-idempotent-replay": String(created.replayed) });
         return;
@@ -300,7 +309,9 @@ export function createHttpServer(options: AppOptions) {
       }
 
       if (parts.length >= 4 && parts[2] === "goals") {
-        const owner = ownerId(req, options.allowUnauthenticated);
+        const bodyOwnedMutation = method === "POST" && parts.length === 5 && (parts[4] === "cancel" || parts[4] === "retry");
+        const body = bodyOwnedMutation ? await readJson(req) : undefined;
+        const owner = ownerId(req, options.allowUnauthenticated, body);
         const goalId = parts[3];
         const goal = options.engine.getGoal(goalId);
         if (!goal || goal.ownerId !== owner) throw Object.assign(new Error("goal not found"), { status: 404, code: "GOAL_NOT_FOUND" });
@@ -351,10 +362,10 @@ export function createHttpServer(options: AppOptions) {
         return;
       }
       if (method === "POST" && parts.length === 5 && parts[2] === "approvals" && parts[4] === "decision") {
-        const owner = ownerId(req, options.allowUnauthenticated);
+        const input = await readJson(req);
+        const owner = ownerId(req, options.allowUnauthenticated, input);
         const request = options.db.one<{ goal_id: string }>("SELECT r.goal_id FROM approval_requests r JOIN goals g ON g.id = r.goal_id WHERE r.id = ? AND g.owner_id = ?", parts[3], owner);
         if (!request) throw Object.assign(new Error("approval not found"), { status: 404, code: "APPROVAL_NOT_FOUND" });
-        const input = await readJson(req);
         if (!input || typeof input !== "object" || Array.isArray(input)) throw Object.assign(new Error("decision body must be an object"), { status: 400, code: "INVALID_DECISION" });
         if (Object.keys(input).some((key) => !["decision", "approvedBounds"].includes(key))) throw Object.assign(new Error("approval decision contains an unknown field"), { status: 400, code: "INVALID_DECISION" });
         const decision = (input as Record<string, unknown>).decision;
