@@ -27,6 +27,16 @@ npm start
 
 ## Worker
 
+macOS 可直接執行一鍵安裝腳本；它會自動準備 Worker source、Node.js 22.19+、依賴與登入後常駐的 LaunchAgent：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/macos/install-worker.sh | bash
+```
+
+安裝完成後，到 Control Web → Workers 按 Approve。腳本會使用使用者層級的 Keychain 保存 credential，不需要先手動 clone repo、安裝 Node.js 或建立 `pai-worker`。若已在 repo 目錄內執行腳本，則會直接使用目前 checkout；可用第一個參數覆寫 Control Plane origin。
+
+手動啟動與診斷仍可使用：
+
 ```bash
 npm run worker:cli -- enroll --origin http://127.0.0.1:8080
 # 在 Control Web → Workers → Pending Registration 按 Approve
