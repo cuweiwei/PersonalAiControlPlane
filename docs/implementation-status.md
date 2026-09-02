@@ -13,12 +13,12 @@
 | Worker WS/runtime durability | `implemented_local` | outbound WS、local assignment/result persistence、result ack/resend 與 `test/v2-worker.test.ts` |
 | Scheduler filtering/scoring | `implemented_local` | capability/runtime/model/resource/load rules 與 core tests |
 | Artifact storage | `implemented_local` | task-scoped storage、digest、worker-authenticated upload/download 與 HTTP test |
-| Hermes callback outbox | `implemented_local` | claim、at-least-once POST、bounded retry；live Hermes delivery 未驗證 |
-| Systems health | `implemented_local` | Hermes/ContextHub checks；實際 container network 狀態未驗證 |
+| Hermes callback outbox | `live_verified` | claim、at-least-once POST、bounded retry；live Hermes callback receiver 回 `202 accepted` |
+| Systems health | `live_verified` | NAS shared network 上 Hermes/ContextHub 均回 `HEALTHY HTTP_200` |
 | Control Web | `implemented_local` | React/Vite Dashboard、Tasks、Workers、Models、Systems、Settings |
 | CI/release compose | `implemented_local` | immutable image workflow、digest-pinned compose、`/healthz`/`/readyz` |
-| Local checks | `implemented_local` | `npm run check`、strict `npm run typecheck`、13 tests、`npm run build:web` 全部通過；尚待 main CI run |
-| NAS release | `live_verified` pending | 必須另行完成 allowlist、staging validate、gateway deploy/status 與 loopback/tailnet checks |
+| Local checks | `ci_verified` | `npm run check`、strict `npm run typecheck`、13 tests、`npm run build:web` 全部通過；main CI `33618947655` 成功 |
+| NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |
 
