@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/system/v2/health.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "service", "version", "observed_at"],
+  "properties": {
+    "status": { "enum": ["ok", "degraded"] },
+    "service": { "const": "personal-ai-control-plane" },
+    "version": { "const": "2.0.0" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "checks": { "type": "object" }
+  }
+}

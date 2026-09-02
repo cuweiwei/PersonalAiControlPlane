@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/api/v2/task-create.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "title", "task_type", "instruction", "execution", "limits"],
+  "properties": {
+    "source": { "const": "hermes" },
+    "correlation_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "group_id": { "type": ["string", "null"] },
+    "parent_task_id": { "type": ["string", "null"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "task_type": { "enum": ["llm.inference", "codex", "python", "command", "generic"] },
+    "instruction": { "type": "string", "minLength": 1, "maxLength": 1000000 },
+    "context": { "type": "object" },
+    "execution": { "$ref": "#/$defs/execution" },
+    "limits": { "$ref": "#/$defs/limits" },
+    "priority": { "enum": ["low", "normal", "high", "urgent"] },
+    "input_artifact_ids": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities", "model", "resources"],
+      "properties": {
+        "capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+        "worker_id": { "type": ["string", "null"] },
+        "runtime": { "type": "string", "minLength": 1 },
+        "model": { "type": "object" },
+        "resources": { "type": "object" }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_seconds", "max_attempts"],
+      "properties": {
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "max_attempts": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

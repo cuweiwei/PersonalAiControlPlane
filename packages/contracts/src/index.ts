@@ -1,186 +1,140 @@
-export const TASK_STATES = [
-  "PENDING",
-  "ESTIMATING",
-  "WAITING_APPROVAL",
-  "READY",
-  "DISPATCHED",
-  "RUNNING",
-  "WAITING_RESOURCE",
-  "WAITING_QUOTA",
-  "WAITING_AUTH",
-  "WAITING_RECONCILIATION",
-  "CHECKPOINTED",
-  "RESUMING",
-  "VERIFYING",
-  "COMPLETED",
-  "FAILED",
-  "CANCELLED",
-] as const;
+import { createHash, randomBytes } from "node:crypto";
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export const TASK_TYPES = ["llm.inference", "codex", "python", "command", "generic"] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+export const TASK_STATES = ["QUEUED", "ASSIGNED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"] as const;
 export type TaskState = (typeof TASK_STATES)[number];
+export const TASK_PRIORITIES = ["low", "normal", "high"] as const;
+export type TaskPriority = (typeof TASK_PRIORITIES)[number];
+export const WORKER_STATES = ["ONLINE", "OFFLINE", "DISABLED"] as const;
+export type WorkerState = (typeof WORKER_STATES)[number];
 
-export const GOAL_STATES = [
-  "PENDING",
-  "PLANNING",
-  "WAITING_APPROVAL",
-  "ACTIVE",
-  "VERIFYING",
-  "COMPLETED",
-  "REJECTED",
-  "CANCELLING",
-  "CANCELLED",
-  "FAILED",
-] as const;
-export type GoalState = (typeof GOAL_STATES)[number];
-
-export type GoalSource = {
-  kind: "web" | "hermes" | "proactive" | "self-extension" | "schedule";
-  correlationId?: string;
+export type TaskModelRequirement = { name?: string; mode?: "required" | "preferred" | "any" };
+export type TaskExecution = {
+  capabilities: string[];
+  workerId?: string | null;
+  runtime?: string;
+  model?: TaskModelRequirement;
+  resources?: { minRamMb?: number; gpuRequired?: boolean };
+  workspaceId?: string;
 };
-
-export type MemoryRequirement = "required" | "preferred" | "none";
-
-export type GoalCreateInput = {
-  intent: string;
-  source: GoalSource;
-  scope?: string[];
-  constraints?: {
-    deadline?: string | null;
-    maxDurationMs?: number | null;
-    maxTokens?: number | null;
-    maxMonetaryMicros?: number;
-    allowedWorkers?: string[];
-    allowDeployment?: boolean;
-  };
-  memoryRequirement?: MemoryRequirement;
-};
-
-export type TaskEvent = {
-  type: "STATE_TRANSITION" | "EVIDENCE" | "RESULT" | "CANCEL_REQUESTED";
-  actor: string;
-  reason?: string;
-  evidence?: Record<string, unknown>;
-};
-
-export type SideEffectClass = "NONE" | "READ_ONLY" | "IDEMPOTENT_MUTATION" | "NON_IDEMPOTENT_MUTATION";
-
-export type PlanTaskInput = {
-  taskId: string;
-  type: string;
+export type CreateTaskInput = {
+  source: string;
+  correlationId?: string | null;
+  groupId?: string | null;
+  parentTaskId?: string | null;
   title: string;
-  dependsOn?: string[];
-  required: boolean;
-  sideEffectClass: SideEffectClass;
-  capabilityRequirements?: Record<string, unknown>[];
-  budget?: Record<string, unknown>;
-  sandbox?: Record<string, unknown>;
-  retryPolicy?: Record<string, unknown>;
-  verification?: Record<string, unknown>;
-  idempotencyKey?: string;
+  taskType: TaskType;
+  instruction: string;
+  context: Record<string, JsonValue>;
+  payload: Record<string, JsonValue>;
+  execution: TaskExecution;
+  limits: { timeoutSeconds: number; maxAttempts: number };
+  priority: TaskPriority;
+  inputArtifactIds: string[];
 };
 
-export type PlanInput = {
-  schemaVersion: 1;
-  goalId: string;
-  revision: number;
-  intent: string;
-  acceptanceCriteria: Array<{ id: string; description: string; verificationTaskId: string }>;
-  tasks: PlanTaskInput[];
-  assumptions?: string[];
-  context?: Record<string, unknown>;
-  estimate?: Record<string, unknown>;
-  risk?: Record<string, unknown>;
-  createdBy?: Record<string, unknown>;
-  createdAt?: string;
-};
+export type TaskEventName =
+  | "TASK_CREATED" | "TASK_ASSIGNED" | "WORKER_ACCEPTED" | "TASK_STARTED"
+  | "TASK_PROGRESS" | "TASK_LOG" | "TASK_SUCCEEDED" | "TASK_FAILED"
+  | "TASK_CANCELLED" | "TASK_REQUEUED" | "LATE_ATTEMPT_RESULT";
 
-export type GoalRecord = {
-  id: string;
-  ownerId: string;
-  source: GoalSource;
-  intent: string;
-  scope: string[];
-  constraints: NonNullable<GoalCreateInput["constraints"]>;
-  memoryRequirement: MemoryRequirement;
-  status: GoalState;
-  activePlanRevision: number | null;
-  stateVersion: number;
-  policyVersion: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ApiError = {
-  code: string;
-  message: string;
-  requestId: string;
-  retryable: boolean;
-  details?: Record<string, unknown>;
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], context: string): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) throw new Error(`${context}.${key} is not allowed`);
-  }
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length === 0) throw new Error(`${field} must be a non-empty string`);
-  return value;
+export function sha256(value: string | Uint8Array): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
-function optionalNonNegativeNumber(value: unknown, field: string): number | null | undefined {
-  if (value === undefined || value === null) return value as null | undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error(`${field} must be a non-negative finite number`);
-  }
-  return value;
+export function uuidv7(now = Date.now()): string {
+  const bytes = randomBytes(16);
+  const timestamp = BigInt(Math.max(0, Math.floor(now))) & 0xffffffffffffn;
+  bytes[0] = Number(timestamp >> 40n) & 0xff;
+  bytes[1] = Number(timestamp >> 32n) & 0xff;
+  bytes[2] = Number(timestamp >> 24n) & 0xff;
+  bytes[3] = Number(timestamp >> 16n) & 0xff;
+  bytes[4] = Number(timestamp >> 8n) & 0xff;
+  bytes[5] = Number(timestamp) & 0xff;
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function parseGoalCreateInput(value: unknown): GoalCreateInput {
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], context: string): void { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`${context}.${key} is not allowed`); }
+function stringValue(value: unknown, field: string, max = 500): string { if (typeof value !== "string" || value.trim().length === 0 || value.length > max) throw new Error(`${field} must be a non-empty string`); return value; }
+function optionalString(value: unknown, field: string): string | null | undefined { if (value === undefined || value === null) return value as null | undefined; return stringValue(value, field, 500); }
+function nonNegativeInt(value: unknown, field: string, fallback: number, maximum: number): number { if (value === undefined) return fallback; if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > maximum) throw new Error(`${field} must be a bounded non-negative integer`); return value; }
+
+export function parseCreateTaskInput(value: unknown): CreateTaskInput {
   if (!isRecord(value)) throw new Error("request body must be an object");
-  rejectUnknown(value, ["intent", "source", "scope", "constraints", "memoryRequirement"], "request");
-  if (typeof value.intent !== "string" || value.intent.trim().length === 0 || value.intent.length > 20_000) {
-    throw new Error("intent must be a non-empty string of at most 20000 characters");
+  rejectUnknown(value, ["source", "correlation_id", "group_id", "parent_task_id", "title", "task_type", "instruction", "context", "payload", "execution", "limits", "priority", "input_artifact_ids"], "request");
+  const executionRaw = value.execution;
+  if (!isRecord(executionRaw)) throw new Error("execution must be an object");
+  rejectUnknown(executionRaw, ["capabilities", "worker_id", "runtime", "model", "resources", "workspace_id"], "execution");
+  const capabilities = executionRaw.capabilities;
+  if (!Array.isArray(capabilities) || capabilities.length === 0 || capabilities.length > 20 || capabilities.some((item) => typeof item !== "string" || item.length === 0 || item.length > 100)) throw new Error("execution.capabilities is invalid");
+  const modelRaw = executionRaw.model;
+  let model: TaskModelRequirement | undefined;
+  if (modelRaw !== undefined) {
+    if (!isRecord(modelRaw)) throw new Error("execution.model is invalid");
+    rejectUnknown(modelRaw, ["name", "mode"], "execution.model");
+    model = { name: optionalString(modelRaw.name, "execution.model.name") ?? undefined, mode: (modelRaw.mode ?? "any") as TaskModelRequirement["mode"] };
+    if (!["required", "preferred", "any"].includes(model.mode ?? "")) throw new Error("execution.model.mode is invalid");
   }
-  if (!isRecord(value.source) || !["web", "hermes", "proactive", "self-extension", "schedule"].includes(value.source.kind as string)) {
-    throw new Error("source.kind is invalid");
+  const resourcesRaw = executionRaw.resources;
+  let resources: TaskExecution["resources"];
+  if (resourcesRaw !== undefined) {
+    if (!isRecord(resourcesRaw)) throw new Error("execution.resources is invalid");
+    rejectUnknown(resourcesRaw, ["min_ram_mb", "gpu_required"], "execution.resources");
+    resources = { minRamMb: nonNegativeInt(resourcesRaw.min_ram_mb, "execution.resources.min_ram_mb", 0, 1_048_576), gpuRequired: resourcesRaw.gpu_required === true };
   }
-  rejectUnknown(value.source, ["kind", "correlationId"], "source");
-  const source: GoalSource = { kind: value.source.kind as GoalSource["kind"] };
-  const correlationId = optionalString(value.source.correlationId, "source.correlationId");
-  if (correlationId !== undefined) source.correlationId = correlationId;
-  const scope = value.scope === undefined ? [] : value.scope;
-  if (!Array.isArray(scope) || scope.length > 50 || scope.some((item) => typeof item !== "string" || item.length === 0 || item.length > 200)) {
-    throw new Error("scope must be an array of at most 50 non-empty strings");
-  }
-  const rawConstraints = value.constraints === undefined ? {} : value.constraints;
-  if (!isRecord(rawConstraints)) throw new Error("constraints must be an object");
-  rejectUnknown(rawConstraints, ["deadline", "maxDurationMs", "maxTokens", "maxMonetaryMicros", "allowedWorkers", "allowDeployment"], "constraints");
-  const constraints = {
-    deadline: rawConstraints.deadline === undefined || rawConstraints.deadline === null
-      ? null
-      : optionalString(rawConstraints.deadline, "constraints.deadline") ?? null,
-    maxDurationMs: optionalNonNegativeNumber(rawConstraints.maxDurationMs, "constraints.maxDurationMs") ?? null,
-    maxTokens: optionalNonNegativeNumber(rawConstraints.maxTokens, "constraints.maxTokens") ?? null,
-    maxMonetaryMicros: optionalNonNegativeNumber(rawConstraints.maxMonetaryMicros, "constraints.maxMonetaryMicros") ?? 0,
-    allowedWorkers: rawConstraints.allowedWorkers === undefined ? [] : rawConstraints.allowedWorkers,
-    allowDeployment: rawConstraints.allowDeployment === true,
+  const limitsRaw = value.limits;
+  if (!isRecord(limitsRaw)) throw new Error("limits must be an object");
+  rejectUnknown(limitsRaw, ["timeout_seconds", "max_attempts"], "limits");
+  const timeoutSeconds = nonNegativeInt(limitsRaw.timeout_seconds, "limits.timeout_seconds", 1800, 86_400);
+  if (timeoutSeconds < 1) throw new Error("limits.timeout_seconds must be positive");
+  const maxAttempts = nonNegativeInt(limitsRaw.max_attempts, "limits.max_attempts", 2, 10);
+  if (maxAttempts < 1) throw new Error("limits.max_attempts must be positive");
+  const priority = (value.priority ?? "normal") as TaskPriority;
+  if (!TASK_PRIORITIES.includes(priority)) throw new Error("priority is invalid");
+  const taskType = value.task_type as TaskType;
+  if (!TASK_TYPES.includes(taskType)) throw new Error("task_type is invalid");
+  const context = value.context ?? {};
+  const payload = value.payload ?? {};
+  if (!isRecord(context) || !isRecord(payload)) throw new Error("context and payload must be objects");
+  const inputArtifactIds = value.input_artifact_ids ?? [];
+  if (!Array.isArray(inputArtifactIds) || inputArtifactIds.some((item) => typeof item !== "string")) throw new Error("input_artifact_ids is invalid");
+  return {
+    source: stringValue(value.source ?? "hermes", "source"),
+    correlationId: optionalString(value.correlation_id, "correlation_id"),
+    groupId: optionalString(value.group_id, "group_id"),
+    parentTaskId: optionalString(value.parent_task_id, "parent_task_id"),
+    title: stringValue(value.title, "title", 1_000),
+    taskType,
+    instruction: stringValue(value.instruction, "instruction", 100_000),
+    context: context as Record<string, JsonValue>,
+    payload: payload as Record<string, JsonValue>,
+    execution: { capabilities: [...capabilities] as string[], workerId: optionalString(executionRaw.worker_id, "execution.worker_id"), runtime: optionalString(executionRaw.runtime, "execution.runtime") ?? "auto", model, resources, workspaceId: optionalString(executionRaw.workspace_id, "execution.workspace_id") ?? undefined },
+    limits: { timeoutSeconds, maxAttempts },
+    priority,
+    inputArtifactIds,
   };
-  if (!Array.isArray(constraints.allowedWorkers) || constraints.allowedWorkers.length > 20 || constraints.allowedWorkers.some((item) => typeof item !== "string")) {
-    throw new Error("constraints.allowedWorkers must be an array of at most 20 strings");
-  }
-  const memoryRequirement = value.memoryRequirement ?? "preferred";
-  if (!["required", "preferred", "none"].includes(memoryRequirement as string)) {
-    throw new Error("memoryRequirement is invalid");
-  }
-  return { intent: value.intent, source, scope, constraints, memoryRequirement: memoryRequirement as MemoryRequirement };
 }
 
-export function parseTaskState(value: unknown): TaskState {
-  if (typeof value !== "string" || !(TASK_STATES as readonly string[]).includes(value)) throw new Error("invalid task state");
-  return value as TaskState;
+export function parseRegistrationInput(value: unknown): { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; hardware: Record<string, JsonValue>; capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] } {
+  if (!isRecord(value)) throw new Error("request body must be an object");
+  rejectUnknown(value, ["name", "registration_secret", "platform", "hostname", "agent_version", "hardware", "capabilities", "models"], "request");
+  const hardware = value.hardware ?? {};
+  if (!isRecord(hardware)) throw new Error("hardware must be an object");
+  return { name: stringValue(value.name, "name", 200), registrationSecret: stringValue(value.registration_secret, "registration_secret", 500), platform: stringValue(value.platform, "platform", 80), hostname: optionalString(value.hostname, "hostname") ?? undefined, agentVersion: optionalString(value.agent_version, "agent_version") ?? undefined, hardware: hardware as Record<string, JsonValue>, capabilities: Array.isArray(value.capabilities) ? value.capabilities as Record<string, JsonValue>[] : undefined, models: Array.isArray(value.models) ? value.models as Record<string, JsonValue>[] : undefined };
 }
+
+export const priorityNumber: Record<TaskPriority, number> = { low: 20, normal: 50, high: 80 };

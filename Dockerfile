@@ -18,9 +18,10 @@ COPY scripts ./scripts
 COPY --from=web-build /app/dist/control-web ./dist/control-web
 
 ENV NODE_ENV=production
-ENV PAI_CONTROL_WEB_PORT=8080
-ENV PAI_IDENTITY_PORT=9084
-ENV PAI_PORT=9085
+ENV PAI_PORT=8080
+ENV PAI_LISTEN_ADDRESS=0.0.0.0
+ENV PAI_DATA_DIR=/data
+ENV PAI_ARTIFACT_DIR=/data/artifacts
 USER node
-EXPOSE 8080 8081 9084 9085
+EXPOSE 8080
 CMD ["node", "--experimental-strip-types", "apps/control-plane/src/index.ts"]

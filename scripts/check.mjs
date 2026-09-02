@@ -5,60 +5,30 @@ const root = resolve(new URL("..", import.meta.url).pathname);
 const required = [
   "package.json",
   "tsconfig.json",
-  "apps/control-plane/src/index.ts",
-  "apps/control-plane/src/control-web-server.ts",
-  "apps/orchestrator/src/db.ts",
-  "apps/orchestrator/src/task-engine.ts",
-  "apps/orchestrator/src/http.ts",
-  "apps/orchestrator/src/audit-monitor.ts",
-  "apps/orchestrator/src/workload-auth.ts",
-  "apps/orchestrator/src/outbox.ts",
-  "apps/orchestrator/src/plan-service.ts",
-  "apps/orchestrator/src/runtime.ts",
-  "apps/orchestrator/src/worker-execution.ts",
-  "apps/identity-gateway/src/db.ts",
-  "apps/identity-gateway/src/service.ts",
-  "apps/identity-gateway/src/http.ts",
-  "apps/identity-gateway/src/grants.ts",
-  "packages/contracts/src/index.ts",
-  "packages/crypto/src/index.ts",
-  "packages/policy/src/index.ts",
-  "packages/identity/src/index.ts",
-  "packages/scheduler/src/index.ts",
-  "packages/worker/src/index.ts",
-  "apps/worker/src/db.ts",
-  "apps/worker/src/runtime.ts",
-  "apps/worker/src/transport.ts",
-  "apps/worker/src/bootstrap.ts",
-  "apps/worker/src/daemon.ts",
-  "apps/worker/src/cli.ts",
-  "apps/worker/src/service.ts",
-  "apps/worker/src/codex-adapter.ts",
-  "packaging/macos/dev.aihome.personal-ai-worker.plist",
-  "packaging/macos/install-worker.sh",
-  "packaging/windows/install-worker.ps1",
-  "apps/orchestrator/src/worker-channel.ts",
-  "apps/orchestrator/src/worker-websocket.ts",
-  "apps/orchestrator/src/reconciliation.ts",
-  "apps/orchestrator/src/approval-service.ts",
-  "apps/orchestrator/src/lease-service.ts",
-  "apps/archive/src/db.ts",
-  "apps/archive/src/service.ts",
-  "apps/archive/src/runtime.ts",
-  "packages/artifacts/src/index.ts",
-  "packages/credentials/src/index.ts",
-  "packages/adapters/src/index.ts",
-  "packages/adapters/src/context-hub-http.ts",
-  "apps/orchestrator/src/proactive.ts",
-  "apps/orchestrator/src/schedule-service.ts",
-  "packages/config/src/index.ts",
-  "packages/observability/src/index.ts",
-  "packages/checkpoints/src/index.ts",
-  "packages/backup/src/index.ts",
-  "packages/compute/src/index.ts",
   "Dockerfile",
   "compose.prod.yml",
   ".github/workflows/ci.yml",
+  "apps/control-plane/src/index.ts",
+  "apps/control-plane/src/server.ts",
+  "apps/control-plane/src/db/database.ts",
+  "apps/control-plane/src/tasks/task-service.ts",
+  "apps/control-plane/src/tasks/task-state-machine.ts",
+  "apps/control-plane/src/scheduler/scheduler.ts",
+  "apps/control-plane/src/workers/worker-service.ts",
+  "apps/control-plane/src/workers/worker-channel.ts",
+  "apps/control-plane/src/callbacks/outbox.ts",
+  "apps/control-plane/src/systems/health-monitor.ts",
+  "apps/worker/src/cli.ts",
+  "apps/worker/src/service.ts",
+  "apps/worker/src/enrollment.ts",
+  "apps/worker/src/runtime.ts",
+  "apps/worker/src/transport.ts",
+  "apps/worker/src/local-db.ts",
+  "packages/contracts/src/index.ts",
+  "packages/worker/src/index.ts",
+  "packaging/macos/com.personal-ai.worker.plist",
+  "packaging/macos/install-worker.sh",
+  "packaging/windows/install-worker.ps1",
   "apps/control-web/index.html",
   "apps/control-web/src/app.ts",
   "apps/control-web/src/main.ts",
@@ -66,10 +36,10 @@ const required = [
   "apps/control-web/vite.config.ts",
   "scripts/release-artifact.mjs",
   "docs/implementation-status.md",
-  "schemas/api/v1/goal-create.schema.json",
-  "schemas/plan/v1/plan.schema.json",
-  "schemas/worker/v1/envelope.schema.json",
-  "schemas/worker/v1/channel.schema.json",
+  "schemas/api/v2/task-create.schema.json",
+  "schemas/worker/v2/message.schema.json",
+  "schemas/system/v2/health.schema.json",
+  "schemas/release/v1/release-manifest.schema.json",
 ];
 for (const relative of required) {
   if (!existsSync(resolve(root, relative))) throw new Error(`missing required file: ${relative}`);
@@ -77,17 +47,29 @@ for (const relative of required) {
 
 const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 if (packageJson.name !== "personal-ai-control-plane") throw new Error("unexpected package name");
-if (!packageJson.scripts?.test || !packageJson.scripts?.start || !packageJson.scripts?.["build:web"] || !packageJson.scripts?.typecheck) throw new Error("required scripts are missing");
+for (const script of ["test", "start", "build:web", "typecheck"]) {
+  if (!packageJson.scripts?.[script]) throw new Error(`required script is missing: ${script}`);
+}
+
+const forbidden = /(WebAuthn|Passkey|ActionGrant|WorkloadIdentity|CredentialLease|JWS|GoalPlanner|Replanner|ConversationArchive)/i;
+const sourceFiles = [
+  "apps/control-plane/src/index.ts",
+  "apps/control-plane/src/server.ts",
+  "apps/control-web/src/app.ts",
+  "apps/worker/src/service.ts",
+  "apps/worker/src/runtime.ts",
+  "apps/worker/src/transport.ts",
+  "packages/contracts/src/index.ts",
+  "packages/worker/src/index.ts",
+];
+for (const relative of sourceFiles) {
+  if (forbidden.test(readFileSync(resolve(root, relative), "utf8"))) throw new Error(`v1 identity/planning concept remains in ${relative}`);
+}
 
 const schemas = [
-  "schemas/api/v1/goal-create.schema.json",
-  "schemas/api/v1/goal-response.schema.json",
-  "schemas/plan/v1/plan.schema.json",
-  "schemas/worker/v1/envelope.schema.json",
-  "schemas/worker/v1/channel.schema.json",
-  "schemas/config/v1/system.schema.json",
-  "schemas/identity/v1/action-grant.schema.json",
-  "schemas/archive/v1/envelope.schema.json",
+  "schemas/api/v2/task-create.schema.json",
+  "schemas/worker/v2/message.schema.json",
+  "schemas/system/v2/health.schema.json",
   "schemas/release/v1/release-manifest.schema.json",
 ];
 for (const relative of schemas) {
@@ -95,4 +77,4 @@ for (const relative of schemas) {
   if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") throw new Error(`${relative} must declare JSON Schema 2020-12`);
 }
 
-console.log(`checked ${required.length} implementation files and ${schemas.length} canonical schemas`);
+console.log(`checked ${required.length} implementation files, ${sourceFiles.length} v2 source files, and ${schemas.length} canonical schemas`);

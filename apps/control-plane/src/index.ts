@@ -1,136 +1,56 @@
+import { join } from "node:path";
 import type { Server } from "node:http";
-import { ArchiveDatabase } from "../../archive/src/db.ts";
-import { ArchiveBackgroundRuntime } from "../../archive/src/runtime.ts";
-import { ArchiveService } from "../../archive/src/service.ts";
-import { IdentityDatabase } from "../../identity-gateway/src/db.ts";
-import { createIdentityHttpServer } from "../../identity-gateway/src/http.ts";
-import { IdentityService } from "../../identity-gateway/src/service.ts";
-import { PasskeyRpAdapter } from "../../identity-gateway/src/webauthn.ts";
-import { OrchestratorDatabase } from "../../orchestrator/src/db.ts";
-import { createHttpServer } from "../../orchestrator/src/http.ts";
-import { ProcessLock } from "../../orchestrator/src/process-lock.ts";
-import { OrchestratorRuntime } from "../../orchestrator/src/runtime.ts";
-import { TaskEngine } from "../../orchestrator/src/task-engine.ts";
-import { WorkerChannelService } from "../../orchestrator/src/worker-channel.ts";
-import { closeWorkerWebSocket } from "../../orchestrator/src/worker-websocket.ts";
-import { AuditIntegrityMonitor } from "../../orchestrator/src/audit-monitor.ts";
-import { allowHermesWorkloadOperation, WorkloadRequestVerifier } from "../../orchestrator/src/workload-auth.ts";
-import { ContentAddressedArtifactStore } from "../../../packages/artifacts/src/index.ts";
-import { ContextHubHttpAdapter } from "../../../packages/adapters/src/context-hub-http.ts";
-import { createControlWebServer } from "./control-web-server.ts";
-import { closePrivateEdgeConnections, createPrivateEdgeServer } from "./private-edge.ts";
+import { ControlPlaneDatabase } from "./db/database.ts";
+import { EventHub } from "./events/event-hub.ts";
+import { ArtifactStorage } from "./artifacts/artifact-storage.ts";
+import { TaskService } from "./tasks/task-service.ts";
+import { WorkerService } from "./workers/worker-service.ts";
+import { WorkerCoordinator } from "./workers/worker-channel.ts";
+import { ResourceScheduler } from "./scheduler/scheduler.ts";
+import { HermesCallbackDispatcher } from "./callbacks/outbox.ts";
+import { SettingsService } from "./settings/settings-service.ts";
+import { HealthMonitor } from "./systems/health-monitor.ts";
+import { createControlPlaneServer } from "./server.ts";
 
-function port(name: string, fallback: string): number {
-  const value = Number.parseInt(process.env[name] ?? fallback, 10);
-  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new Error(`${name} must be a valid TCP port`);
-  return value;
-}
+function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
+function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 
-function durationMs(name: string, fallback: string): number {
-  const value = Number.parseInt(process.env[name] ?? fallback, 10);
-  if (!Number.isInteger(value) || value < 10_000 || value > 86_400_000) throw new Error(`${name} must be a valid duration in milliseconds`);
-  return value;
-}
+const dataDir = process.env.PAI_DATA_DIR ?? "./data";
+const artifactRoot = process.env.PAI_ARTIFACT_DIR ?? join(dataDir, "artifacts");
+const port = numberEnv("PAI_PORT", 8080, 1, 65535);
+const bindAddress = process.env.PAI_LISTEN_ADDRESS ?? (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
+const events = new EventHub();
+const db = new ControlPlaneDatabase(join(dataDir, "controlplane.db"));
+const artifacts = new ArtifactStorage(artifactRoot);
+const tasks = new TaskService(db, events);
+const workers = new WorkerService(db, events);
+const coordinator = new WorkerCoordinator(workers, tasks, events);
+const scheduler = new ResourceScheduler(db, tasks, workers, coordinator, events);
+const callback = new HermesCallbackDispatcher(db);
+const settings = new SettingsService(db);
+const health = new HealthMonitor(db, events);
+health.seed();
 
-function close(server: Server): Promise<void> {
-  return new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
-}
-
-const controlWebPort = port("PAI_CONTROL_WEB_PORT", "8080");
-const identityPort = port("PAI_IDENTITY_PORT", "9084");
-const orchestratorPort = port("PAI_PORT", "9085");
-const edgePort = port("PAI_EDGE_PORT", "8081");
-if (new Set([controlWebPort, identityPort, orchestratorPort]).size !== 3) throw new Error("Control Web, Identity, and Orchestrator ports must be distinct");
-if ([controlWebPort, identityPort, orchestratorPort].includes(edgePort)) throw new Error("Private edge port must be distinct from internal service ports");
-
-const bindHost = process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1";
-const internalBindHost = "127.0.0.1";
-const compatibilityProfile = process.env.PAI_OPERATIONAL_PROFILE === "compatibility";
-const allowUnauthenticated = process.env.NODE_ENV !== "production" && process.env.PAI_DEV_ALLOW_UNAUTHENTICATED !== "false";
-const auditVerificationIntervalMs = durationMs("PAI_AUDIT_VERIFY_INTERVAL_MS", String(5 * 60_000));
-
-function optionalWorkloadVerifier(): WorkloadRequestVerifier | undefined {
-  const workloadId = process.env.PAI_HERMES_WORKLOAD_ID;
-  const ownerId = process.env.PAI_HERMES_WORKLOAD_OWNER_ID;
-  const subject = process.env.PAI_HERMES_WORKLOAD_SUBJECT ?? "hermes-agent";
-  const publicKeyPem = process.env.PAI_HERMES_WORKLOAD_PUBLIC_KEY?.replaceAll("\\n", "\n");
-  if (!workloadId && !ownerId && !publicKeyPem) return undefined;
-  if (!workloadId || !ownerId || !publicKeyPem) throw new Error("PAI_HERMES_WORKLOAD_ID, PAI_HERMES_WORKLOAD_OWNER_ID, and PAI_HERMES_WORKLOAD_PUBLIC_KEY must be configured together");
-  return new WorkloadRequestVerifier({ workloadId, ownerId, subject, publicKeyPem }, Date.now, allowHermesWorkloadOperation);
-}
-
-const identityDbPath = process.env.PAI_IDENTITY_DB_PATH ?? "./data/identity.db";
-const identityDb = new IdentityDatabase(identityDbPath);
-const identity = new IdentityService(identityDb);
-const canonicalOrigin = process.env.PAI_CANONICAL_ORIGIN;
-const rpId = process.env.PAI_WEBAUTHN_RP_ID;
-const passkeyConfigured = canonicalOrigin !== undefined && rpId !== undefined;
-const passkeyAdapter = passkeyConfigured && canonicalOrigin && rpId
-  ? new PasskeyRpAdapter({ db: identityDb, identity, rpName: process.env.PAI_WEBAUTHN_RP_NAME ?? "Personal AI Control Plane", rpId, expectedOrigin: canonicalOrigin, bootstrapToken: process.env.PAI_BOOTSTRAP_TOKEN })
-  : undefined;
-const identityServer = createIdentityHttpServer({ db: identityDb, identity, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined, passkeyAdapter, canonicalOrigin, actionGrantRequired: !compatibilityProfile });
-
-const orchestratorDbPath = process.env.PAI_ORCHESTRATOR_DB_PATH ?? "./data/orchestrator.db";
-const archiveDbPath = process.env.PAI_CONVERSATION_DB_PATH ?? "./data/conversation.db";
-const artifactRoot = process.env.PAI_ARTIFACT_ROOT ?? "./data/artifacts";
-const lockPath = process.env.PAI_ORCHESTRATOR_LOCK_PATH ?? "./data/orchestrator.lock";
-const lock = new ProcessLock(lockPath);
-lock.acquire();
-const orchestratorDb = new OrchestratorDatabase(orchestratorDbPath);
-const archiveDb = new ArchiveDatabase(archiveDbPath);
-const artifactStore = new ContentAddressedArtifactStore(artifactRoot);
-const engine = new TaskEngine(orchestratorDb);
-const auditMonitor = new AuditIntegrityMonitor(orchestratorDb, engine, auditVerificationIntervalMs);
-auditMonitor.start();
-const workloadAuth = optionalWorkloadVerifier();
-const contextHubAdapter = process.env.PAI_CONTEXT_HUB_ADAPTER_ENABLED === "true"
-  ? new ContextHubHttpAdapter({ origin: process.env.PAI_CONTEXT_HUB_API_ORIGIN ?? process.env.PAI_MEMORY_ORIGIN ?? "", apiKey: process.env.PAI_CONTEXT_HUB_API_KEY ?? "" })
-  : undefined;
-const runtime = new OrchestratorRuntime(orchestratorDb, engine, { scheduleOwnerId: process.env.PAI_SCHEDULE_OWNER_ID, contextHub: contextHubAdapter });
-runtime.start();
-const workerChannel = new WorkerChannelService(orchestratorDb);
-const archiveService = new ArchiveService(archiveDb, Date.now, (digests) => {
-  const removable = digests.filter((digest) => !orchestratorDb.one("SELECT 1 AS value FROM artifact_references WHERE artifact_hash = ? AND released_at IS NULL", digest) && !archiveDb.one("SELECT 1 AS value FROM artifact_references WHERE artifact_hash = ? AND released_at IS NULL", digest));
-  const removed = artifactStore.sweep(removable, 0);
-  return { removed, remaining: digests.filter((digest) => artifactStore.has(digest)) };
-});
-const archiveRuntime = new ArchiveBackgroundRuntime(archiveDb, archiveService, artifactStore);
-archiveRuntime.start();
-const identityHealthUrl = process.env.PAI_IDENTITY_HEALTH_URL ?? `http://127.0.0.1:${identityPort}/health/ready`;
-const identityReadyProbe = allowUnauthenticated
-  ? undefined
-  : async () => { const response = await fetch(identityHealthUrl, { signal: AbortSignal.timeout(1_500) }); return response.ok; };
-const orchestratorServer = createHttpServer({ db: orchestratorDb, engine, allowUnauthenticated, identityReady: allowUnauthenticated, identityReadyProbe, runtimeReady: () => allowUnauthenticated || runtime.isReady(), runtimeRequired: !compatibilityProfile, archiveService, workerChannel, auditHealth: () => auditMonitor.health(), workloadAuth });
-const controlWebServer = createControlWebServer();
-const privateEdgeServer = createPrivateEdgeServer({
-  identityOrigin: `http://127.0.0.1:${identityPort}`,
-  orchestratorOrigin: `http://127.0.0.1:${orchestratorPort}`,
-  controlWebOrigin: `http://127.0.0.1:${controlWebPort}`,
-  memoryOrigin: process.env.PAI_MEMORY_ORIGIN,
-  publicProto: process.env.NODE_ENV === "production" ? "https" : "http",
+let schedulerAlive = true;
+let coordinatorAlive = true;
+let databaseReady = db.isWritable();
+let artifactReady = artifacts.isWritable();
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+server.on("upgrade", (request, socket, head) => {
+  const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+  if (pathname !== "/worker/ws") { socket.destroy(); return; }
+  coordinator.handleUpgrade(request, socket, head);
 });
 
-identityServer.listen(identityPort, internalBindHost, () => console.log(JSON.stringify({ event: "identity.started", port: identityPort, dbPath: identityDbPath, bindHost: internalBindHost, passkeyConfigured, passkeyAdapterReady: passkeyAdapter !== undefined })));
-orchestratorServer.listen(orchestratorPort, internalBindHost, () => console.log(JSON.stringify({ event: "orchestrator.started", port: orchestratorPort, dbPath: orchestratorDbPath, archiveDbPath, artifactRoot, bindHost: internalBindHost, authMode: allowUnauthenticated ? "development" : "identity-gateway", runtimeReady: runtime.isReady() })));
-controlWebServer.listen(controlWebPort, internalBindHost, () => console.log(JSON.stringify({ event: "control-web.started", port: controlWebPort, bindHost: internalBindHost })));
-privateEdgeServer.listen(edgePort, bindHost, () => console.log(JSON.stringify({ event: "private-edge.started", port: edgePort, bindHost })));
+const schedulerTimer = setInterval(() => { try { scheduler.tick(); scheduler.expireTasks(); schedulerAlive = true; } catch (error) { schedulerAlive = false; console.error(JSON.stringify({ event: "scheduler.error", message: error instanceof Error ? error.message : "SCHEDULER_FAILED" })); } }, numberEnv("PAI_SCHEDULER_INTERVAL_MS", 1_000, 100, 60_000));
+const staleTimer = setInterval(() => { try { scheduler.staleSweep(Date.now(), numberEnv("PAI_WORKER_OFFLINE_SECONDS", 90, 10, 86_400) * 1_000); } catch (error) { console.error(JSON.stringify({ event: "worker.stale_sweep_error", message: error instanceof Error ? error.message : "STALE_SWEEP_FAILED" })); } }, 15_000);
+const healthTimer = setInterval(() => { void health.checkOnce().catch((error) => console.error(JSON.stringify({ event: "system.health_error", message: error instanceof Error ? error.message : "HEALTH_CHECK_FAILED" }))); }, numberEnv("PAI_SYSTEM_HEALTH_INTERVAL_SECONDS", 30, 10, 86_400) * 1_000);
+const callbackTimer = setInterval(() => { void callback.dispatchOnce().catch((error) => console.error(JSON.stringify({ event: "hermes.callback_error", message: error instanceof Error ? error.message : "CALLBACK_FAILED" }))); }, 2_000);
+const readinessTimer = setInterval(() => { databaseReady = db.isWritable(); artifactReady = artifacts.isWritable(); }, 15_000);
 
-let shuttingDown = false;
-const shutdown = async () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  runtime.stop();
-  workerChannel.close();
-  archiveRuntime.stop();
-  auditMonitor.stop();
-  closePrivateEdgeConnections(privateEdgeServer);
-  await closeWorkerWebSocket(orchestratorServer);
-  await Promise.all([close(privateEdgeServer), close(controlWebServer), close(orchestratorServer), close(identityServer)]);
-  orchestratorDb.close();
-  archiveDb.close();
-  identityDb.close();
-  lock.release();
-};
-const handleSignal = () => { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); };
-process.once("SIGINT", handleSignal);
-process.once("SIGTERM", handleSignal);
+server.listen(port, bindAddress, () => console.log(JSON.stringify({ event: "control-plane.started", version: "2.0.0", port, bindAddress, dataDir, artifactRoot })));
+
+let stopping = false;
+async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); coordinator.close(); await close(server); db.close(); }
+function signal(): void { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); }
+process.once("SIGINT", signal); process.once("SIGTERM", signal);

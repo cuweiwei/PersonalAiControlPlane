@@ -1,4 +1,4 @@
-import { OutboundWorkerRuntime, type WorkerCapabilityAdapter } from "./runtime.ts";
+import { OutboundWorkerRuntime } from "./runtime.ts";
 
 export type WorkerDaemonOptions = { runtime?: OutboundWorkerRuntime; createRuntime?: () => Promise<OutboundWorkerRuntime | undefined>; beforePoll?: () => Promise<boolean | void>; isTerminal?: () => boolean; pollIntervalMs?: number; heartbeatIntervalMs?: number; onError?: (error: unknown) => void };
 
@@ -31,6 +31,7 @@ export class WorkerDaemon {
         const created = await this.options.createRuntime();
         if (!this.running) { created?.close(); return; }
         this.runtime = created;
+        if (this.runtime) await this.runtime.connect();
       }
       if (!this.runtime) {
         if (this.running) this.timer = setTimeout(() => void this.tick(), this.pollIntervalMs);
@@ -45,11 +46,13 @@ export class WorkerDaemon {
       await this.runtime.pollOnce();
       const now = Date.now();
       if (now - this.heartbeatAt >= this.heartbeatIntervalMs) { await this.runtime.heartbeat(); this.heartbeatAt = now; }
-    } catch (error) { if (this.running) this.options.onError?.(error); }
+    } catch (error) {
+      if (error instanceof Error && (error.name === "WorkerTransportError" || error.message.includes("worker WebSocket") || error.message.includes("WORKER_"))) {
+        this.runtime?.close();
+        this.runtime = undefined;
+      }
+      if (this.running) this.options.onError?.(error);
+    }
     if (this.running) this.timer = setTimeout(() => void this.tick(), this.pollIntervalMs);
   }
-}
-
-export function unavailableCodexAdapter(descriptor: WorkerCapabilityAdapter["descriptor"], capabilityId = "codex.execute"): WorkerCapabilityAdapter {
-  return { capabilityId, descriptor, async probe() { return "UNHEALTHY"; }, async execute() { return { outcome: "FAILED", result: { code: "CODEX_ADAPTER_NOT_CONFIGURED" } }; } };
 }

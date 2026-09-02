@@ -1,162 +1,57 @@
-import { canonicalJson, sha256, uuidv7, type JsonValue } from "../../../packages/crypto/src/index.ts";
-import { verifyActionGrant, type ActionGrantVerificationKey } from "../../../packages/identity/src/index.ts";
-import { signWorkerEnvelopeWithSigner, validateJobOffer, type CapabilityDescriptor, type WorkerEnvelope, type WorkerHeartbeatReport } from "../../../packages/worker/src/index.ts";
-import { WorkerDatabase } from "./db.ts";
+import type { JsonValue } from "../../../packages/contracts/src/index.ts";
+import { WorkerLocalDatabase } from "./local-db.ts";
 
-export type WorkerJobOffer = {
-  workerId: string;
-  capabilityId: string;
-  capabilityDescriptorHash: string;
-  attemptId: string;
-  taskId: string;
-  planDigest: string;
-  policyVersion: number;
-  fencingToken: number;
-  leaseId: string;
-  requiredAction: string;
-  resources: string[];
-  budget: Record<string, JsonValue>;
-  sandbox: Record<string, JsonValue>;
-  hardStopApprovalId: string | null;
-  actionGrant: string;
-  input: Record<string, JsonValue>;
-};
-
-export type WorkerCapabilityAdapter = {
-  capabilityId: string;
-  descriptor: CapabilityDescriptor;
-  probe(): Promise<"HEALTHY" | "DEGRADED" | "UNHEALTHY">;
-  execute(job: WorkerJobOffer): Promise<{ outcome: "COMPLETED" | "FAILED"; result: Record<string, JsonValue>; checkpoint?: Record<string, JsonValue> }>;
-};
-
-export type OutboundWorkerTransport = {
-  poll(): Promise<WorkerJobOffer[]>;
-  send(frame: WorkerEnvelope): Promise<void>;
-  transportMode?: () => "WSS" | "HTTP_FALLBACK";
-  close?: () => void;
-};
-
-export type WorkerRuntimeOptions = {
-  workerId: string;
-  connectionId: string;
-  db: WorkerDatabase;
-  transport: OutboundWorkerTransport;
-  adapter: WorkerCapabilityAdapter;
-  resolveGrantKey(kid: string): ActionGrantVerificationKey | undefined;
-  signFrame(payload: Buffer): Buffer | Promise<Buffer>;
-  statusReport?: () => Promise<Partial<WorkerHeartbeatReport>> | Partial<WorkerHeartbeatReport>;
-  clock?: () => number;
-};
+export type WorkerTaskOffer = { task_id: string; attempt_id: string; task_type: string; title?: string; instruction: string; context?: Record<string, JsonValue>; payload?: Record<string, JsonValue>; execution?: Record<string, JsonValue>; limits?: Record<string, JsonValue>; input_artifact_ids?: string[] };
+export type ExecutionEvent = { type: "progress" | "log" | "result" | "artifact"; progress?: Record<string, JsonValue>; log?: Record<string, JsonValue>; result?: Record<string, JsonValue>; metrics?: Record<string, JsonValue>; artifact?: Record<string, JsonValue> };
+export type WorkerExecutor = { type: string; discover?(): Promise<{ capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] }>; canExecute(task: WorkerTaskOffer): boolean; execute(task: WorkerTaskOffer, context: { emit(event: ExecutionEvent): Promise<void> }): AsyncIterable<ExecutionEvent>; cancel?(attemptId: string): Promise<void> };
+export type WorkerTransport = { connect?(onMessage: (message: Record<string, any>) => void): Promise<void>; send(message: Record<string, any>): Promise<void> | void; close?(): void; connected?(): boolean; poll?(): Promise<WorkerTaskOffer[]> };
+export type WorkerRuntimeOptions = { workerId: string; db: WorkerLocalDatabase; transport: WorkerTransport; executors: WorkerExecutor[]; clock?: () => number; report?: () => Record<string, JsonValue> };
 
 export class OutboundWorkerRuntime {
-  private readonly options: WorkerRuntimeOptions;
+  readonly workerId: string;
+  readonly db: WorkerLocalDatabase;
+  private readonly transport: WorkerTransport;
+  private readonly executors: WorkerExecutor[];
   private readonly clock: () => number;
-  constructor(options: WorkerRuntimeOptions) { this.options = options; this.clock = options.clock ?? Date.now; }
+  private readonly report?: () => Record<string, JsonValue>;
+  private readonly running = new Map<string, WorkerExecutor>();
 
-  async pollOnce(): Promise<number> {
-    const offers = await this.options.transport.poll();
-    for (const offer of offers) await this.processOffer(offer);
-    return offers.length;
-  }
-
-  async heartbeat(): Promise<void> {
-    const health = await this.options.adapter.probe();
-    const extra = await this.options.statusReport?.() ?? {};
-    await this.send("worker.heartbeat", {
-      ...extra,
-      health: extra.health ?? health,
-      capabilityId: extra.capabilityId ?? this.options.adapter.capabilityId,
-      capabilityDescriptorHash: extra.capabilityDescriptorHash ?? this.options.adapter.descriptor.descriptorHash,
-      transport: extra.transport ?? this.options.transport.transportMode?.() ?? "HTTP_FALLBACK",
-    });
-  }
-
-  close(): void { this.options.transport.close?.(); }
-
-  private async processOffer(offer: WorkerJobOffer): Promise<void> {
-    if (offer.workerId !== this.options.workerId) return this.reject(offer, "WORKER_MISMATCH");
-    const existing = this.options.db.connection.prepare("SELECT offer_digest, state, result_json FROM accepted_jobs WHERE attempt_id = ?").get(offer.attemptId) as { offer_digest: string; state: string; result_json: string | null } | undefined;
-    const offerDigest = sha256(canonicalJson(offer as unknown as JsonValue));
-    if (existing) {
-      if (existing.offer_digest !== offerDigest) return this.reject(offer, "OFFER_REPLAY_CONFLICT");
-      if (existing.result_json) await this.send("job.result", JSON.parse(existing.result_json));
-      return;
-    }
-    if (offer.capabilityId !== this.options.adapter.capabilityId || offer.capabilityDescriptorHash !== this.options.adapter.descriptor.descriptorHash) return this.reject(offer, "CAPABILITY_MISMATCH");
-    if (await this.options.adapter.probe() !== "HEALTHY") return this.reject(offer, "CAPABILITY_UNHEALTHY");
-    const grant = verifyActionGrant(offer.actionGrant, {
-      issuer: "pai-identity-gateway",
-      audience: `pai-worker:${this.options.workerId}`,
-      taskId: offer.taskId,
-      attemptId: offer.attemptId,
-      planDigest: offer.planDigest,
-      policyVersion: offer.policyVersion,
-      fencingToken: offer.fencingToken,
-      allowedActions: [offer.requiredAction],
-      allowedResources: offer.resources,
-      allowedCapabilityIds: [offer.capabilityId],
-      expectedBudget: offer.budget,
-      expectedSandbox: offer.sandbox,
-      hardStopApprovalId: offer.hardStopApprovalId,
-      resolveKey: this.options.resolveGrantKey,
-      consumeJti: (jti, exp) => this.consumeGrant(jti, exp),
-      nowSeconds: Math.floor(this.clock() / 1000),
-    });
-    if (!grant.ok) return this.reject(offer, grant.code.toUpperCase().replaceAll(".", "_"));
-    const validation = validateJobOffer({
-      workerId: offer.workerId,
-      capabilityId: offer.capabilityId,
-      capabilityDescriptorHash: offer.capabilityDescriptorHash,
-      attemptId: offer.attemptId,
-      planDigest: offer.planDigest,
-      fencingToken: offer.fencingToken,
-      leaseId: offer.leaseId,
-      grantDigest: grant.grant.grantDigest,
-      grantActions: grant.grant.claims.actions,
-      requiredAction: offer.requiredAction,
-    }, {
-      workerId: this.options.workerId,
-      capabilityId: this.options.adapter.capabilityId,
-      capabilityDescriptorHash: this.options.adapter.descriptor.descriptorHash,
-      attemptId: offer.attemptId,
-      planDigest: offer.planDigest,
-      fencingToken: offer.fencingToken,
-      leaseId: offer.leaseId,
-      grantDigest: grant.grant.grantDigest,
-      requiredAction: offer.requiredAction,
-    });
-    if (!validation.valid) return this.reject(offer, validation.reason.toUpperCase().replaceAll("-", "_"));
-    const active = this.options.db.connection.prepare("SELECT attempt_id FROM accepted_jobs WHERE capability_id = ? AND state IN ('ACCEPTED', 'RUNNING')").get(offer.capabilityId);
-    if (active) return this.reject(offer, "CAPABILITY_BUSY");
-    this.options.db.connection.prepare("INSERT INTO accepted_jobs(attempt_id, task_id, capability_id, offer_digest, fencing_token, state, accepted_at, updated_at) VALUES (?, ?, ?, ?, ?, 'ACCEPTED', ?, ?)").run(offer.attemptId, offer.taskId, offer.capabilityId, offerDigest, offer.fencingToken, this.clock(), this.clock());
-    await this.send("job.accept", { attemptId: offer.attemptId, taskId: offer.taskId, fencingToken: offer.fencingToken });
-    this.options.db.connection.prepare("UPDATE accepted_jobs SET state = 'RUNNING', updated_at = ? WHERE attempt_id = ? AND state = 'ACCEPTED'").run(this.clock(), offer.attemptId);
-    let execution: { outcome: "COMPLETED" | "FAILED"; result: Record<string, JsonValue>; checkpoint?: Record<string, JsonValue> };
-    try { execution = await this.options.adapter.execute(offer); } catch { execution = { outcome: "FAILED", result: { code: "ADAPTER_EXECUTION_FAILED" } }; }
-    const result = { attemptId: offer.attemptId, taskId: offer.taskId, fencingToken: offer.fencingToken, outcome: execution.outcome, result: execution.result, checkpoint: execution.checkpoint ?? null };
-    this.options.db.connection.prepare("UPDATE accepted_jobs SET state = ?, checkpoint_json = ?, result_json = ?, updated_at = ? WHERE attempt_id = ? AND fencing_token = ?").run(execution.outcome, execution.checkpoint ? JSON.stringify(execution.checkpoint) : null, JSON.stringify(result), this.clock(), offer.attemptId, offer.fencingToken);
-    await this.send("job.result", result);
-  }
-
-  private consumeGrant(jti: string, exp: number): boolean {
+  constructor(options: WorkerRuntimeOptions) { this.workerId = options.workerId; this.db = options.db; this.transport = options.transport; this.executors = options.executors; this.clock = options.clock ?? Date.now; this.report = options.report; }
+  async connect(): Promise<void> { if (this.transport.connect) await this.transport.connect((message) => { void this.handleMessage(message).catch(() => {}); }); await this.sendHello(); await this.discover(); await this.resendPending(); }
+  async pollOnce(): Promise<number> { if (this.transport.poll) { const offers = await this.transport.poll(); for (const offer of offers) await this.handleOffer(offer); return offers.length; } if (this.transport.connected && !this.transport.connected()) throw new Error("WORKER_DISCONNECTED"); await this.resendPending(); return 0; }
+  async heartbeat(): Promise<void> { await this.transport.send({ type: "heartbeat", worker_id: this.workerId, timestamp: new Date(this.clock()).toISOString(), ...(this.report?.() ?? {}) }); }
+  async handleOffer(offer: WorkerTaskOffer): Promise<void> {
+    const existing = this.db.connection.prepare("SELECT * FROM assignments WHERE attempt_id = ?").get(offer.attempt_id) as Record<string, any> | undefined;
+    if (existing) { if (existing.status === "COMPLETED") await this.resendResult(offer.attempt_id); return; }
+    const executor = this.executors.find((candidate) => candidate.canExecute(offer));
+    this.db.transaction(() => this.db.connection.prepare("INSERT INTO assignments(attempt_id, task_id, task_type, offer_json, status, accepted_at, updated_at) VALUES (?, ?, ?, ?, 'ACCEPTED', ?, ?)").run(offer.attempt_id, offer.task_id, offer.task_type, JSON.stringify(offer), this.clock(), this.clock()));
+    await this.transport.send({ type: "task.accept", task_id: offer.task_id, attempt_id: offer.attempt_id });
+    if (!executor) { await this.fail(offer, "EXECUTOR_UNAVAILABLE", "No enabled executor can handle this task type.", true); return; }
+    this.running.set(offer.attempt_id, executor); this.db.connection.prepare("UPDATE assignments SET status = 'RUNNING', updated_at = ? WHERE attempt_id = ?").run(this.clock(), offer.attempt_id); await this.transport.send({ type: "task.started", task_id: offer.task_id, attempt_id: offer.attempt_id });
     try {
-      this.options.db.connection.prepare("INSERT INTO consumed_grants(jti, expires_at, consumed_at) VALUES (?, ?, ?)").run(jti, exp, Math.floor(this.clock() / 1000));
-      return true;
-    } catch { return false; }
+      for await (const event of executor.execute(offer, { emit: (item) => this.emit(offer, item) })) {
+        await this.emit(offer, event);
+        if (event.type === "result") await this.complete(offer, event.result ?? {}, event.metrics ?? {});
+      }
+      const state = this.db.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get(offer.attempt_id) as { status: string } | undefined;
+      if (state?.status === "RUNNING") await this.complete(offer, {}, {});
+    } catch (error) { const code = error instanceof Error ? error.message : "EXECUTION_FAILED"; await this.fail(offer, code, "Worker executor failed.", isInfrastructureFailure(code)); }
+    finally { this.running.delete(offer.attempt_id); }
   }
 
-  private async reject(offer: WorkerJobOffer, reason: string): Promise<void> {
-    await this.send("job.reject", { attemptId: offer.attemptId, taskId: offer.taskId, fencingToken: offer.fencingToken, reason });
-  }
+  async handleCancel(message: { task_id: string; attempt_id: string }): Promise<void> { const executor = this.running.get(message.attempt_id); await executor?.cancel?.(message.attempt_id); this.db.connection.prepare("UPDATE assignments SET status = 'CANCELLED', updated_at = ? WHERE attempt_id = ?").run(this.clock(), message.attempt_id); await this.transport.send({ type: "task.cancelled", task_id: message.task_id, attempt_id: message.attempt_id }); }
+  close(): void { this.transport.close?.(); }
 
-  private async send(type: WorkerEnvelope["type"], payload: Record<string, JsonValue>): Promise<void> {
-    const sequence = this.options.db.transaction(() => {
-      const current = Number((this.options.db.connection.prepare("SELECT value FROM worker_state WHERE key = 'sequence'").get() as { value: string }).value);
-      const next = current + 1;
-      this.options.db.connection.prepare("UPDATE worker_state SET value = ? WHERE key = 'sequence'").run(String(next));
-      return next;
-    });
-    const frame = await signWorkerEnvelopeWithSigner({ protocolVersion: "1.0", messageId: uuidv7(this.clock()), connectionId: this.options.connectionId, sequence, workerId: this.options.workerId, sentAt: new Date(this.clock()).toISOString(), nonce: uuidv7(this.clock()).replaceAll("-", ""), type, payload }, this.options.signFrame);
-    await this.options.transport.send(frame);
-  }
+  private async handleMessage(message: Record<string, any>): Promise<void> { if (message.type === "task.offer") await this.handleOffer(message as WorkerTaskOffer); else if (message.type === "task.cancel") await this.handleCancel(message as { task_id: string; attempt_id: string }); else if (message.type === "task.result.ack") this.db.connection.prepare("UPDATE results SET status = 'DELIVERED', delivered_at = ? WHERE attempt_id = ?").run(this.clock(), message.attempt_id); }
+  private async sendHello(): Promise<void> { await this.transport.send({ type: "hello", protocol_version: 2, worker_id: this.workerId, agent_version: "2.0.0" }); }
+  private async discover(): Promise<void> { const capabilities: Record<string, JsonValue>[] = []; const models: Record<string, JsonValue>[] = []; for (const executor of this.executors) { const found = await executor.discover?.(); if (found?.capabilities) capabilities.push(...found.capabilities); if (found?.models) models.push(...found.models); } if (capabilities.length) await this.transport.send({ type: "capabilities.update", worker_id: this.workerId, capabilities }); if (models.length) await this.transport.send({ type: "models.update", worker_id: this.workerId, models }); }
+  private async emit(offer: WorkerTaskOffer, event: ExecutionEvent): Promise<void> { if (event.type === "progress") await this.transport.send({ type: "task.progress", task_id: offer.task_id, attempt_id: offer.attempt_id, progress: event.progress ?? {} }); else if (event.type === "log") await this.transport.send({ type: "task.log", task_id: offer.task_id, attempt_id: offer.attempt_id, log: event.log ?? {} }); else if (event.type === "artifact") await this.transport.send({ type: "task.artifact", task_id: offer.task_id, attempt_id: offer.attempt_id, artifact: event.artifact ?? {} }); }
+  private async complete(offer: WorkerTaskOffer, result: Record<string, JsonValue>, metrics: Record<string, JsonValue>): Promise<void> { const payload = { result, metrics }; this.db.transaction(() => { this.db.connection.prepare("INSERT INTO results(attempt_id, task_id, result_json, status, created_at) VALUES (?, ?, ?, 'PENDING', ?) ON CONFLICT(attempt_id) DO UPDATE SET result_json = excluded.result_json, status = 'PENDING'").run(offer.attempt_id, offer.task_id, JSON.stringify(payload), this.clock()); this.db.connection.prepare("UPDATE assignments SET status = 'COMPLETED', updated_at = ? WHERE attempt_id = ?").run(this.clock(), offer.attempt_id); }); await this.resendResult(offer.attempt_id); }
+  private async resendResult(attemptId: string): Promise<void> { const row = this.db.connection.prepare("SELECT * FROM results WHERE attempt_id = ? AND status = 'PENDING'").get(attemptId) as Record<string, any> | undefined; if (!row) return; const offer = this.db.connection.prepare("SELECT * FROM assignments WHERE attempt_id = ?").get(attemptId) as Record<string, any> | undefined; if (!offer) return; const parsed = JSON.parse(row.result_json); const task = JSON.parse(offer.offer_json); await this.transport.send({ type: "task.result", task_id: task.task_id, attempt_id: attemptId, result: parsed.result, metrics: parsed.metrics }); }
+  private async resendPending(): Promise<void> { const rows = this.db.connection.prepare("SELECT attempt_id FROM results WHERE status = 'PENDING' ORDER BY created_at").all() as Array<{ attempt_id: string }>; for (const row of rows) await this.resendResult(row.attempt_id); }
+  private async fail(offer: WorkerTaskOffer, code: string, message: string, retryable: boolean): Promise<void> { this.db.connection.prepare("UPDATE assignments SET status = 'FAILED', updated_at = ? WHERE attempt_id = ?").run(this.clock(), offer.attempt_id); await this.transport.send({ type: "task.failed", task_id: offer.task_id, attempt_id: offer.attempt_id, code, message, retryable }); }
+}
+
+function isInfrastructureFailure(code: string): boolean {
+  return code === "EXECUTOR_UNAVAILABLE" || code === "WORKER_DISCONNECTED" || code === "WORKER_TRANSPORT_FAILED" || code.endsWith("_TIMEOUT") || code.endsWith("_UNAVAILABLE") || /^\w+_HTTP_5\d\d$/.test(code) || code === "fetch failed";
 }

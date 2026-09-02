@@ -12,11 +12,10 @@
     "build:web": "vite build --config apps/control-web/vite.config.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check.mjs",
-    "typecheck": "tsc --noEmit --noCheck",
+    "typecheck": "tsc --noEmit",
     "release:artifact": "node scripts/release-artifact.mjs"
   },
   "dependencies": {
-    "@simplewebauthn/server": "13.3.2",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "ws": "8.21.3"

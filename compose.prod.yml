@@ -2,60 +2,35 @@ name: personal-ai-control-plane
 
 services:
   pai-control-plane:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:ca52c4cf85248b520f8f797d1b50fd65d95f3b4d34d8df984f0999f2020f6a8e
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@${IMAGE_DIGEST:?IMAGE_DIGEST is required}
     restart: unless-stopped
-    # Synology bind roots grant write access to the non-root ContainerManager UID.
     user: "106808:106808"
     command: ["node", "--experimental-strip-types", "apps/control-plane/src/index.ts"]
     environment:
       NODE_ENV: production
-      PAI_OPERATIONAL_PROFILE: compatibility
-      PAI_CONTROL_WEB_PORT: "8080"
-      PAI_IDENTITY_PORT: "9084"
-      PAI_EDGE_PORT: "8081"
-      PAI_IDENTITY_DB_PATH: /var/lib/pai/identity/identity.db
-      PAI_CANONICAL_ORIGIN: https://gnest.taila77e5f.ts.net
-      PAI_WEBAUTHN_RP_ID: ${PAI_WEBAUTHN_RP_ID:?PAI_WEBAUTHN_RP_ID is required}
-      PAI_WEBAUTHN_RP_NAME: ${PAI_WEBAUTHN_RP_NAME:-Personal AI Control Plane}
-      # The token is only used for the first owner registration and must stay
-      # in the root-controlled production .env. It is never committed or logged.
-      PAI_BOOTSTRAP_TOKEN: ${PAI_BOOTSTRAP_TOKEN:-}
-      PAI_PORT: "9085"
-      PAI_AUDIT_VERIFY_INTERVAL_MS: "300000"
-      # Optional Hermes workload ingress. The edge verifies the detached
-      # Ed25519 proof in Orchestrator; these values remain root-controlled.
-      PAI_HERMES_WORKLOAD_ID: ${PAI_HERMES_WORKLOAD_ID:-}
-      PAI_HERMES_WORKLOAD_OWNER_ID: ${PAI_HERMES_WORKLOAD_OWNER_ID:-}
-      PAI_HERMES_WORKLOAD_SUBJECT: ${PAI_HERMES_WORKLOAD_SUBJECT:-hermes-agent}
-      PAI_HERMES_WORKLOAD_PUBLIC_KEY: ${PAI_HERMES_WORKLOAD_PUBLIC_KEY:-}
-      # The deterministic ContextHub adapter stays fail-closed until the
-      # owner has enrolled a namespace-bound client and selected this gate.
-      PAI_CONTEXT_HUB_ADAPTER_ENABLED: ${PAI_CONTEXT_HUB_ADAPTER_ENABLED:-false}
-      PAI_CONTEXT_HUB_API_ORIGIN: ${PAI_CONTEXT_HUB_API_ORIGIN:-http://host.docker.internal:18788}
-      PAI_CONTEXT_HUB_API_KEY: ${PAI_CONTEXT_HUB_API_KEY:-}
-      # ContextHub keeps its Tailscale-facing 8788 listener loopback-only. The
-      # separate Docker-bridge ingress is private container-to-host plumbing;
-      # ContextHub still enforces the forwarded personal-ai principal and
-      # safe-method-only contract.
-      PAI_MEMORY_ORIGIN: http://host.docker.internal:18788
-      PAI_IDENTITY_HEALTH_URL: http://127.0.0.1:9084/health/ready
-      PAI_ORCHESTRATOR_DB_PATH: /var/lib/pai/orchestrator/orchestrator.db
-      PAI_CONVERSATION_DB_PATH: /var/lib/pai/orchestrator/conversation.db
-      PAI_ARTIFACT_ROOT: /var/lib/pai/orchestrator/artifacts
-      PAI_ORCHESTRATOR_LOCK_PATH: /var/lib/pai/orchestrator/orchestrator.lock
+      PAI_PORT: "8080"
+      PAI_LISTEN_ADDRESS: "0.0.0.0"
+      PAI_DATA_DIR: /data
+      PAI_ARTIFACT_DIR: /data/artifacts
+      PAI_HERMES_URL: ${PAI_HERMES_URL:-http://hermes-agent:9119}
+      PAI_HERMES_TASK_EVENT_PATH: ${PAI_HERMES_TASK_EVENT_PATH:-/api/internal/control-plane/task-events}
+      PAI_CONTEXTHUB_URL: ${PAI_CONTEXTHUB_URL:-http://contexthub:8787}
+      PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}
+      PAI_MAX_ARTIFACT_BYTES: ${PAI_MAX_ARTIFACT_BYTES:-1073741824}
     volumes:
-      - ${PAI_IDENTITY_DATA_ROOT:?PAI_IDENTITY_DATA_ROOT must be project-scoped}/data:/var/lib/pai/identity
-      - ${PAI_ORCHESTRATOR_DATA_ROOT:?PAI_ORCHESTRATOR_DATA_ROOT must be project-scoped}/data:/var/lib/pai/orchestrator
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ${PAI_DATA_ROOT:?PAI_DATA_ROOT must be project-scoped}:/data
     ports:
-      - "127.0.0.1:9084:8081"
-      # Container-to-container service ingress; not LAN/public-facing.
-      - "172.17.0.1:19084:8081"
+      - "127.0.0.1:9084:8080"
     healthcheck:
-      test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:8080/health/ready','http://127.0.0.1:8081/health/ready','http://127.0.0.1:9084/health/ready','http://127.0.0.1:9085/health/ready'].map(url=>fetch(url))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6
     networks:
-      default: {}
+      personal-ai-network:
+        aliases:
+          - personal-ai-control-plane
+
+networks:
+  personal-ai-network:
+    external: true

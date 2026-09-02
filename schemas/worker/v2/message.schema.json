@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-control-plane.local/schemas/worker/v2/message.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "enum": ["hello", "hello.ack", "heartbeat", "capabilities.update", "models.update", "task.offer", "task.accept", "task.reject", "task.started", "task.progress", "task.log", "task.result", "task.result.ack", "task.failed", "task.cancel", "task.cancelled", "task.ping", "error"]
+    },
+    "protocol_version": { "const": 2 }
+  }
+}

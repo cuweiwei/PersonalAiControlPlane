@@ -31,7 +31,7 @@
     "health": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path"],
+      "required": ["path", "readinessPath"],
       "properties": {
         "path": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]*$" },
         "readinessPath": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]*$" }

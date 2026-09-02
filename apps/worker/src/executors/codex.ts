@@ -1,0 +1,18 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import { descriptorHash, resolvePathWithinRoots, type CapabilityDescriptor } from "../../../../packages/worker/src/index.ts";
+import type { ExecutionEvent, WorkerExecutor, WorkerTaskOffer } from "../runtime.ts";
+
+export class CodexExecutor implements WorkerExecutor {
+  readonly type = "codex";
+  readonly descriptor: CapabilityDescriptor;
+  private readonly workspaces: Record<string, string>;
+  private readonly executable: string;
+  private readonly enabled: boolean;
+  constructor(workspaces: Record<string, string>, executable = "codex", enabled = true) { this.workspaces = workspaces; this.executable = executable; this.enabled = enabled; const base = { capability: "codex", runtime: "codex", runtimeVersion: "2", status: "READY" as const, maxConcurrency: 1, properties: { workspaceIds: Object.keys(workspaces) } }; this.descriptor = { ...base, properties: base.properties }; }
+  canExecute(task: WorkerTaskOffer): boolean { return this.enabled && task.task_type === "codex" && Boolean((task.payload as any)?.workspace_id ?? (task.execution as any)?.workspace_id); }
+  async discover() { if (!this.enabled) return { capabilities: [], models: [] }; const healthy = await new Promise<boolean>((resolveResult) => { const child = spawn(this.executable, ["--version"], { stdio: "ignore" }); child.once("error", () => resolveResult(false)); child.once("close", (code) => resolveResult(code === 0)); }); const descriptor = { ...this.descriptor, status: healthy ? "READY" as const : "UNAVAILABLE" as const }; return { capabilities: [{ capability: "codex", runtime: "codex", status: descriptor.status, max_concurrency: 1, descriptor }], models: [] }; }
+  async *execute(task: WorkerTaskOffer): AsyncIterable<ExecutionEvent> { const payload = task.payload as any; const id = String(payload.workspace_id ?? (task.execution as any)?.workspace_id ?? ""); const configured = this.workspaces[id]; if (!configured || !existsSync(configured)) throw new Error("WORKSPACE_UNAVAILABLE"); const cwd = resolve(configured); if (!resolvePathWithinRoots(cwd, [cwd])) throw new Error("WORKSPACE_PATH_INVALID"); const instruction = String(payload.instruction ?? task.instruction); yield { type: "progress", progress: { phase: "codex.start", workspaceId: id } }; const output = await this.run(["exec", "--json", "--sandbox", "workspace-write", "--cd", cwd, instruction], cwd, Number(task.limits?.timeout_seconds ?? 1800) * 1_000); if (output.code !== 0) throw new Error("CODEX_FAILED"); yield { type: "result", result: { workspaceId: id, workspace: basename(cwd), exitCode: output.code, stdout: output.stdout.slice(-2_000_000), stderr: output.stderr.slice(-20_000) } }; }
+  private run(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> { return new Promise((resolveResult, reject) => { const child = spawn(this.executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env } }); let stdout = ""; let stderr = ""; const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("CODEX_TIMEOUT")); }, timeoutMs); child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8").slice(0, 2_000_000 - stdout.length); }); child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8").slice(0, 20_000 - stderr.length); }); child.once("error", (error) => { clearTimeout(timer); reject(error); }); child.once("close", (code) => { clearTimeout(timer); resolveResult({ code: code ?? 1, stdout, stderr }); }); }); }
+}

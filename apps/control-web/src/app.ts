@@ -1,478 +1,238 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-type Item = Record<string, unknown>;
-type ResourceState = "loading" | "ready" | "error";
-type View = { key: string; label: string; endpoint: string; empty: string };
-type PortalRoute =
-  | { kind: "home" }
-  | { kind: "systems" }
-  | { kind: "memory" }
-  | { kind: "resource"; view: View; id?: string };
-
-const views: View[] = [
-  { key: "goals", label: "Goals", endpoint: "/api/v1/goals", empty: "目前沒有 durable goals。" },
-  { key: "approvals", label: "Approvals", endpoint: "/api/v1/approvals", empty: "目前沒有 approval requests。" },
-  { key: "schedules", label: "Schedules", endpoint: "/api/v1/schedules", empty: "目前沒有 schedules。" },
-  { key: "workers", label: "Workers", endpoint: "/api/v1/workers", empty: "目前沒有已註冊 workers。" },
-  { key: "compute", label: "Compute", endpoint: "/api/v1/compute/providers", empty: "目前沒有已驗證 compute providers。" },
-  { key: "conversations", label: "Conversations", endpoint: "/api/v1/conversations", empty: "目前沒有 archived conversations。" },
-  { key: "connectors", label: "Connectors", endpoint: "/api/v1/connectors", empty: "目前沒有 connector evidence。" },
-  { key: "credentials", label: "Credentials", endpoint: "/api/v1/credentials", empty: "目前沒有 credential handles。" },
-  { key: "policies", label: "Policies", endpoint: "/api/v1/policies", empty: "目前沒有 policy revisions。" },
-  { key: "audit", label: "Audit", endpoint: "/api/v1/audit", empty: "目前沒有 audit events。" },
-  { key: "system", label: "System", endpoint: "/api/v1/system", empty: "目前沒有 system projection。" },
-];
-
+type Item = Record<string, any>;
 const h = React.createElement;
+const nav = [
+  ["/", "Dashboard"],
+  ["/tasks", "Tasks"],
+  ["/workers", "Workers"],
+  ["/models", "Models"],
+  ["/systems", "Systems"],
+  ["/settings", "Settings"],
+] as const;
 
-function text(value: unknown): string {
+function display(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function base64Url(value: ArrayBuffer | ArrayBufferView): string {
-  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  let output = "";
-  for (const byte of bytes) output += String.fromCharCode(byte);
-  return btoa(output).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+function time(value: unknown): string {
+  return value ? new Date(String(value)).toLocaleString("zh-TW") : "—";
 }
 
-function bytes(value: unknown): Uint8Array {
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  if (typeof value !== "string" || value.length === 0) throw new Error("WebAuthn options are invalid");
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(normalized);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+function statusClass(value: unknown): string {
+  const normalized = display(value).toLowerCase();
+  if (["healthy", "online", "succeeded", "ready", "ok"].includes(normalized)) return "good";
+  if (["offline", "failed", "cancelled", "disabled", "degraded"].includes(normalized)) return "bad";
+  return "warn";
 }
 
-function authenticationJson(credential: PublicKeyCredential): Record<string, unknown> {
-  const response = credential.response as AuthenticatorAssertionResponse;
-  const rawId = base64Url(credential.rawId);
-  return { id: rawId, rawId, type: credential.type, response: { clientDataJSON: base64Url(response.clientDataJSON), authenticatorData: base64Url(response.authenticatorData), signature: base64Url(response.signature), userHandle: response.userHandle ? base64Url(response.userHandle) : null }, clientExtensionResults: credential.getClientExtensionResults() };
+function Status({ value }: { value: unknown }) {
+  return h("span", { className: `status-pill ${statusClass(value)}` }, display(value));
 }
 
-async function jsonRequest(path: string, init: RequestInit = {}): Promise<Item> {
-  const response = await fetch(path, { ...init, credentials: "same-origin", headers: { accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}), ...(init.headers ?? {}) } });
+async function request(path: string, init: RequestInit = {}): Promise<Item> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      accept: "application/json",
+      ...(init.body ? { "content-type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
   const body = await response.json().catch(() => ({})) as Item;
-  if (!response.ok) {
-    const error = body.error as Item | undefined;
-    throw new Error(text(error?.message ?? `Request failed (${response.status})`));
-  }
+  if (!response.ok) throw new Error(display(body.error?.message ?? body.error?.code ?? `HTTP ${response.status}`));
   return body;
 }
 
-async function csrfToken(): Promise<string> {
-  const body = await jsonRequest("/api/v1/auth/csrf");
-  if (typeof body.csrfToken !== "string") throw new Error("Identity Gateway did not issue a CSRF token");
-  return body.csrfToken;
+function useRefresh(): [number, () => void] {
+  const [version, setVersion] = useState(0);
+  const refresh = useCallback(() => setVersion((current) => current + 1), []);
+  return [version, refresh];
 }
 
-export async function stepUp(): Promise<void> {
-  const csrf = await csrfToken();
-  const start = await jsonRequest("/api/v1/auth/step-up/options", { method: "POST", headers: { "x-pai-csrf-token": csrf } });
-  const options = start.options as PublicKeyCredentialRequestOptions & { challenge: unknown; allowCredentials?: Array<PublicKeyCredentialDescriptor & { id: unknown }> };
-  const credential = await navigator.credentials.get({ publicKey: { ...options, challenge: bytes(options.challenge), allowCredentials: options.allowCredentials?.map((item) => ({ ...item, id: bytes(item.id) })) } }) as PublicKeyCredential | null;
-  if (!credential) throw new Error("Passkey step-up was cancelled");
-  await jsonRequest("/api/v1/auth/step-up/finish", { method: "POST", headers: { "x-pai-csrf-token": csrf }, body: JSON.stringify({ challengeId: start.challengeId, response: authenticationJson(credential) }) });
-}
-
-export async function mutate(path: string, options: { method: "POST" | "PATCH" | "DELETE"; body?: Item; stepUpRequired?: boolean }): Promise<Item> {
-  if (options.stepUpRequired) await stepUp();
-  const csrf = await csrfToken();
-  return jsonRequest(path, { method: options.method, headers: { "x-pai-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
-}
-
-function reportError(error: unknown): void {
-  window.alert(error instanceof Error ? error.message : "操作失敗");
-}
-
-function route(path: string): PortalRoute {
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length === 0 || parts[0] === "home") return { kind: "home" };
-  if (parts[0] === "systems") return { kind: "systems" };
-  if (parts[0] === "memory") return { kind: "memory" };
-  const view = views.find((candidate) => candidate.key === parts[0]) ?? views[0];
-  return { kind: "resource", view, id: parts[1] };
-}
-
-function nested(value: unknown, ...keys: string[]): unknown {
-  let current = value;
-  for (const key of keys) {
-    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
-    current = (current as Item)[key];
-  }
-  return current;
-}
-
-function items(value: unknown, key = "items"): Item[] {
-  if (!value || typeof value !== "object") return [];
-  const list = (value as Item)[key];
-  return Array.isArray(list) ? list.filter((item): item is Item => Boolean(item) && typeof item === "object") : [];
-}
-
-function stateClass(value: unknown): string {
-  const normalized = text(value).toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  return ["healthy", "ready", "ok", "managed", "live-verified", "online", "active", "trusted", "registered", "granted"].includes(normalized) ? "good" : ["unhealthy", "error", "failed", "blocked", "removed", "revoked"].includes(normalized) ? "bad" : "warn";
-}
-
-function StatusPill({ value }: { value: unknown }) {
-  return h("span", { className: `status-pill ${stateClass(value)}` }, text(value));
-}
-
-function timestamp(value: unknown): string {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? new Date(numeric).toLocaleString("zh-TW") : text(value);
-}
-
-function workerConnectionState(item: Item): string {
-  const projected = nested(item, "connection", "state");
-  if (projected) return text(projected);
-  return "UNKNOWN";
-}
-
-function WorkerSummary({ item, providers = [] }: { item: Item; providers?: Item[] }) {
-  const capabilities = Array.isArray(item.capabilities) ? item.capabilities as Item[] : [];
-  const workerProviders = Array.isArray(item.providers) ? item.providers as Item[] : providers.filter((provider) => text(provider.workerId) === text(item.id));
-  const connection = nested(item, "connection") as Item | undefined;
-  const dispatch = nested(item, "dispatch") as Item | undefined;
-  const activity = nested(item, "activity") as Item | undefined;
-  const credential = nested(item, "credential") as Item | undefined;
-  const diagnostics = nested(item, "diagnostics") as Item | undefined;
-  return h(React.Fragment, null,
-    h("div", { className: "worker-status-grid" },
-      h("div", null, h("span", null, "連線"), h(StatusPill, { value: connection?.state ?? workerConnectionState(item) })),
-      h("div", null, h("span", null, "信任"), h(StatusPill, { value: item.trustState })),
-      h("div", null, h("span", null, "派工"), h(StatusPill, { value: dispatch?.state ?? item.drainState })),
-      h("div", null, h("span", null, "Heartbeat"), h("strong", null, connection?.ageMs !== null && connection?.ageMs !== undefined ? Math.round(Number(connection.ageMs) / 1000) + " 秒前" : timestamp(item.lastHeartbeatAt)))),
-    h("p", { className: "worker-help" }, h("strong", null, "Agent / transport："), text(nested(item, "metadata", "version") ?? nested(diagnostics, "agent", "version")) + " · " + text(nested(item, "metadata", "platform") ?? item.platform) + " · " + text(connection?.transport ?? nested(diagnostics, "transport"))),
-    h("p", { className: "worker-help" }, h("strong", null, "活動："), text(activity?.activeAttempts ?? 0) + " active attempts · " + text(activity?.queuedOffers ?? 0) + " queued offers · " + text(activity?.liveReservations ?? 0) + " reservations · max " + text(nested(diagnostics, "runtime", "maxConcurrency") ?? 1)),
-    Array.isArray(activity?.attempts) && activity.attempts.length ? h("ul", { className: "worker-attempts" }, activity.attempts.map((attempt: Item) => h("li", { key: text(attempt.id) }, text(attempt.title ?? attempt.taskId) + " · " + text(attempt.state)))) : null,
-    h("p", { className: "worker-help" }, h("strong", null, "Diagnostics："), text(nested(diagnostics, "resources", "cpuCount")) + " CPU · load " + text(nested(diagnostics, "resources", "load1")) + " · memory free " + text(nested(diagnostics, "resources", "memoryFreeBytes")) + " · " + text(nested(diagnostics, "agent", "storageClass")) + (diagnostics?.lastErrorCode ? " · last error " + text(diagnostics.lastErrorCode) : "")),
-    h("p", { className: "worker-help" }, h("strong", null, "Credential："), h(StatusPill, { value: credential?.state ?? "UNKNOWN" }), credential?.expiresAt ? " " + timestamp(credential.expiresAt) : ""),
-    h("p", { className: "worker-capabilities" }, h("strong", null, "Capabilities："), capabilities.length ? capabilities.map((capability) => `${text(capability.kind)} · ${text(capability.grantState)}`).join("、") : "尚未發現能力"),
-    h("p", { className: "worker-providers" }, h("strong", null, "LLM / Provider："), workerProviders.length ? workerProviders.map((provider) => `${text(provider.class)}${nested(provider, "descriptor", "modelId") ? ` · ${text(nested(provider, "descriptor", "modelId"))}` : ""} · ${text(provider.status)} · evidence ${text(nested(provider, "evidence", "evidenceLevel") ?? "UNKNOWN")}`).join("、") : "尚未驗證 provider；可能是 tool-only worker"));
-}
-
-function IntegrationNotice({ title, detail }: { title: string; detail: string }) {
-  return h("aside", { className: "integration-notice" }, h("strong", null, title), h("p", null, detail));
-}
-
-function LoadingPanel({ message }: { message: string }) {
-  return h("p", { className: "notice loading", role: "status" }, message);
-}
-
-function itemTitle(item: Item): string {
-  return text(item.intent ?? item.title ?? item.name ?? item.alias ?? item.connector ?? item.action ?? item.id ?? item.status);
-}
-
-function DetailFields({ item }: { item: Item }) {
-  return h("dl", null, Object.entries(item).filter(([, value]) => value !== undefined).flatMap(([key, value]) => [h("dt", { key: `${key}:label` }, key), h("dd", { key }, text(value))]));
-}
-
-function WorkerActionButtons({ item, onRefresh }: { item: Item; onRefresh(): void }) {
-  const id = text(item.id);
-  const capabilities = Array.isArray(item.capabilities) ? item.capabilities as Item[] : [];
-  const actions = (item.availableActions && typeof item.availableActions === "object" ? item.availableActions : {}) as Item;
-  const active = workerConnectionState(item) !== "REMOVED" && text(item.trustState) !== "REVOKED";
-  const run = async (label: string, path: string, method: "POST" | "DELETE", body?: Item, stepUpRequired = false) => {
-    if (["刪除", "永久清除", "撤銷"].includes(label) && !window.confirm(`${label}會清除伺服器端 Worker 身分；task / audit 歷史會保留，確定繼續？`)) return;
-    try { await mutate(path, { method, body, stepUpRequired }); onRefresh(); } catch (error) { reportError(error); }
-  };
-  if (!active) return h("p", { className: "worker-revoked" }, "Worker 已撤銷，歷史 evidence 已保留。", h(StatusPill, { value: item.trustState }));
-  const rename = () => {
-    const value = window.prompt("新的 Worker 顯示名稱", text(item.name));
-    if (value === null || value.trim() === text(item.name)) return;
-    void mutate(`/api/v1/workers/${encodeURIComponent(id)}`, { method: "PATCH", body: { name: value } }).then(onRefresh).catch(reportError);
-  };
-  const drainState = text(nested(item, "dispatch", "drainState") ?? item.drainState);
-  const canPurge = actions.purge !== false;
-  return h("div", { className: "actions worker-actions" },
-    drainState === "RUNNABLE" ? h("button", { type: "button", onClick: () => void run("Drain", `/api/v1/workers/${encodeURIComponent(id)}/drain`, "POST") }, "Drain") : null,
-    ["DRAINING", "DRAINED"].includes(drainState) ? h("button", { type: "button", onClick: () => void run("Resume", `/api/v1/workers/${encodeURIComponent(id)}/resume`, "POST", undefined, true) }, "Passkey Resume") : null,
-    h("button", { type: "button", onClick: rename, disabled: actions.rename === false }, "修改名稱"),
-    h("button", { type: "button", disabled: true, title: text(actions.wakeReason ?? "WAKE_ADAPTER_NOT_CONFIGURED") }, "Wake（未設定）"),
-    h("button", { type: "button", className: "danger", disabled: !canPurge, title: text(actions.purgeReason ?? ""), onClick: () => void run("永久清除", `/api/v1/workers/${encodeURIComponent(id)}`, "DELETE", undefined, true) }, canPurge ? "Passkey 永久清除 Worker" : `永久清除（${text(actions.purgeReason ?? "忙碌")}）`),
-    capabilities.filter((capability) => !capability.supersededAt && text(capability.grantState) !== "GRANTED").map((capability) => h("button", { type: "button", key: `${text(capability.id)}-grant`, onClick: () => void run("Grant", `/api/v1/workers/${encodeURIComponent(id)}/capabilities/${encodeURIComponent(text(capability.id))}/grant`, "POST", { descriptorHash: capability.descriptorHash as string }, true) }, `Passkey grant ${text(capability.kind)}`)),
-    capabilities.filter((capability) => !capability.supersededAt && text(capability.grantState) === "GRANTED").map((capability) => h("button", { type: "button", key: `${text(capability.id)}-revoke`, onClick: () => void run("撤銷", `/api/v1/workers/${encodeURIComponent(id)}/capabilities/${encodeURIComponent(text(capability.id))}/revoke`, "POST", { descriptorHash: capability.descriptorHash as string }, true) }, `Passkey revoke ${text(capability.kind)}`)));
-}
-
-function ItemCard({ item, view, onRefresh, workerProviders = [] }: { item: Item; view: View; onRefresh(): void; workerProviders?: Item[] }) {
-  const id = text(item.id ?? item.goalId ?? item.connector);
-  const detail = ["goals", "approvals", "schedules", "workers", "conversations"].includes(view.key) && item.id;
-  const action = async (label: string, path: string, method: "POST" | "PATCH" | "DELETE", body?: Item, sensitive = false) => {
-    if ((label === "刪除" || label === "撤銷") && !window.confirm(`${label}是安全敏感操作，確定繼續？`)) return;
-    try { await mutate(path, { method, body, stepUpRequired: sensitive }); onRefresh(); } catch (error) { reportError(error); }
-  };
-  const buttons: React.ReactNode[] = [];
-  if (view.key === "schedules") {
-    buttons.push(h("button", { type: "button", key: "pause", onClick: () => void action("暫停", `/api/v1/schedules/${id}/pause`, "POST") }, "暫停"));
-    buttons.push(h("button", { type: "button", key: "run", onClick: () => void action("立即執行", `/api/v1/schedules/${id}/run`, "POST") }, "立即執行"));
-    buttons.push(h("button", { type: "button", key: "delay", onClick: () => void action("延後", `/api/v1/schedules/${id}`, "PATCH", { expectedStateVersion: Number(item.stateVersion), nextRunAt: Date.now() + 60 * 60_000 }) }, "延後 1 小時"));
-  }
-  if (view.key === "connectors") {
-    buttons.push(h("button", { type: "button", key: "run", onClick: () => void action("同步", `/api/v1/connectors/${encodeURIComponent(text(item.connector))}/run`, "POST") }, "同步"));
-    buttons.push(h("button", { type: "button", key: "reauthorize", onClick: () => void action("重新授權", `/api/v1/connectors/${encodeURIComponent(text(item.connector))}/reauthorize`, "POST") }, "重新授權"));
-  }
-  return h("article", { className: "card" }, h("h3", null, detail ? h("a", { href: `/${view.key}/${id}` }, itemTitle(item)) : itemTitle(item)), view.key === "workers" ? h(WorkerSummary, { item, providers: workerProviders }) : h(DetailFields, { item }), buttons.length ? h("div", { className: "actions" }, buttons) : null, view.key === "workers" ? h(WorkerActionButtons, { item, onRefresh }) : null);
-}
-
-function WorkerComposer({ onRefresh }: { onRefresh(): void }) {
-  return h("section", { className: "worker-management", "aria-labelledby": "worker-add-title" },
-    h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER ENROLLMENT"), h("h3", { id: "worker-add-title" }, "新增 Worker"))),
-    h("p", { className: "worker-help" }, "請先在要執行 Codex 的 macOS 或 Windows 裝置安裝並啟動 Worker。Worker 會自行產生 key pair 並建立 enrollment request；Portal 不接收私鑰或手動貼上的 public key。"),
-    h("pre", { className: "command-block" }, "pai-worker start --repo-id <logical-id> --repo-path <git-repository>"),
-    h("p", { className: "worker-help" }, "確認畫面上的 fingerprint 後，使用 Passkey 按下核准；Worker 會自動完成 proof、取得 credential 並連線。此頁每 5 秒會自動同步待確認 request。若需要手動 recovery，仍可使用 pai-worker enroll / enroll-finalize。Worker 卡片只在 heartbeat、LLM / Provider 與 capability evidence 到齊後顯示可用狀態。"),
-    h("button", { type: "button", onClick: onRefresh }, "重新整理 enrollment requests"));
-}
-
-function EnrollmentRequestCard({ item, onRefresh }: { item: Item; onRefresh(): void }) {
-  const summary = item.deviceSummary && typeof item.deviceSummary === "object" ? item.deviceSummary as Item : {};
-  const lifecycleStage = text(item.lifecycleStage ?? item.status);
-  const approve = () => {
-    if (!window.confirm("請確認畫面上的 fingerprint 與 worker 裝置一致，再進行 Passkey 核准。")) return;
-    void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}/approve`, { method: "POST", body: { fingerprint: text(item.fingerprint) }, stepUpRequired: true }).then(onRefresh).catch(reportError);
-  };
-  const cancel = () => {
-    if (!window.confirm("這會永久清除 enrollment request；舊 key 不能再次註冊，確定繼續？")) return;
-    void mutate(`/api/v1/workers/enrollment-requests/${encodeURIComponent(text(item.id))}`, { method: "DELETE", stepUpRequired: true }).then(onRefresh).catch(reportError);
-  };
-  return h("article", { className: "card enrollment-card" },
-    h("div", { className: "card-title-row" }, h("div", null, h("h3", null, text(summary.name ?? item.id)), h("p", { className: "service-id" }, text(summary.platform))), h(StatusPill, { value: lifecycleStage })),
-    h("dl", null, h("dt", null, "Fingerprint"), h("dd", null, text(item.fingerprint)), h("dt", null, "Expires"), h("dd", null, timestamp(item.expiresAt))),
-    lifecycleStage === "PENDING" ? h("div", { className: "actions" }, h("button", { type: "button", onClick: approve }, "Passkey 核准此 Worker"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : lifecycleStage === "OWNER_APPROVED" ? h(React.Fragment, null, h("p", { className: "worker-help" }, "OWNER_APPROVED：等待 worker proof；尚未成為已註冊或可派工 Worker。"), h("div", { className: "actions" }, h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request"))) : lifecycleStage === "EXPIRED" ? h("div", { className: "actions" }, h("p", { className: "worker-help" }, "EXPIRED：此 request 已過期，未完成註冊。"), h("button", { type: "button", className: "danger", onClick: cancel }, "永久清除 request")) : null);
-}
-
-function GoalComposer({ onRefresh }: { onRefresh(): void }) {
-  const [intent, setIntent] = useState("");
-  return h("form", { className: "editor", onSubmit: (event: React.FormEvent) => { event.preventDefault(); void mutate("/api/v1/goals", { method: "POST", body: { intent, source: { kind: "web" }, memoryRequirement: "preferred" } }).then(() => { setIntent(""); onRefresh(); }).catch(reportError); } }, h("label", null, "新增 durable goal", h("textarea", { value: intent, required: true, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setIntent(event.target.value) })), h("button", { type: "submit" }, "提交 Goal"));
-}
-
-function ScheduleComposer({ onRefresh }: { onRefresh(): void }) {
-  const [name, setName] = useState(""); const [intent, setIntent] = useState(""); const [everyMinutes, setEveryMinutes] = useState(60);
-  return h("form", { className: "editor", onSubmit: (event: React.FormEvent) => { event.preventDefault(); void mutate("/api/v1/schedules", { method: "POST", body: { name, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, recurrence: { kind: "interval", everyMs: everyMinutes * 60_000, templateRevision: 1 }, nextRunAt: Date.now() + everyMinutes * 60_000, misfirePolicy: "SKIP", goalTemplate: { intent, source: { kind: "schedule" }, memoryRequirement: "preferred" } } }).then(() => { setName(""); setIntent(""); onRefresh(); }).catch(reportError); } }, h("label", null, "名稱", h("input", { value: name, required: true, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value) })), h("label", null, "Goal intent", h("textarea", { value: intent, required: true, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setIntent(event.target.value) })), h("label", null, "間隔（分鐘）", h("input", { type: "number", min: 1, value: everyMinutes, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setEveryMinutes(Number(event.target.value)) })), h("button", { type: "submit" }, "建立 Schedule"));
-}
-
-function PolicyEditor({ onRefresh }: { onRefresh(): void }) {
-  const [value, setValue] = useState('{\n  "autonomy": {},\n  "hardStops": []\n}');
-  return h("form", { className: "editor", onSubmit: (event: React.FormEvent) => { event.preventDefault(); let policy: Item; try { policy = JSON.parse(value); } catch { window.alert("Policy 必須是有效 JSON"); return; } void mutate("/api/v1/policies", { method: "PATCH", body: policy, stepUpRequired: true }).then(onRefresh).catch(reportError); } }, h("label", null, "新增 immutable policy revision", h("textarea", { value, rows: 8, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setValue(event.target.value) })), h("button", { type: "submit" }, "Passkey 驗證並建立 revision"));
-}
-
-function ApprovalEditor({ item, onRefresh }: { item: Item; onRefresh(): void }) {
-  const [bounds, setBounds] = useState(JSON.stringify(item.requiredScope ?? {}, null, 2));
-  const id = text(item.id);
-  const decide = (decision: "APPROVE" | "REJECT") => {
-    let approvedBounds: Item = {};
-    if (decision === "APPROVE") { try { approvedBounds = JSON.parse(bounds); } catch { window.alert("Approved bounds 必須是有效 JSON"); return; } }
-    void mutate(`/api/v1/approvals/${id}/decision`, { method: "POST", body: decision === "APPROVE" ? { decision, approvedBounds } : { decision }, stepUpRequired: decision === "APPROVE" }).then(onRefresh).catch(reportError);
-  };
-  return h("form", { className: "editor", onSubmit: (event: React.FormEvent) => { event.preventDefault(); decide("APPROVE"); } }, h("label", null, "Approved bounds（只能縮窄）", h("textarea", { rows: 12, value: bounds, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setBounds(event.target.value) })), h("div", { className: "actions" }, h("button", { type: "submit" }, "Passkey 核准 bounds"), h("button", { type: "button", className: "danger", onClick: () => decide("REJECT") }, "拒絕")));
-}
-
-function DetailActions({ view, item, onRefresh }: { view: View; item: Item; onRefresh(): void }) {
-  const id = text(item.id);
-  const run = async (label: string, path: string, method: "POST" | "DELETE", body?: Item, sensitive = false) => {
-    if (["取消", "刪除", "撤銷"].includes(label) && !window.confirm(`${label}會改變 durable state，確定繼續？`)) return;
-    try { await mutate(path, { method, body, stepUpRequired: sensitive }); onRefresh(); } catch (error) { reportError(error); }
-  };
-  if (view.key === "goals") return h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("取消", `/api/v1/goals/${id}/cancel`, "POST") }, "取消 Goal"), h("button", { type: "button", onClick: () => void run("重試", `/api/v1/goals/${id}/retry`, "POST") }, "重試可恢復工作"));
-  if (view.key === "approvals" && item.status === "OPEN") return h(ApprovalEditor, { item, onRefresh });
-  if (view.key === "schedules") return h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("暫停", `/api/v1/schedules/${id}/pause`, "POST") }, "暫停"), h("button", { type: "button", onClick: () => void run("立即執行", `/api/v1/schedules/${id}/run`, "POST") }, "立即執行"));
-  if (view.key === "workers") {
-    return h(WorkerActionButtons, { item, onRefresh });
-  }
-  if (view.key === "conversations") return h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run("匯出", `/api/v1/conversations/${id}/export`, "POST") }, "建立匯出 Job"), h("button", { type: "button", className: "danger", onClick: () => void run("刪除", `/api/v1/conversations/${id}`, "DELETE", { reason: "owner portal deletion", blockFuture: true }, true) }, "Passkey 刪除與 purge"));
-  return null;
-}
-
-function detailRequests(view: View, id: string): Promise<Item> {
-  if (view.key === "goals") return Promise.all([jsonRequest(`/api/v1/goals/${id}`), jsonRequest(`/api/v1/goals/${id}/plans`), jsonRequest(`/api/v1/goals/${id}/tasks`), jsonRequest(`/api/v1/goals/${id}/events`)]).then(([goal, plans, tasks, events]) => ({ ...goal, plans: plans.items, tasks: tasks.items, events: events.items }));
-  if (view.key === "workers") return jsonRequest(`${view.endpoint}/${encodeURIComponent(id)}`);
-  return jsonRequest(`${view.endpoint}/${encodeURIComponent(id)}`);
-}
-
-function workerMatches(item: Item, filter: string, search: string): boolean {
-  const haystack = [item.name, item.id, item.platform, nested(item, "connection", "state"), nested(item, "dispatch", "state"), nested(item, "dispatch", "reason")].map(text).join(" ").toLowerCase();
-  if (search.trim() && !haystack.includes(search.trim().toLowerCase())) return false;
-  const connection = text(nested(item, "connection", "state"));
-  const dispatch = text(nested(item, "dispatch", "state"));
-  if (filter === "online") return connection === "ONLINE";
-  if (filter === "attention") return connection === "STALE" || connection === "NO_HEARTBEAT" || dispatch === "BLOCKED";
-  if (filter === "drained") return dispatch === "DRAINED" || dispatch === "DRAINING";
-  return true;
-}
-
-function WorkerOverview({ counts, workers, filter, onFilter, search, onSearch }: { counts: Item; workers: Item[]; filter: string; onFilter(value: string): void; search: string; onSearch(value: string): void }) {
-  const online = workers.filter((item) => text(nested(item, "connection", "state")) === "ONLINE").length;
-  const attention = workers.filter((item) => workerMatches(item, "attention", "")).length;
-  const drained = workers.filter((item) => workerMatches(item, "drained", "")).length;
-  return h(React.Fragment, null,
-    h("div", { className: "metric-grid worker-metrics" },
-      h("article", null, h("span", null, "Online"), h("strong", null, online), h("small", null, "目前可連線")),
-      h("article", null, h("span", null, "Needs attention"), h("strong", null, attention), h("small", null, text(counts.pendingEnrollments ?? 0) + " 個待處理 enrollment")),
-      h("article", null, h("span", null, "Drained"), h("strong", null, drained), h("small", null, "停止接收新工作")),
-      h("article", null, h("span", null, "Registered"), h("strong", null, text(counts.workers ?? workers.length)), h("small", null, text(counts.removedWorkers ?? 0) + " 個已移除不顯示"))),
-    h("form", { className: "worker-toolbar", onSubmit: (event: React.FormEvent) => event.preventDefault() },
-      h("label", null, "搜尋 Worker", h("input", { type: "search", value: search, placeholder: "名稱、平台、狀態或 ID", onChange: (event: React.ChangeEvent<HTMLInputElement>) => onSearch(event.target.value) })),
-      h("label", null, "狀態篩選", h("select", { value: filter, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => onFilter(event.target.value) },
-        h("option", { value: "all" }, "全部已註冊"), h("option", { value: "online" }, "Online"), h("option", { value: "attention" }, "Needs attention"), h("option", { value: "drained" }, "Drained")))));
-}
-
-function ResourceView({ view, id }: { view: View; id?: string }) {
-  const [resourceItems, setResourceItems] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [enrollmentRequests, setEnrollmentRequests] = useState<Item[]>([]); const [workerProviders, setWorkerProviders] = useState<Item[]>([]); const [workerCounts, setWorkerCounts] = useState<Item>({}); const [workerFilter, setWorkerFilter] = useState("all"); const [workerSearch, setWorkerSearch] = useState(""); const [state, setState] = useState<ResourceState>("loading"); const [message, setMessage] = useState("正在讀取 authority projection…");
-  const refresh = useCallback(async () => {
-    setState("loading"); setMessage("正在讀取 authority projection…");
-    try {
-      if (id) { const value = await detailRequests(view, id); setDetail(value); setResourceItems([]); setEnrollmentRequests([]); setWorkerProviders(items(value.providers)); }
-      else if (view.key === "workers") { const [body, requests, system] = await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/workers/enrollment-requests"), jsonRequest("/api/v1/system")]); setResourceItems(items(body)); setEnrollmentRequests(items(requests).filter((item) => text(item.lifecycleStage ?? item.status) !== "REGISTERED")); setWorkerProviders([]); setWorkerCounts(system.counts && typeof system.counts === "object" ? system.counts as Item : {}); setDetail(null); }
-      else { const body = view.key === "compute" ? await Promise.all([jsonRequest(view.endpoint), jsonRequest("/api/v1/compute/routes")]).then(([providers, routes]) => ({ items: [...(providers.items as Item[] ?? []), { id: "effective-routes", ...routes }] })) : await jsonRequest(view.endpoint); const next = Array.isArray(body.items) ? body.items.filter((item): item is Item => Boolean(item) && typeof item === "object") : view.key === "system" ? [body] : []; setResourceItems(next); setEnrollmentRequests([]); setWorkerProviders([]); setDetail(null); }
-      setState("ready"); setMessage("已從目前 authority 重建；SSE/polling 不取代 REST truth。");
-    } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "讀取失敗"); }
-  }, [id, view]);
+function Layout({ children, path, refresh }: { children: React.ReactNode; path: string; refresh(): void }) {
   useEffect(() => {
-    void refresh();
-    if (view.key !== "workers" || id) return;
-    const timer = setInterval(() => void refresh(), 5_000);
-    return () => clearInterval(timer);
-  }, [id, refresh, view.key]);
-  const editor = !id && view.key === "goals" ? h(GoalComposer, { onRefresh: refresh }) : !id && view.key === "schedules" ? h(ScheduleComposer, { onRefresh: refresh }) : !id && view.key === "policies" ? h(PolicyEditor, { onRefresh: refresh }) : !id && view.key === "workers" ? h(WorkerComposer, { onRefresh: refresh }) : null;
-  const visibleResourceItems = view.key === "workers" && !id ? resourceItems.filter((item) => workerMatches(item, workerFilter, workerSearch)) : resourceItems;
-  const workerOverview = !id && view.key === "workers" ? h(WorkerOverview, { counts: workerCounts, workers: resourceItems, filter: workerFilter, onFilter: setWorkerFilter, search: workerSearch, onSearch: setWorkerSearch }) : null;
-  const enrollmentPanel = !id && view.key === "workers" ? h("section", { "aria-labelledby": "enrollment-title" }, h("div", { className: "section-heading compact" }, h("div", null, h("p", { className: "eyebrow" }, "PENDING TRUST"), h("h3", { id: "enrollment-title" }, "Enrollment requests"))), enrollmentRequests.length ? h("div", { className: "card-grid" }, enrollmentRequests.map((item) => h(EnrollmentRequestCard, { item, onRefresh: refresh, key: text(item.id) }))) : h("p", { className: "empty" }, "目前沒有 enrollment requests。")) : null;
-  return h("section", { "aria-labelledby": "view-title" }, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "OWNER-SAFE AUTHORITY PROJECTION"), h("h2", { id: "view-title" }, `${view.label}${id ? " detail" : ""}`)), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")), h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status", "aria-live": "polite" }, message), workerOverview, editor, enrollmentPanel, state === "ready" && !id && visibleResourceItems.length === 0 ? h("p", { className: "empty" }, view.empty) : null, detail ? h("article", { className: "card detail-card" }, h("h3", null, itemTitle(detail)), view.key === "workers" ? h(WorkerSummary, { item: detail, providers: items(detail.providers) }) : h(DetailFields, { item: detail }), h(DetailActions, { view, item: detail, onRefresh: refresh })) : h("div", { className: "card-grid" }, visibleResourceItems.map((item, index) => h(ItemCard, { item, view, onRefresh: refresh, workerProviders, key: text(item.id ?? item.goalId ?? index) }))));
+    const source = new EventSource("/api/v2/events");
+    source.onmessage = refresh;
+    return () => source.close();
+  }, [refresh]);
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "header",
+      { className: "portal-header" },
+      h("a", { className: "brand-link", href: "/" },
+        h("span", { className: "brand-mark", "aria-hidden": true }, "P"),
+        h("span", null, h("strong", null, "PERSONAL AI"), h("small", null, "CONTROL PLANE v2"))),
+      h("nav", { className: "primary-nav", "aria-label": "主要導覽" }, nav.map(([href, label]) =>
+        h("a", { key: href, href, "aria-current": path === href || (href !== "/" && path.startsWith(href)) ? "page" : undefined }, label))),
+    ),
+    h("main", null, children),
+    h("footer", null, "Hermes thinks · ContextHub remembers · Control Plane coordinates · Workers execute"),
+  );
 }
 
-function PortalHome() {
-  const [data, setData] = useState<{ system?: Item; memory?: Item }>({});
-  const [state, setState] = useState<ResourceState>("loading");
-  const refresh = useCallback(async () => {
-    setState("loading");
-    const [system, memory] = await Promise.allSettled([
-      jsonRequest("/api/v1/system"),
-      jsonRequest("/api/portal/v1/memory/namespaces"),
-    ]);
-    setData({
-      system: system.status === "fulfilled" ? system.value : undefined,
-      memory: memory.status === "fulfilled" ? memory.value : undefined,
-    });
-    setState("ready");
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const counts = data.system && typeof data.system.counts === "object" ? data.system.counts as Item : {};
-  const namespaces = items(data.memory, "namespaces");
-  return h("section", { "aria-labelledby": "home-title" },
-    h("div", { className: "portal-hero" },
-      h("div", null, h("p", { className: "eyebrow" }, "ONE OWNER · ONE PRIVATE ENTRY"), h("h2", { id: "home-title" }, "你的 Personal AI 首頁"), h("p", null, "工作、Memory 與 Personal AI 執行狀態集中在同一個 Passkey Portal；外部系統仍保留自己的資料與部署邊界。")),
-      h("div", { className: "hero-actions" }, h("a", { className: "button-link", href: "/goals" }, "建立 Goal"), h("a", { className: "button-link secondary", href: "/systems" }, "系統狀態"))),
-    state === "loading" ? h(LoadingPanel, { message: "正在同步各 authority 的只讀總覽…" }) : null,
-    h("div", { className: "metric-grid" },
-      h("article", null, h("span", null, "Durable Goals"), h("strong", null, text(counts.goals ?? 0)), h("small", null, `${text(counts.openApprovals ?? 0)} 個待核准`)),
-      h("article", null, h("span", null, "Memory Spaces"), h("strong", null, namespaces.length || "—"), h("small", null, namespaces.length ? namespaces.map((item) => text(item.namespace)).join(" · ") : "尚待 Identity link")),
-      h("article", null, h("span", null, "Workers"), h("strong", null, text(counts.workers ?? 0)), h("small", null, `${text(counts.providers ?? 0)} compute providers`)),
-      h("article", null, h("span", null, "Runtime"), h("strong", null, text(nested(data.system, "health", "status") ?? "—")), h("small", null, text(nested(data.system, "health", "runtime") ?? "evidence pending")))),
-    h("div", { className: "quick-grid" },
-      h("a", { href: "/goals" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◎"), h("strong", null, "工作中心"), h("p", null, "Goals、Approvals、Schedules 與執行證據。")),
-      h("a", { href: "/memory" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "◇"), h("strong", null, "Memory"), h("p", null, "直接檢索 ContextHub accepted Memory。")),
-      h("a", { href: "/systems" }, h("span", { className: "quick-icon", "aria-hidden": "true" }, "▦"), h("strong", null, "Systems"), h("p", null, "查看 Personal AI 自身狀態與獨立服務入口。"))),
-    h(IntegrationNotice, { title: "Authority boundary", detail: "Portal 只呈現各系統的 authority projection；健康狀態不會被當成部署、備份、還原或 provider 驗證成功。" }));
+function Card({ title, value, detail }: { title: string; value: unknown; detail?: string }) {
+  return h("article", { className: "metric-card" }, h("span", null, title), h("strong", null, display(value)), detail ? h("small", null, detail) : null);
 }
 
-function SystemsView() {
-  const [system, setSystem] = useState<Item | null>(null);
-  const [state, setState] = useState<ResourceState>("loading");
-  const [message, setMessage] = useState("正在讀取 Personal AI 狀態…");
-  const refresh = useCallback(async () => {
-    setState("loading");
-    try {
-      setSystem(await jsonRequest("/api/v1/system"));
-      setState("ready");
-      setMessage("Personal AI runtime 狀態已同步；外部服務維持獨立部署與權責。");
-    } catch (error) { setState("error"); setMessage(error instanceof Error ? error.message : "Personal AI 狀態讀取失敗"); }
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const health = nested(system, "health") as Item | undefined;
-  const counts = nested(system, "counts") as Item | undefined;
-  return h("section", { "aria-labelledby": "systems-title" },
-    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "PERSONAL AI RUNTIME"), h("h2", { id: "systems-title" }, "Systems")), h("button", { type: "button", onClick: () => void refresh(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")),
-    h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status" }, message),
-    h("div", { className: "service-grid" },
-      h("article", { className: "service-card", id: "personal-ai-control-plane" },
-        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "personal-ai-control-plane"), h("h3", null, "Personal AI Control Plane")), h(StatusPill, { value: health?.status })),
-        h("p", null, "Identity、Control Web、Orchestrator 與 Conversation Archive 的本地 authority。"),
-        h("div", { className: "service-meta" }, h("span", null, "Database", h(StatusPill, { value: health?.database })), h("span", null, "Audit chain", h(StatusPill, { value: health?.auditChain })), h("span", null, "Goals", h("strong", null, text(counts?.goals ?? 0)))),
-        h("a", { className: "button-link secondary", href: "/home" }, "在 Portal 查看")),
-      h("article", { className: "service-card", id: "contexthub" },
-        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "contexthub"), h("h3", null, "ContextHub Memory")), h(StatusPill, { value: "INDEPENDENT" })),
-        h("p", null, "Semantic Memory 維持獨立資料庫與部署；Portal 僅透過 safe-method projection 讀取。"),
-        h("a", { className: "button-link secondary", href: "/memory" }, "開啟 Memory")),
-      h("article", { className: "service-card", id: "hermes-agent" },
-        h("div", { className: "card-title-row" }, h("div", null, h("p", { className: "service-id" }, "hermes-agent"), h("h3", null, "Hermes")), h(StatusPill, { value: "INDEPENDENT" })),
-        h("p", null, "Hermes 維持獨立 conversational edge、資料、release 與 rollback；此 Portal 不再代理其管理狀態。"))),
-    h(IntegrationNotice, { title: "Independent authority boundaries", detail: "Personal AI 不再依賴 AI Home Platform runtime。部署、rollback、backup 與 restore 仍由各 repository 的 operator workflow 和 root-owned deployment gateway 負責；Portal 不持有 Docker 或 NAS 權限。" }));
+function Loading() { return h("p", { className: "notice loading", role: "status" }, "同步 Control Plane 狀態…"); }
+function ErrorPanel({ error }: { error: unknown }) { return h("p", { className: "notice error", role: "alert" }, error instanceof Error ? error.message : "讀取失敗"); }
+
+function Details({ item }: { item: Item }) {
+  return h("dl", null, Object.entries(item).filter(([, value]) => value !== undefined).flatMap(([key, value]) => [
+    h("dt", { key: `${key}-label` }, key),
+    h("dd", { key }, display(value)),
+  ]));
 }
 
-function MemoryView() {
-  const [namespaces, setNamespaces] = useState<string[]>([]);
-  const [namespace, setNamespace] = useState("");
-  const [queryText, setQueryText] = useState("");
-  const [summary, setSummary] = useState<Item | null>(null);
-  const [memories, setMemories] = useState<Item[]>([]);
-  const [state, setState] = useState<ResourceState>("loading");
-  const [message, setMessage] = useState("正在讀取 ContextHub…");
-  const load = useCallback(async (requestedNamespace = namespace, search = queryText) => {
-    setState("loading");
-    try {
-      const namespaceBody = await jsonRequest("/api/portal/v1/memory/namespaces");
-      const available = items(namespaceBody, "namespaces").map((item) => text(item.namespace)).filter((item) => item !== "—");
-      const selected = requestedNamespace && available.includes(requestedNamespace) ? requestedNamespace : available[0] ?? "";
-      setNamespaces(available); setNamespace(selected);
-      if (!selected) { setSummary(null); setMemories([]); setState("ready"); setMessage("Personal AI owner 尚未連結任何 ContextHub human namespace。"); return; }
-      const params = new URLSearchParams({ namespace: selected, limit: "50" });
-      if (search.trim()) params.set("q", search.trim());
-      const [dashboard, result] = await Promise.all([
-        jsonRequest(`/api/portal/v1/memory/dashboard?namespace=${encodeURIComponent(selected)}`),
-        jsonRequest(`/api/portal/v1/memory/memories?${params.toString()}`),
-      ]);
-      setSummary(dashboard); setMemories(items(result)); setState("ready"); setMessage(`已從 ContextHub ${selected} authority 讀取 accepted Memory。`);
-    } catch (error) {
-      setState("error"); setSummary(null); setMemories([]);
-      setMessage(error instanceof Error ? error.message : "ContextHub 讀取失敗");
-    }
-  }, [namespace, queryText]);
-  useEffect(() => { void load("", ""); }, []);
-  return h("section", { "aria-labelledby": "memory-title" },
-    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "CONTEXTHUB SEMANTIC AUTHORITY"), h("h2", { id: "memory-title" }, "Memory")), h("button", { type: "button", onClick: () => void load(), disabled: state === "loading" }, state === "loading" ? "同步中…" : "重新整理")),
-    h("p", { className: `notice ${state}`, role: state === "error" ? "alert" : "status" }, message),
-    h("form", { className: "memory-toolbar", onSubmit: (event: React.FormEvent) => { event.preventDefault(); void load(namespace, queryText); } },
-      h("label", null, "Namespace", h("select", { value: namespace, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => { const value = event.target.value; setNamespace(value); void load(value, queryText); } }, namespaces.map((value) => h("option", { value, key: value }, value)))),
-      h("label", null, "搜尋 accepted Memory", h("input", { type: "search", value: queryText, placeholder: "輸入關鍵字", onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQueryText(event.target.value) })),
-      h("button", { type: "submit", disabled: state === "loading" || !namespace }, "搜尋")),
-    summary ? h("div", { className: "metric-grid memory-metrics" },
-      h("article", null, h("span", null, "Visible"), h("strong", null, text(summary.visible_total ?? 0)), h("small", null, namespace)),
-      h("article", null, h("span", null, "Candidates"), h("strong", null, text(summary.candidates ?? 0)), h("small", null, "等待 review")),
-      h("article", null, h("span", null, "Agents"), h("strong", null, Array.isArray(summary.agents) ? summary.agents.length : 0), h("small", null, "linked clients"))) : null,
-    h("div", { className: "memory-list" }, memories.map((memory, index) => h("article", { className: "memory-card", key: text(memory.id ?? index) },
-      h("div", { className: "card-title-row" }, h("h3", null, text(memory.title ?? memory.type ?? memory.id)), h(StatusPill, { value: memory.trust_state ?? memory.trustState ?? "accepted" })),
-      h("p", null, text(memory.content ?? memory.summary ?? memory.value)),
-      h("div", { className: "memory-meta" }, h("span", null, text(memory.source ?? memory.source_id)), h("span", null, text(memory.updated_at ?? memory.occurred_at ?? memory.created_at)))))),
-    state === "ready" && namespace && memories.length === 0 ? h("p", { className: "empty" }, queryText ? "沒有符合搜尋條件的 accepted Memory。" : "這個 namespace 目前沒有可見 Memory。") : null,
-    h(IntegrationNotice, { title: "Memory authority remains ContextHub", detail: "Portal 不會複製 accepted Memory，也不會把 raw conversations 寫進 ContextHub。Successor、review 與 policy mutation 將在簽署授權完成後另行開放。" }));
-}
-
-export function App({ initialPath = typeof window === "undefined" ? "/home" : window.location.pathname }: { initialPath?: string }) {
-  const current = useMemo(() => route(initialPath), [initialPath]);
-  const active = current.kind === "resource" ? current.view.key : current.kind;
-  const content = current.kind === "home" ? h(PortalHome) : current.kind === "systems" ? h(SystemsView) : current.kind === "memory" ? h(MemoryView) : h(ResourceView, { view: current.view, id: current.id });
-  const primary = [{ key: "home", label: "首頁" }, { key: "goals", label: "Goals" }, { key: "approvals", label: "Approvals" }, { key: "schedules", label: "Schedules" }, { key: "memory", label: "Memory" }, { key: "systems", label: "Systems" }];
-  const secondary = views.filter((view) => !["goals", "approvals", "schedules"].includes(view.key));
+function Home({ refreshVersion }: { refreshVersion: number }) {
+  const [data, setData] = useState<Item | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    let alive = true;
+    Promise.all([request("/api/v2/tasks"), request("/api/v2/workers"), request("/api/v2/models"), request("/api/v2/systems")])
+      .then(([tasks, workers, models, systems]) => alive && setData({ tasks: tasks.items ?? [], workers: workers.items ?? [], models: models.items ?? [], systems: systems.items ?? [] }))
+      .catch((reason) => alive && setError(reason));
+    return () => { alive = false; };
+  }, [refreshVersion]);
+  if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const count = (items: Item[], status: string) => items.filter((item) => item.status === status).length;
   return h(React.Fragment, null,
-    h("a", { className: "skip-link", href: "#main" }, "跳到主要內容"),
-    h("header", { className: "portal-header" },
-      h("a", { className: "brand brand-link", href: "/home" }, h("span", { className: "brand-mark", "aria-hidden": "true" }, "P"), h("span", null, h("span", { className: "eyebrow" }, "PERSONAL AI"), h("strong", null, "Control Plane"), h("small", null, "One private owner portal"))),
-      h("nav", { "aria-label": "主要導覽", className: "primary-nav" }, primary.map((item) => h("a", { key: item.key, href: `/${item.key}`, "aria-current": item.key === active ? "page" : undefined }, item.label))),
-      h("details", { className: "more-nav" }, h("summary", null, "更多"), h("nav", { "aria-label": "次要導覽" }, secondary.map((view) => h("a", { key: view.key, href: `/${view.key}`, "aria-current": view.key === active ? "page" : undefined }, view.label))))),
-    h("main", { id: "main", tabIndex: -1 }, content,
-      h("aside", { className: "boundary", "aria-label": "Evidence boundary" }, h("strong", null, "Evidence boundary"), h("p", null, "Health 不等於 management；tombstone 不等於實體 purge；deployment request 不等於 live verification。外部 adapter 不可用時會明確失敗，不會假成功。"))),
-    h("footer", null, "Personal AI Control Plane · one owner portal · independent authority boundaries"));
+    h("section", { className: "portal-hero" },
+      h("div", null,
+        h("p", { className: "eyebrow" }, "EXECUTION CONTROL / v2"),
+        h("h1", null, "Hermes 的工作，Worker 的算力"),
+        h("p", null, "PersonalAiControlPlane 只管理 Task、Worker、資源與結果回傳，不代替 Hermes 思考或規劃。")),
+      h("div", { className: "hero-actions" }, h("a", { className: "button-link", href: "/tasks" }, "查看 Tasks"), h("a", { className: "button-link secondary", href: "/workers" }, "管理 Workers"))),
+    h("section", { className: "metric-grid" },
+      h(Card, { title: "Hermes", value: data.systems.find((item: Item) => item.id === "hermes")?.status ?? "UNKNOWN" }),
+      h(Card, { title: "ContextHub", value: data.systems.find((item: Item) => item.id === "contexthub")?.status ?? "UNKNOWN" }),
+      h(Card, { title: "Online Workers", value: count(data.workers, "ONLINE") }),
+      h(Card, { title: "Available Models", value: data.models.length })),
+    h("section", { className: "card-grid" },
+      h(Card, { title: "Queued Tasks", value: count(data.tasks, "QUEUED") }),
+      h(Card, { title: "Running Tasks", value: count(data.tasks, "RUNNING") }),
+      h(Card, { title: "Succeeded Tasks", value: count(data.tasks, "SUCCEEDED") }),
+      h(Card, { title: "Failed Tasks", value: count(data.tasks, "FAILED") })),
+    h("section", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "RECENT ACTIVITY"), h("h2", null, "最近 Tasks")), h("a", { className: "button-link secondary", href: "/tasks" }, "全部 Tasks")),
+    h("div", { className: "card-grid" }, data.tasks.slice(0, 6).map((task: Item) =>
+      h("article", { className: "card", key: task.id },
+        h("div", { className: "card-title-row" }, h("a", { href: `/tasks/${task.id}` }, task.title), h(Status, { value: task.status })),
+        h("p", null, `${display(task.taskType)} · ${time(task.createdAt)}`)))),
+  );
+}
+
+function TaskDetail({ id, refreshVersion }: { id: string; refreshVersion: number }) {
+  const [item, setItem] = useState<Item | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { request(`/api/v2/tasks/${encodeURIComponent(id)}`).then(setItem).catch(setError); }, [id, refreshVersion]);
+  if (error) return h(ErrorPanel, { error });
+  if (!item) return h(Loading);
+  const action = async (suffix: string) => {
+    setBusy(true);
+    try { await request(`/api/v2/tasks/${encodeURIComponent(id)}/${suffix}`, { method: "POST" }); setItem(await request(`/api/v2/tasks/${encodeURIComponent(id)}`)); }
+    catch (reason) { setError(reason); }
+    finally { setBusy(false); }
+  };
+  return h(React.Fragment, null,
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "TASK DETAIL"), h("h1", null, item.title)), h(Status, { value: item.status })),
+    h("div", { className: "actions" }, ["QUEUED", "ASSIGNED", "RUNNING"].includes(item.status) ? h("button", { type: "button", disabled: busy, onClick: () => void action("cancel") }, "Cancel") : null, item.status === "FAILED" ? h("button", { type: "button", disabled: busy, onClick: () => void action("retry") }, "Retry") : null),
+    h("section", { className: "detail-card card" }, h(Details, { item: { taskType: item.taskType, source: item.source, correlationId: item.correlationId, worker: item.execution?.workerId ?? "auto", model: item.execution?.model, priority: item.priority, attemptCount: item.attemptCount, createdAt: time(item.createdAt), instruction: item.instruction, context: item.context, result: item.result, failure: item.failure } })),
+    h("section", { className: "card" }, h("h2", null, "Timeline"), h("div", { className: "timeline" }, (item.events ?? []).map((event: Item) => h("article", { key: event.eventId }, h(Status, { value: event.type }), h("span", null, time(event.createdAt)), h("p", null, display(event.payload)))))),
+  );
+}
+
+function Tasks({ refreshVersion }: { refreshVersion: number }) {
+  const [items, setItems] = useState<Item[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => { request(`/api/v2/tasks${filter ? `?status=${filter}` : ""}`).then((value) => setItems(value.items ?? [])).catch(setError); }, [filter, refreshVersion]);
+  if (!items) return error ? h(ErrorPanel, { error }) : h(Loading);
+  return h(React.Fragment, null,
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "TASK MANAGER"), h("h1", null, "Tasks")), h("select", { value: filter, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setFilter(event.target.value) }, h("option", { value: "" }, "全部狀態"), ["QUEUED", "ASSIGNED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"].map((value) => h("option", { key: value, value }, value)))),
+    h("div", { className: "table-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, ["Task", "Status", "Type", "Worker / Model", "Priority", "Created"].map((header) => h("th", { key: header }, header)))),
+      h("tbody", null, items.map((item) => h("tr", { key: item.id }, h("td", null, h("a", { href: `/tasks/${item.id}` }, item.title), h("small", null, item.id)), h("td", null, h(Status, { value: item.status })), h("td", null, item.taskType), h("td", null, `${display(item.execution?.workerId ?? "auto")} / ${display(item.execution?.model?.name ?? "any")}`), h("td", null, item.priority), h("td", null, time(item.createdAt))))))),
+  );
+}
+
+function Workers({ refreshVersion }: { refreshVersion: number }) {
+  const [data, setData] = useState<Item | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => { Promise.all([request("/api/v2/workers"), request("/api/v2/workers/registrations")]).then(([workers, registrations]) => setData({ workers: workers.items ?? [], registrations: registrations.items ?? [] })).catch(setError); }, [refreshVersion]);
+  if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const reload = async () => setData({ workers: (await request("/api/v2/workers")).items ?? [], registrations: (await request("/api/v2/workers/registrations")).items ?? [] });
+  const run = async (path: string, method = "POST") => { try { await request(path, { method }); await reload(); } catch (reason) { setError(reason); } };
+  const pending = data.registrations.filter((item: Item) => item.status === "PENDING");
+  return h(React.Fragment, null,
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER REGISTRY"), h("h1", null, "Workers")), h("p", null, `${data.workers.length} 台已註冊裝置`)),
+    pending.length ? h("section", { className: "card pending" }, h("h2", null, "Pending Registration"), pending.map((item: Item) => h("article", { className: "registration", key: item.id }, h("strong", null, item.name), h(Status, { value: item.status }), h("p", null, `${item.platform} · ${item.hostname ?? ""} · expires ${time(item.expiresAt)}`), h("button", { type: "button", onClick: () => void run(`/api/v2/workers/registrations/${item.id}/approve`) }, "Approve")))) : null,
+    h("div", { className: "card-grid" }, data.workers.map((item: Item) => h("article", { className: "card", key: item.id },
+      h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.status })),
+      h("p", null, `${item.platform} · ${item.hostname ?? "—"} · heartbeat ${item.heartbeatAgeSeconds === null ? "—" : `${item.heartbeatAgeSeconds}s ago`}`),
+      h("p", null, `CPU ${display(item.cpu)} · RAM ${display(item.memory)} · GPU ${display(item.gpu)}`),
+      h("p", null, `Capabilities: ${(item.capabilities ?? []).map((capability: Item) => capability.capability).join(", ") || "—"}`),
+      h("p", null, `Models: ${(item.models ?? []).map((model: Item) => model.model).join(", ") || "—"}`),
+      h("div", { className: "actions" }, item.enabled ? h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/disable`) }, "Disable") : h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/enable`) }, "Enable"), h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/${item.drain ? "resume" : "drain"}`) }, item.drain ? "Resume" : "Drain"), h("button", { className: "danger", type: "button", onClick: () => window.confirm("移除 Worker 並撤銷 token？") && void run(`/api/v2/workers/${item.id}`, "DELETE") }, "Remove")),
+    ))),
+  );
+}
+
+function Models({ refreshVersion }: { refreshVersion: number }) {
+  const [items, setItems] = useState<Item[] | null>(null);
+  useEffect(() => { request("/api/v2/models").then((value) => setItems(value.items ?? [])); }, [refreshVersion]);
+  if (!items) return h(Loading);
+  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "MODEL INVENTORY"), h("h1", null, "Models"), h("div", { className: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Worker", "Runtime", "Model", "Status", "Context", "Load"].map((header) => h("th", { key: header }, header)))), h("tbody", null, items.map((item) => h("tr", { key: `${item.workerId}-${item.runtime}-${item.model}` }, h("td", null, item.worker), h("td", null, item.runtime), h("td", null, item.displayName ?? item.model), h("td", null, h(Status, { value: item.status })), h("td", null, item.contextLength ?? "—"), h("td", null, item.workerStatus)))))));
+}
+
+function Systems({ refreshVersion }: { refreshVersion: number }) {
+  const [items, setItems] = useState<Item[] | null>(null);
+  useEffect(() => { request("/api/v2/systems").then((value) => setItems(value.items ?? [])); }, [refreshVersion]);
+  if (!items) return h(Loading);
+  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "SYSTEM HEALTH"), h("h1", null, "Systems"), h("div", { className: "card-grid" }, items.map((item) => h("article", { className: "card", key: item.id }, h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.status })), h("p", null, `${display(item.type)} · ${display(item.baseUrl)}${display(item.healthPath)}`), h("p", null, `last check ${time(item.checkedAt)} · ${display(item.latencyMs)} ms`)))));
+}
+
+function Settings({ refreshVersion }: { refreshVersion: number }) {
+  const [values, setValues] = useState<Item | null>(null);
+  const [message, setMessage] = useState("");
+  useEffect(() => { request("/api/v2/settings").then(setValues); }, [refreshVersion]);
+  if (!values) return h(Loading);
+  const save = async (event: React.FormEvent) => { event.preventDefault(); try { await request("/api/v2/settings", { method: "PATCH", body: JSON.stringify(values) }); setMessage("設定已儲存"); } catch (error) { setMessage(error instanceof Error ? error.message : "儲存失敗"); } };
+  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "RUNTIME CONFIGURATION"), h("h1", null, "Settings"), h("form", { className: "editor", onSubmit: save }, Object.entries(values).map(([key, value]) => h("label", { key }, key, h("input", { type: typeof value === "boolean" ? "checkbox" : "number", checked: typeof value === "boolean" ? value : undefined, value: typeof value === "number" ? value : undefined, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setValues({ ...values, [key]: typeof value === "boolean" ? event.target.checked : Number(event.target.value) }) }))), h("button", { type: "submit" }, "儲存"), message ? h("p", { className: "notice ready" }, message) : null));
+}
+
+function currentPath(): string { return typeof window === "undefined" ? "/" : window.location.pathname; }
+
+export function App({ initialPath = currentPath() }: { initialPath?: string }) {
+  const [path, setPath] = useState(initialPath);
+  const [refreshVersion, refresh] = useRefresh();
+  useEffect(() => {
+    const onPopState = () => setPath(currentPath());
+    const onClick = (event: MouseEvent) => {
+      const target = (event.target as HTMLElement).closest("a");
+      if (target?.origin === window.location.origin && target.getAttribute("target") !== "_blank") {
+        event.preventDefault();
+        window.history.pushState({}, "", target.href);
+        setPath(currentPath());
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    document.addEventListener("click", onClick);
+    return () => { window.removeEventListener("popstate", onPopState); document.removeEventListener("click", onClick); };
+  }, []);
+  const content = useMemo(() => {
+    const parts = path.split("/").filter(Boolean);
+    if (parts[0] === "tasks" && parts[1]) return h(TaskDetail, { id: parts[1], refreshVersion });
+    if (parts[0] === "tasks") return h(Tasks, { refreshVersion });
+    if (parts[0] === "workers") return h(Workers, { refreshVersion });
+    if (parts[0] === "models") return h(Models, { refreshVersion });
+    if (parts[0] === "systems") return h(Systems, { refreshVersion });
+    if (parts[0] === "settings") return h(Settings, { refreshVersion });
+    return h(Home, { refreshVersion });
+  }, [path, refreshVersion]);
+  return h(Layout, { path, refresh, children: content });
 }
