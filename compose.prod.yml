@@ -20,7 +20,7 @@ services:
     volumes:
       # Fresh v2 state lives beside, but outside, the legacy v1 data folders.
       # The override remains available for an operator-managed project root.
-      - ${PAI_DATA_ROOT:-/volume1/docker/PersonalAiControlPlane/identity}:/data
+      - ${PAI_DATA_ROOT:-/volume1/docker/PersonalAiControlPlane/identity/data}:/data
     ports:
       - "127.0.0.1:9084:8080"
     healthcheck:
