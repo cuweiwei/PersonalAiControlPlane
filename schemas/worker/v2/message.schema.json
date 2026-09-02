@@ -6,7 +6,7 @@
   "required": ["type"],
   "properties": {
     "type": {
-      "enum": ["hello", "hello.ack", "heartbeat", "capabilities.update", "models.update", "task.offer", "task.accept", "task.reject", "task.started", "task.progress", "task.log", "task.result", "task.result.ack", "task.failed", "task.cancel", "task.cancelled", "task.ping", "error"]
+      "enum": ["hello", "hello.ack", "heartbeat", "capabilities.update", "models.update", "task.offer", "task.accept", "task.reject", "task.started", "task.progress", "task.log", "task.artifact", "task.artifact.ack", "task.result", "task.result.ack", "task.failed", "task.cancel", "task.cancelled", "task.ping", "error"]
     },
     "protocol_version": { "const": 2 }
   }

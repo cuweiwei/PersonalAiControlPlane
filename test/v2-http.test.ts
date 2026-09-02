@@ -57,6 +57,7 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     assert.equal(typeof enrollment.token, "string");
     const token = enrollment.token as string;
     workers.markConnected(workerId);
+    workers.heartbeat(workerId, { system: { os: "linux", architecture: "x64", cpu: 4 }, resources: { memory: { totalMb: 1024, freeMb: 512 } }, execution: { max_concurrency: 2 } });
     workers.updateCapabilities(workerId, [{ capability: "generic", status: "READY" }]);
 
     const created = await jsonRequest("/api/v2/tasks", { method: "POST", body: JSON.stringify({ source: "hermes", correlation_id: "http-test", title: "HTTP task", task_type: "generic", instruction: "run", context: {}, payload: {}, execution: { capabilities: ["generic"], runtime: "auto", resources: {} }, limits: { timeout_seconds: 60, max_attempts: 2 }, priority: "normal", input_artifact_ids: [] }) });
@@ -73,7 +74,26 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     const download = await fetch(`${origin}/api/v2/worker/artifacts/${artifact.id}`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(download.status, 200);
     assert.equal(await download.text(), "hello");
-    assert.equal((await jsonRequest("/api/v2/workers")).body.items[0].id, workerId);
+    const workerListing = await jsonRequest("/api/v2/workers");
+    assert.equal(workerListing.body.items[0].id, workerId);
+    assert.equal(workerListing.body.items[0].connection.state, "ONLINE");
+    assert.equal(typeof workerListing.body.items[0].availableActions.remove, "boolean");
+    const renamed = await jsonRequest(`/api/v2/workers/${workerId}`, { method: "PATCH", body: JSON.stringify({ name: "HTTP Worker Renamed" }) });
+    assert.equal(renamed.body.name, "HTTP Worker Renamed");
+    const capabilityId = Number(db.one<{ id: number }>("SELECT id FROM worker_capabilities WHERE worker_id = ?", workerId)?.id);
+    const revoked = await jsonRequest(`/api/v2/workers/${workerId}/capabilities/${capabilityId}/revoke`, { method: "POST" });
+    assert.equal(revoked.body.capabilities[0].grantStatus, "REVOKED");
+    const pending = await jsonRequest("/api/v2/worker/registration", { method: "POST", body: JSON.stringify({ name: "Delete Me", registration_secret: "delete-registration-secret", platform: "linux", hardware: {} }) });
+    const deletedRegistration = await jsonRequest(`/api/v2/workers/registrations/${pending.body.registrationId}`, { method: "DELETE" });
+    assert.equal(deletedRegistration.body.status, "removed");
+    const busy = await jsonRequest(`/api/v2/workers/${workerId}`, { method: "DELETE" });
+    assert.equal(busy.response.status, 409);
+    const attempt = assignment!.attemptId;
+    assert.equal(tasks.fail(taskId, attempt, workerId, "WORKER_DISCONNECTED", "test cleanup", Date.now(), false), "FAILED");
+    const removed = await jsonRequest(`/api/v2/workers/${workerId}`, { method: "DELETE" });
+    assert.equal(removed.response.status, 200);
+    const repeated = await jsonRequest(`/api/v2/workers/${workerId}`, { method: "DELETE" });
+    assert.equal(repeated.response.status, 200);
     assert.equal((await jsonRequest("/api/v2/models")).body.items.length, 0);
     assert.equal((await jsonRequest("/api/v2/systems")).body.items.length, 3);
     const patched = await jsonRequest("/api/v2/settings", { method: "PATCH", body: JSON.stringify({ default_max_attempts: 3 }) });

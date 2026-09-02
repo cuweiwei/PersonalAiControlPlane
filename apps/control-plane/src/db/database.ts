@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS workers (
   last_connected_at INTEGER,
   last_disconnected_at INTEGER,
   last_assigned_at INTEGER,
+  credential_expires_at INTEGER,
+  last_error_code TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -114,7 +116,8 @@ CREATE TABLE IF NOT EXISTS worker_registration_requests (
   created_at INTEGER NOT NULL,
   decided_at INTEGER,
   decided_by TEXT,
-  worker_id TEXT REFERENCES workers(id)
+  worker_id TEXT REFERENCES workers(id),
+  finalized_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_registration_status ON worker_registration_requests(status, expires_at);
 
@@ -126,6 +129,9 @@ CREATE TABLE IF NOT EXISTS worker_capabilities (
   runtime_version TEXT,
   max_concurrency INTEGER NOT NULL DEFAULT 1,
   descriptor_json TEXT NOT NULL,
+  descriptor_hash TEXT,
+  grant_status TEXT NOT NULL DEFAULT 'DISCOVERED',
+  superseded_at INTEGER,
   status TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(worker_id, capability, runtime)
@@ -143,6 +149,44 @@ CREATE TABLE IF NOT EXISTS worker_models (
   updated_at INTEGER NOT NULL,
   UNIQUE(worker_id, runtime, model_id)
 );
+
+CREATE TABLE IF NOT EXISTS worker_providers (
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  provider TEXT NOT NULL,
+  evidence_level TEXT NOT NULL,
+  provider_verified INTEGER NOT NULL DEFAULT 0,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(worker_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS worker_purge_tombstones (
+  worker_id TEXT PRIMARY KEY,
+  registration_id TEXT,
+  fingerprint_digest TEXT NOT NULL,
+  removed_at INTEGER NOT NULL,
+  removed_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_enrollment_tombstones (
+  registration_id TEXT PRIMARY KEY,
+  fingerprint_digest TEXT NOT NULL,
+  removed_at INTEGER NOT NULL,
+  removed_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_uuid TEXT NOT NULL UNIQUE,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  worker_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  previous_hash TEXT NOT NULL DEFAULT '',
+  event_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_worker ON audit_events(worker_id, id);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
@@ -217,8 +261,22 @@ export class ControlPlaneDatabase {
     this.connection.exec("BEGIN IMMEDIATE");
     try {
       this.connection.exec(SCHEMA);
+      const ensureColumn = (table: string, column: string, definition: string) => {
+        const found = this.connection.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+        if (!found.some((entry) => entry.name === column)) this.connection.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      };
+      // v2 production databases may have been created before the worker lifecycle
+      // projection was introduced. Keep this migration additive and idempotent.
+      ensureColumn("workers", "credential_expires_at", "INTEGER");
+      ensureColumn("workers", "last_error_code", "TEXT");
+      ensureColumn("worker_capabilities", "descriptor_hash", "TEXT");
+      ensureColumn("worker_capabilities", "grant_status", "TEXT NOT NULL DEFAULT 'DISCOVERED'");
+      ensureColumn("worker_capabilities", "superseded_at", "INTEGER");
+      ensureColumn("worker_registration_requests", "finalized_at", "INTEGER");
       const existing = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 1").get();
       if (!existing) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (1, ?, ?)").run("control-plane-v2", Date.now());
+      const workerProjection = this.connection.prepare("SELECT version FROM schema_migrations WHERE version = 2").get();
+      if (!workerProjection) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (2, ?, ?)").run("worker-management-projection", Date.now());
       this.connection.exec("COMMIT");
     } catch (error) {
       this.connection.exec("ROLLBACK");

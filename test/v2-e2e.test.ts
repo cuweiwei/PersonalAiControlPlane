@@ -30,7 +30,7 @@ test("canonical v2 flow enrolls a worker, dispatches over WS, and records result
   const events = new EventHub();
   const tasks = new TaskService(db, events, { callbackEnabled: false });
   const workers = new WorkerService(db, events);
-  const coordinator = new WorkerCoordinator(workers, tasks, events);
+  const coordinator = new WorkerCoordinator(workers, tasks, events, new ArtifactStorage(artifactDirectory));
   const scheduler = new ResourceScheduler(db, tasks, workers, coordinator, events);
   const health = new HealthMonitor(db, events); health.seed();
   const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts: new ArtifactStorage(artifactDirectory), settings: new SettingsService(db), health, events, assetRoot: artifactDirectory });
@@ -54,6 +54,10 @@ test("canonical v2 flow enrolls a worker, dispatches over WS, and records result
     const offer = await waitFor(messages, "task.offer");
     socket.send(JSON.stringify({ type: "task.accept", task_id: task.id, attempt_id: offer.attempt_id }));
     socket.send(JSON.stringify({ type: "task.started", task_id: task.id, attempt_id: offer.attempt_id }));
+    socket.send(JSON.stringify({ type: "task.artifact", task_id: task.id, attempt_id: offer.attempt_id, artifact: { filename: "output.txt", media_type: "text/plain", data_base64: Buffer.from("worker output").toString("base64") } }));
+    const artifactAck = await waitFor(messages, "task.artifact.ack");
+    assert.equal(typeof artifactAck.artifact_id, "string");
+    assert.equal(db.one("SELECT id FROM artifacts WHERE id = ?", artifactAck.artifact_id)?.id, artifactAck.artifact_id);
     socket.send(JSON.stringify({ type: "task.result", task_id: task.id, attempt_id: offer.attempt_id, result: { ok: true }, metrics: {} }));
     await waitFor(messages, "task.result.ack");
     for (let index = 0; index < 100; index += 1) { if (tasks.get(task.id as string)?.status === "SUCCEEDED") break; await new Promise((resolve) => setTimeout(resolve, 10)); }

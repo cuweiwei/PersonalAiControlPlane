@@ -99,3 +99,50 @@ test("worker failure is retried as a new fenced attempt and stale workers requeu
   assert.equal(tasks.get(staleTask.id as string)?.status, "QUEUED");
   db.close();
 });
+
+test("worker removal is busy-safe, purges credentials/inventory, and preserves history", () => {
+  const { db, tasks, workers, scheduler, offers } = setup();
+  const base = Date.parse("2026-09-02T02:00:00.000Z");
+  const registration = workers.register({ name: "Purge Worker", registrationSecret: "registration-secret-purge-123", platform: "linux", hostname: "purge", hardware: {} }, base);
+  const approved = workers.approveRegistration(registration.registrationId, "owner", base + 1);
+  const enrolled = workers.pollRegistration(registration.registrationId, "registration-secret-purge-123", base + 2);
+  const workerId = String(approved.workerId);
+  workers.markConnected(workerId, base + 3);
+  workers.updateCapabilities(workerId, [{ capability: "generic", runtime: "local", status: "READY" }], base + 3);
+  workers.updateModels(workerId, [{ runtime: "local", id: "demo", status: "ready" }], base + 3);
+  const capabilityId = Number(db.one<{ id: number }>("SELECT id FROM worker_capabilities WHERE worker_id = ?", workerId)?.id);
+  db.run("UPDATE worker_capabilities SET grant_status = 'GRANTED' WHERE id = ?", capabilityId);
+  workers.updateCapabilities(workerId, [{ capability: "generic", runtime: "local", status: "READY", descriptor: { version: 2 } }], base + 4);
+  assert.equal((workers.getWorker(workerId) as any)?.capabilities?.[0]?.grantStatus, "REQUIRES_REVIEW");
+  workers.grantCapability(workerId, capabilityId, "owner", base + 4);
+  const created = tasks.create(taskInput({ taskType: "generic", execution: { capabilities: ["generic"], runtime: "auto", resources: {} } }), base + 4);
+  assert.equal(scheduler.tick(base + 5), 1);
+  assert.throws(() => workers.remove(workerId, "owner", base + 6), /WORKER_BUSY/);
+  assert.equal(workers.getWorker(workerId)?.enabled, true);
+  const attempt = offers[0];
+  assert.equal(tasks.fail(created.id as string, attempt.attemptId, workerId, "WORKER_DISCONNECTED", "done", base + 7, false), "FAILED");
+  workers.revokeCapability(workerId, capabilityId, "owner", base + 7);
+  assert.equal((workers.getWorker(workerId) as any)?.capabilities?.[0]?.grantStatus, "REVOKED");
+  const removed = workers.remove(workerId, "owner", base + 8);
+  assert.equal(removed.status, "removed");
+  assert.equal(workers.listWorkers().some((item) => item.id === workerId), false);
+  assert.equal(workers.tokenDisposition(String(enrolled.token)), "removed");
+  assert.equal(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM worker_tokens WHERE worker_id = ?", workerId)?.count, 0);
+  assert.equal(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM worker_capabilities WHERE worker_id = ?", workerId)?.count, 0);
+  assert.equal(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM worker_models WHERE worker_id = ?", workerId)?.count, 0);
+  assert.equal(db.one<{ count: number }>("SELECT COUNT(*) AS count FROM task_attempts WHERE worker_id = ?", workerId)?.count, 1);
+  assert.equal(workers.verifyAuditChain(), true);
+  assert.equal(workers.remove(workerId, "owner", base + 9).alreadyRemoved, true);
+  db.close();
+});
+
+test("approved enrollment that is not finalized expires and is not listed as a worker", () => {
+  const { db, workers } = setup();
+  const base = Date.parse("2026-09-02T03:00:00.000Z");
+  const registration = workers.register({ name: "Expired Worker", registrationSecret: "registration-secret-expired-123", platform: "linux", hardware: {} }, base);
+  const approved = workers.approveRegistration(registration.registrationId, "owner", base + 1);
+  workers.expireRegistrations(base + 10 * 60_000 + 2);
+  assert.equal(workers.listWorkers().some((item) => item.id === approved.workerId), false);
+  assert.equal(workers.listRegistrations(base + 10 * 60_000 + 2)[0].status, "EXPIRED");
+  db.close();
+});

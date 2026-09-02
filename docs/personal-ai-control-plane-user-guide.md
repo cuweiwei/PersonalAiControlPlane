@@ -24,11 +24,13 @@ npm run worker:cli -- status --origin http://127.0.0.1:8080
 npm run worker:cli -- start --origin http://127.0.0.1:8080
 ```
 
-registration secret 與 bearer token 都寫入 worker data directory 的 mode `0600` 檔案；正式 macOS/Windows packaging 應將 token data directory 放在使用者 session 的受保護位置。`reset` 會清除本地 enrollment，之後必須重新 owner approve：
+正式 Worker 預設將 bearer token 放在 macOS Keychain，Windows 使用目前登入使用者的 DPAPI；`PAI_WORKER_CREDENTIAL_BACKEND=file` 僅供本機測試。registration secret 也使用相同 credential backend。若 Control Plane 移除 Worker，Agent 會進入 terminal removed 狀態，不會用舊 token 重連；明確執行 `reset` 會清除本地 credential、enrollment 與 runtime DB，之後必須重新 owner approve：
 
 ```bash
 npm run worker:cli -- reset
 ```
+
+Workers 頁將 enrollment 與已註冊 Worker 分開，提供 Online／Needs attention／Drained 篩選、詳細連線/派工/活動投影、Rename、Drain/Resume、能力 Grant/Revoke 與永久 Remove。Remove 會在仍有活動中的 attempt 時回 `409 WORKER_BUSY`，並保留 task/attempt 歷史；重試是冪等的。若部署環境將 `PAI_REQUIRE_STEP_UP=true`，Remove、能力變更與 enrollment 清除需由前置身份層帶入短期 `x-step-up-assertion`，Control Plane 不自行保存 assertion。
 
 ## 啟用執行能力
 

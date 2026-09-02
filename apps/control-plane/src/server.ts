@@ -31,6 +31,14 @@ async function body(request: IncomingMessage, limit: number): Promise<Buffer> {
 }
 async function bodyJson(request: IncomingMessage): Promise<Record<string, unknown>> { const raw = await body(request, JSON_LIMIT); if (!raw.length) return {}; const parsed = JSON.parse(raw.toString("utf8")); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("INVALID_JSON_BODY"); return parsed as Record<string, unknown>; }
 function authWorker(request: IncomingMessage, workers: WorkerService): Row { const value = request.headers.authorization; const token = value?.startsWith("Bearer ") ? value.slice(7) : ""; const worker = workers.authenticate(token); if (!worker) throw new Error("INVALID_WORKER_TOKEN"); return worker; }
+function actor(request: IncomingMessage): string { const value = request.headers["x-actor"]?.toString().trim(); return value && value.length <= 120 ? value : "owner"; }
+function stepUpActor(request: IncomingMessage): string {
+  if (process.env.PAI_REQUIRE_STEP_UP === "true") {
+    const assertion = request.headers["x-step-up-assertion"]?.toString().trim();
+    if (!assertion || assertion.length < 16 || assertion.length > 4096) throw new Error("STEP_UP_REQUIRED");
+  }
+  return actor(request);
+}
 
 export function createControlPlaneServer(options: Options) {
   const root = options.assetRoot ?? process.env.PAI_CONTROL_WEB_ROOT ?? "./dist/control-web";
@@ -57,14 +65,18 @@ export function createControlPlaneServer(options: Options) {
           const registrationId = parts[4];
           if (method === "POST" && parts[5] === "approve") return writeJson(response, 200, options.workers.approveRegistration(registrationId)), true;
           if (method === "POST" && parts[5] === "reject") { options.workers.rejectRegistration(registrationId); return writeJson(response, 200, { status: "rejected", registrationId }), true; }
+          if (method === "DELETE" && parts.length === 5) return writeJson(response, 200, options.workers.removeRegistration(registrationId, stepUpActor(request))), true;
         }
         if (method === "GET" && parts.length === 4) { const worker = options.workers.getWorker(parts[3]); if (!worker) throw new Error("WORKER_NOT_FOUND"); return writeJson(response, 200, worker), true; }
         const workerId = parts[3]; if (!workerId) throw new Error("WORKER_NOT_FOUND");
-        if (method === "POST" && parts[4] === "enable") { options.workers.setEnabled(workerId, true); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
-        if (method === "POST" && parts[4] === "disable") { options.workers.setEnabled(workerId, false); options.coordinator.closeWorker(workerId); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
-        if (method === "POST" && parts[4] === "drain") { options.workers.setDrain(workerId, true); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
-        if (method === "POST" && parts[4] === "resume") { options.workers.setDrain(workerId, false); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
-        if (method === "DELETE" && parts.length === 4) { options.workers.remove(workerId); options.coordinator.closeWorker(workerId); return writeJson(response, 200, { status: "removed", workerId }), true; }
+        if (method === "PATCH" && parts.length === 4) { const input = await bodyJson(request); options.workers.rename(workerId, String(input.name ?? ""), actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "enable") { options.workers.setEnabled(workerId, true, actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "disable") { options.workers.setEnabled(workerId, false, actor(request)); options.coordinator.closeWorker(workerId, 4005, "worker disabled"); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "drain") { options.workers.setDrain(workerId, true, actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "resume") { options.workers.setDrain(workerId, false, actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "capabilities" && parts[6] === "grant") { options.workers.grantCapability(workerId, parts[5], stepUpActor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "POST" && parts[4] === "capabilities" && parts[6] === "revoke") { options.workers.revokeCapability(workerId, parts[5], stepUpActor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
+        if (method === "DELETE" && parts.length === 4) { const removed = options.workers.remove(workerId, stepUpActor(request)); options.coordinator.closeWorker(workerId); return writeJson(response, 200, removed), true; }
       }
       if (parts[2] === "worker" && parts[3] === "registration") {
         if (method === "POST" && parts.length === 4) { const input = parseRegistrationInput(await bodyJson(request)); if (process.env.PAI_REGISTRATION_ENABLED === "false") throw new Error("REGISTRATION_DISABLED"); return writeJson(response, 202, options.workers.register(input)), true; }
@@ -78,12 +90,12 @@ export function createControlPlaneServer(options: Options) {
       }
       if (parts[2] === "worker" && parts[3] === "tasks" && parts[5] === "artifacts") {
         const worker = authWorker(request, options.workers); const taskId = parts[4]; const taskRow = options.db.one<Row>("SELECT t.id FROM tasks t JOIN task_attempts a ON a.task_id = t.id WHERE t.id = ? AND a.worker_id = ?", taskId, worker.id); if (!taskRow) throw new Error("ARTIFACT_NOT_FOUND");
-        if (method === "POST") { const bytes = await body(request, Number(process.env.PAI_MAX_ARTIFACT_BYTES ?? 1_073_741_824)); const filename = basename(request.headers["x-artifact-filename"]?.toString() ?? "artifact.bin"); const stored = options.artifacts.write(taskId, filename, request.headers["content-type"]?.toString() ?? "application/octet-stream", bytes); options.db.run("INSERT INTO artifacts(id, task_id, attempt_id, filename, media_type, size_bytes, sha256, storage_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", stored.id, taskId, options.db.one<Row>("SELECT current_attempt_id FROM tasks WHERE id = ?", taskId)?.current_attempt_id ?? null, stored.filename, stored.mediaType, stored.sizeBytes, stored.sha256, stored.storagePath, Date.now()); options.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'OUTPUT')", taskId, stored.id); return writeJson(response, 201, { id: stored.id, filename: stored.filename, mediaType: stored.mediaType, sizeBytes: stored.sizeBytes, sha256: stored.sha256 }), true; }
+        if (method === "POST") { const bytes = await body(request, Number(process.env.PAI_MAX_ARTIFACT_BYTES ?? 1_073_741_824)); const filename = basename(request.headers["x-artifact-filename"]?.toString() ?? "artifact.bin"); const mediaTypeRaw = request.headers["content-type"]?.toString() ?? "application/octet-stream"; const mediaType = /^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+(?:;[A-Za-z0-9=._ -]+)*$/.test(mediaTypeRaw) ? mediaTypeRaw.slice(0, 160) : "application/octet-stream"; const stored = options.artifacts.write(taskId, filename, mediaType, bytes); options.db.run("INSERT INTO artifacts(id, task_id, attempt_id, filename, media_type, size_bytes, sha256, storage_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", stored.id, taskId, options.db.one<Row>("SELECT current_attempt_id FROM tasks WHERE id = ?", taskId)?.current_attempt_id ?? null, stored.filename, stored.mediaType, stored.sizeBytes, stored.sha256, stored.storagePath, Date.now()); options.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'OUTPUT')", taskId, stored.id); return writeJson(response, 201, { id: stored.id, filename: stored.filename, mediaType: stored.mediaType, sizeBytes: stored.sizeBytes, sha256: stored.sha256 }), true; }
       }
       if (parts[2] === "worker" && parts[3] === "artifacts" && method === "GET") { const worker = authWorker(request, options.workers); const artifactId = parts[4]; const row = options.db.one<Row>("SELECT a.* FROM artifacts a JOIN task_artifacts ta ON ta.artifact_id = a.id JOIN task_attempts at ON at.task_id = ta.task_id WHERE a.id = ? AND at.worker_id = ?", artifactId, worker.id); if (!row || !options.artifacts.exists(row.storage_path)) throw new Error("ARTIFACT_NOT_FOUND"); response.writeHead(200, { "content-type": row.media_type ?? "application/octet-stream", "content-length": row.size_bytes, "content-disposition": `attachment; filename="${basename(row.filename)}"` }); options.artifacts.stream(row.storage_path).pipe(response); return true; }
       return writeJson(response, 404, errorBody("NOT_FOUND", "API route not found")), true;
     } catch (error) {
-      const code = error instanceof Error ? error.message : "INTERNAL_ERROR"; const status = code === "TASK_NOT_FOUND" || code === "WORKER_NOT_FOUND" || code === "REGISTRATION_NOT_FOUND" || code === "ARTIFACT_NOT_FOUND" ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" ? 403 : code === "INVALID_TASK_STATE" || code === "INVALID_REGISTRATION_STATE" ? 409 : code === "REQUEST_TOO_LARGE" ? 413 : code.startsWith("INVALID_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code.includes("must be") ? 400 : 500; return writeJson(response, status, errorBody(code, code, process.env.NODE_ENV === "production" ? undefined : { requestId: requestId(request) })), true;
+      const code = error instanceof Error ? error.message : "INTERNAL_ERROR"; const status = code === "TASK_NOT_FOUND" || code === "WORKER_NOT_FOUND" || code === "REGISTRATION_NOT_FOUND" || code === "ARTIFACT_NOT_FOUND" || code === "CAPABILITY_NOT_FOUND" ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" || code === "STEP_UP_REQUIRED" ? 403 : code === "INVALID_TASK_STATE" || code === "INVALID_REGISTRATION_STATE" || code === "WORKER_BUSY" || code === "REGISTRATION_ALREADY_FINALIZED" ? 409 : code === "REQUEST_TOO_LARGE" ? 413 : code.startsWith("INVALID_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code.includes("must be") ? 400 : 500; return writeJson(response, status, errorBody(code, code, process.env.NODE_ENV === "production" ? undefined : { requestId: requestId(request) })), true;
     }
   };
 

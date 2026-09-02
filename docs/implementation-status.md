@@ -9,15 +9,17 @@
 | Unified Control Plane process | `implemented_local` | `apps/control-plane/src/index.ts` 建立單一 server、scheduler、health、callback loops |
 | Fresh SQLite authority | `implemented_local` | `apps/control-plane/src/db/database.ts` 只建立 v2 `controlplane.db` schema |
 | Task lifecycle/fencing | `implemented_local` | task service、state machine、attempt/event tables 與 `test/v2-core.test.ts` |
-| Worker enrollment/token hash | `implemented_local` | registration approve/poll、SHA-256 token hash 與 HTTP tests |
-| Worker WS/runtime durability | `implemented_local` | outbound WS、local assignment/result persistence、result ack/resend 與 `test/v2-worker.test.ts` |
+| Worker enrollment/token hash | `implemented_local` | registration phase/expiry、OS credential backend、removed terminal state、reset 與 SHA-256 token hash |
+| Worker management projection | `implemented_local` | connection/dispatch/activity/credential/provider/diagnostics aggregate、search/filter/detail、rename、drain/resume、capability revoke |
+| Worker purge/audit | `implemented_local` | busy-safe idempotent purge、credential/inventory cleanup、minimal tombstone、append-only audit chain |
+| Worker WS/runtime durability | `implemented_local` | hello acknowledgement、outbound WS、local assignment/result persistence、cancel fencing、result ack/resend、artifact protocol |
 | Scheduler filtering/scoring | `implemented_local` | capability/runtime/model/resource/load rules 與 core tests |
 | Artifact storage | `implemented_local` | task-scoped storage、digest、worker-authenticated upload/download 與 HTTP test |
 | Hermes callback outbox | `live_verified` | claim、at-least-once POST、bounded retry；live Hermes callback receiver 回 `202 accepted` |
 | Systems health | `live_verified` | NAS shared network 上 Hermes/ContextHub 均回 `HEALTHY HTTP_200` |
 | Control Web | `implemented_local` | React/Vite Dashboard、Tasks、Workers、Models、Systems、Settings |
 | CI/release compose | `implemented_local` | immutable image workflow、digest-pinned compose、`/healthz`/`/readyz` |
-| Local checks | `ci_verified` | `npm run check`、strict `npm run typecheck`、13 tests、`npm run build:web` 全部通過；main CI `33618947655` 成功 |
+| Local checks | `ci_verified` | `npm run check`、strict `npm run typecheck`、17 tests、`npm run build:web` 全部通過；main CI `33618947655` 成功 |
 | NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |

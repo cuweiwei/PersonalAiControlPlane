@@ -35,7 +35,7 @@ npm run worker:cli -- start --origin http://127.0.0.1:8080
 npm run worker:cli -- status
 ```
 
-Worker 以 outbound WebSocket 連線，registration secret/token 儲存在 local data directory 的 `0600` 檔案。`reset` 後需重新 owner approval。oMLX、LM Studio、Ollama、Codex、Python 和 command executor 都以明確設定控制，command 預設關閉。
+Worker 以 outbound WebSocket 連線，預設在 macOS 使用 Keychain、Windows 使用目前登入使用者的 DPAPI 保護 credential；`PAI_WORKER_CREDENTIAL_BACKEND=file` 僅供本機測試。Workers 管理頁會聚合連線、heartbeat、派工/Drain、活動、credential、capability、provider evidence 與診斷，並支援搜尋、篩選、Rename、Grant/Revoke、Resume 與永久 Remove。Worker 被 Control Plane 移除後會進入 terminal removed 狀態，必須明確執行 `reset` 才會清除本機身分、registration 與 runtime DB，再重新 owner approval。oMLX、LM Studio、Ollama、Codex、Python 和 command executor 都以明確設定控制，command 預設關閉。
 
 ## Architecture boundary
 

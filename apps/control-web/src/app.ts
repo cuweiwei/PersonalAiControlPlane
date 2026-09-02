@@ -110,7 +110,7 @@ function Home({ refreshVersion }: { refreshVersion: number }) {
     h("section", { className: "metric-grid" },
       h(Card, { title: "Hermes", value: data.systems.find((item: Item) => item.id === "hermes")?.status ?? "UNKNOWN" }),
       h(Card, { title: "ContextHub", value: data.systems.find((item: Item) => item.id === "contexthub")?.status ?? "UNKNOWN" }),
-      h(Card, { title: "Online Workers", value: count(data.workers, "ONLINE") }),
+      h(Card, { title: "Online Workers", value: data.workers.filter((item: Item) => (item.connection?.state ?? item.status) === "ONLINE").length }),
       h(Card, { title: "Available Models", value: data.models.length })),
     h("section", { className: "card-grid" },
       h(Card, { title: "Queued Tasks", value: count(data.tasks, "QUEUED") }),
@@ -163,23 +163,61 @@ function Tasks({ refreshVersion }: { refreshVersion: number }) {
 function Workers({ refreshVersion }: { refreshVersion: number }) {
   const [data, setData] = useState<Item | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
   useEffect(() => { Promise.all([request("/api/v2/workers"), request("/api/v2/workers/registrations")]).then(([workers, registrations]) => setData({ workers: workers.items ?? [], registrations: registrations.items ?? [] })).catch(setError); }, [refreshVersion]);
   if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
   const reload = async () => setData({ workers: (await request("/api/v2/workers")).items ?? [], registrations: (await request("/api/v2/workers/registrations")).items ?? [] });
-  const run = async (path: string, method = "POST") => { try { await request(path, { method }); await reload(); } catch (reason) { setError(reason); } };
+  const run = async (path: string, method = "POST", body?: unknown) => { try { await request(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); await reload(); } catch (reason) { setError(reason); } };
+  const workers = data.workers.filter((item: Item) => {
+    const needle = search.trim().toLowerCase();
+    const matches = !needle || [item.name, item.hostname, item.id, item.platform].some((value) => String(value ?? "").toLowerCase().includes(needle));
+    const state = item.connection?.state;
+    return matches && (filter === "all" || (filter === "online" && state === "ONLINE") || (filter === "attention" && ["STALE", "NO_HEARTBEAT"].includes(state)) || (filter === "drained" && ["DRAINING", "DRAINED"].includes(item.dispatch?.state)));
+  });
+  const allWorkers = data.workers as Item[];
   const pending = data.registrations.filter((item: Item) => item.status === "PENDING");
+  const unresolved = data.registrations.filter((item: Item) => item.status !== "PENDING" && !item.workerId);
   return h(React.Fragment, null,
-    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER REGISTRY"), h("h1", null, "Workers")), h("p", null, `${data.workers.length} 台已註冊裝置`)),
-    pending.length ? h("section", { className: "card pending" }, h("h2", null, "Pending Registration"), pending.map((item: Item) => h("article", { className: "registration", key: item.id }, h("strong", null, item.name), h(Status, { value: item.status }), h("p", null, `${item.platform} · ${item.hostname ?? ""} · expires ${time(item.expiresAt)}`), h("button", { type: "button", onClick: () => void run(`/api/v2/workers/registrations/${item.id}/approve`) }, "Approve")))) : null,
-    h("div", { className: "card-grid" }, data.workers.map((item: Item) => h("article", { className: "card", key: item.id },
-      h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.status })),
-      h("p", null, `${item.platform} · ${item.hostname ?? "—"} · heartbeat ${item.heartbeatAgeSeconds === null ? "—" : `${item.heartbeatAgeSeconds}s ago`}`),
-      h("p", null, `CPU ${display(item.cpu)} · RAM ${display(item.memory)} · GPU ${display(item.gpu)}`),
-      h("p", null, `Capabilities: ${(item.capabilities ?? []).map((capability: Item) => capability.capability).join(", ") || "—"}`),
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER REGISTRY"), h("h1", null, "Workers")), h("p", null, `${allWorkers.length} 台已註冊 · ${allWorkers.filter((item) => item.connection?.state === "ONLINE").length} online`)),
+    h("div", { className: "metric-grid" }, h(Card, { title: "Online", value: allWorkers.filter((item) => item.connection?.state === "ONLINE").length }), h(Card, { title: "Needs attention", value: allWorkers.filter((item) => ["STALE", "NO_HEARTBEAT"].includes(item.connection?.state)).length }), h(Card, { title: "Drained", value: allWorkers.filter((item) => ["DRAINING", "DRAINED"].includes(item.dispatch?.state)).length }), h(Card, { title: "Pending enrollment", value: pending.length })),
+    h("div", { className: "worker-toolbar" }, h("input", { value: search, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setSearch(event.target.value), placeholder: "搜尋名稱、主機或 Worker ID", "aria-label": "搜尋 Worker" }), h("select", { value: filter, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setFilter(event.target.value), "aria-label": "Worker 篩選" }, h("option", { value: "all" }, "全部"), h("option", { value: "online" }, "Online"), h("option", { value: "attention" }, "Needs attention"), h("option", { value: "drained" }, "Drained"))),
+    pending.length ? h("section", { className: "card pending" }, h("h2", null, "待核准 Enrollment"), pending.map((item: Item) => h("article", { className: "registration", key: item.id }, h("strong", null, item.name), h(Status, { value: item.phase ?? item.status }), h("p", null, `${item.platform} · ${item.hostname ?? ""} · expires ${time(item.expiresAt)}`), h("div", { className: "actions" }, h("button", { type: "button", onClick: () => void run(`/api/v2/workers/registrations/${item.id}/approve`) }, "Approve"), h("button", { className: "danger", type: "button", onClick: () => window.confirm("刪除此 enrollment request？") && void run(`/api/v2/workers/registrations/${item.id}`, "DELETE") }, "Delete"))))) : null,
+    unresolved.length ? h("section", { className: "card pending" }, h("h2", null, "未完成 / 已過期 Enrollment"), unresolved.map((item: Item) => h("article", { className: "registration", key: item.id }, h("strong", null, item.name), h(Status, { value: item.phase ?? item.status }), h("p", null, `${item.platform} · ${item.hostname ?? ""} · ${item.workerId ? `worker ${item.workerId}` : "尚未建立 Worker"}`), item.removable ? h("button", { className: "danger", type: "button", onClick: () => window.confirm("永久清除此 enrollment request？") && void run(`/api/v2/workers/registrations/${item.id}`, "DELETE") }, "Delete") : null))) : null,
+    h("div", { className: "card-grid" }, workers.map((item: Item) => h("article", { className: "card", key: item.id },
+      h("div", { className: "card-title-row" }, h("h2", null, h("a", { href: `/workers/${item.id}` }, item.name)), h(Status, { value: item.connection?.state ?? item.status })),
+      h("p", null, `${item.platform} · ${item.hostname ?? "—"} · ${item.connection?.reason ?? (item.heartbeatAgeSeconds === null ? "尚無 heartbeat" : `heartbeat ${item.heartbeatAgeSeconds}s ago`)}`),
+      h("p", null, `派工 ${item.dispatch?.state ?? item.drainState}${item.dispatch?.reason ? ` · ${item.dispatch.reason}` : ""}`),
+      h("p", null, `活動 ${item.activity?.activeAttempts ?? item.runningTasks ?? 0}/${item.activity?.maxConcurrency ?? item.maxConcurrency ?? 1} · capability ${(item.capabilities ?? []).map((capability: Item) => capability.capability).join(", ") || "—"}`),
       h("p", null, `Models: ${(item.models ?? []).map((model: Item) => model.model).join(", ") || "—"}`),
-      h("div", { className: "actions" }, item.enabled ? h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/disable`) }, "Disable") : h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/enable`) }, "Enable"), h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/${item.drain ? "resume" : "drain"}`) }, item.drain ? "Resume" : "Drain"), h("button", { className: "danger", type: "button", onClick: () => window.confirm("移除 Worker 並撤銷 token？") && void run(`/api/v2/workers/${item.id}`, "DELETE") }, "Remove")),
-    ))),
+      h("div", { className: "actions" }, item.enabled ? h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/disable`) }, "Disable") : h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/enable`) }, "Enable"), item.drain ? h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/resume`) }, "Resume") : h("button", { type: "button", onClick: () => void run(`/api/v2/workers/${item.id}/drain`) }, "Drain"), h("button", { type: "button", disabled: !item.availableActions?.wake, title: item.availableActions?.wakeReason ?? undefined }, "Wake"), h("button", { type: "button", onClick: () => { const name = window.prompt("Worker 顯示名稱", item.name); if (name) void run(`/api/v2/workers/${item.id}`, "PATCH", { name }); } }, "Rename"), h("button", { className: "danger", type: "button", disabled: item.availableActions?.remove === false, title: item.availableActions?.remove === false ? "仍有活動中的工作" : undefined, onClick: () => window.confirm("永久移除 Worker 並撤銷 credential？") && void run(`/api/v2/workers/${item.id}`, "DELETE") }, "Remove")),
+    )))
   );
+}
+
+function WorkerDetail({ id, refreshVersion }: { id: string; refreshVersion: number }) {
+  const [item, setItem] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState(false);
+  useEffect(() => { request(`/api/v2/workers/${encodeURIComponent(id)}`).then(setItem).catch(setError); }, [id, refreshVersion]);
+  if (error) return h(ErrorPanel, { error }); if (!item) return h(Loading);
+  const run = async (path: string) => { setBusy(true); try { await request(path, { method: "POST" }); setItem(await request(`/api/v2/workers/${encodeURIComponent(id)}`)); } catch (reason) { setError(reason); } finally { setBusy(false); } };
+  const capabilityRows = (item.capabilities ?? []).map((capability: Item) => h("tr", { key: capability.id },
+    h("td", null, capability.capability),
+    h("td", null, capability.runtime ?? "—"),
+    h("td", null, capability.grantStatus),
+    h("td", null, h(Status, { value: capability.status })),
+    h("td", null, h("code", null, capability.descriptorHash ?? "—")),
+    h("td", null, capability.grantStatus === "REQUIRES_REVIEW" ? h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/grant`) }, "Grant") : h("button", { type: "button", disabled: busy || capability.grantStatus === "REVOKED", onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/revoke`) }, "Revoke"))));
+  const capabilityTable = (item.capabilities ?? []).length === 0 ? h("p", null, "尚未回報 capability") : h("div", { className: "table-wrap" }, h("table", null,
+    h("thead", null, h("tr", null, ["Capability", "Runtime", "Grant", "Health", "Descriptor", "Action"].map((header) => h("th", { key: header }, header)))),
+    h("tbody", null, capabilityRows)));
+  return h(React.Fragment, null,
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "WORKER DETAIL"), h("h1", null, item.name)), h(Status, { value: item.connection?.state ?? item.status })),
+    h("p", null, `${item.platform} · ${item.hostname ?? "—"} · ${item.id}`),
+    h("div", { className: "detail-grid" }, h("section", { className: "card" }, h("h2", null, "Connection"), h(Details, { item: item.connection })), h("section", { className: "card" }, h("h2", null, "Dispatch / Activity"), h(Details, { item: { ...item.dispatch, ...item.activity } })), h("section", { className: "card" }, h("h2", null, "Credential / Diagnostics"), h(Details, { item: { ...item.credential, ...item.diagnostics } }))),
+    h("section", { className: "card" }, h("h2", null, "Capabilities"), capabilityTable),
+    h("section", { className: "card" }, h("h2", null, "Providers"), h(Details, { item: { providers: item.providers } })),
+    h("div", { className: "actions" }, item.drain ? h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/resume`) }, "Resume") : h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/drain`) }, "Drain")),
+    h("p", null, h("a", { href: "/workers" }, "← 回到 Workers")));
 }
 
 function Models({ refreshVersion }: { refreshVersion: number }) {
@@ -228,6 +266,7 @@ export function App({ initialPath = currentPath() }: { initialPath?: string }) {
     const parts = path.split("/").filter(Boolean);
     if (parts[0] === "tasks" && parts[1]) return h(TaskDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "tasks") return h(Tasks, { refreshVersion });
+    if (parts[0] === "workers" && parts[1]) return h(WorkerDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "workers") return h(Workers, { refreshVersion });
     if (parts[0] === "models") return h(Models, { refreshVersion });
     if (parts[0] === "systems") return h(Systems, { refreshVersion });

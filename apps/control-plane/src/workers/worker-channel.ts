@@ -2,6 +2,7 @@ import type { IncomingMessage, Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { EventHub } from "../events/event-hub.ts";
 import { TaskService } from "../tasks/task-service.ts";
+import { ArtifactStorage } from "../artifacts/artifact-storage.ts";
 import { WorkerService } from "./worker-service.ts";
 
 type JsonRecord = Record<string, any>;
@@ -16,13 +17,22 @@ export class WorkerCoordinator {
   private readonly workers: WorkerService;
   private readonly tasks: TaskService;
   private readonly events: EventHub;
+  private readonly artifacts?: ArtifactStorage;
   private readonly connections = new Map<string, SocketRecord>();
 
-  constructor(workers: WorkerService, tasks: TaskService, events: EventHub) { this.workers = workers; this.tasks = tasks; this.events = events; this.websocketServer.on("connection", (socket: WebSocket, request: IncomingMessage, workerId: string) => this.acceptSocket(socket, request, workerId)); }
+  constructor(workers: WorkerService, tasks: TaskService, events: EventHub, artifacts?: ArtifactStorage) { this.workers = workers; this.tasks = tasks; this.events = events; this.artifacts = artifacts; this.websocketServer.on("connection", (socket: WebSocket, request: IncomingMessage, workerId: string) => this.acceptSocket(socket, request, workerId)); }
 
   handleUpgrade(request: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void {
     const token = bearer(request); const worker = token ? this.workers.authenticate(token) : undefined;
-    if (!worker) { socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); socket.destroy(); return; }
+    if (!worker) {
+      const disposition = this.workers.tokenDisposition(token ?? "");
+      const status = disposition === "removed" ? "410 Gone" : disposition === "disabled" ? "403 Forbidden" : "401 Unauthorized";
+      const code = disposition === "removed" ? "WORKER_REMOVED" : disposition === "disabled" ? "WORKER_DISABLED" : "INVALID_WORKER_TOKEN";
+      const body = JSON.stringify({ error: { code } });
+      socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      socket.destroy();
+      return;
+    }
     this.websocketServer.handleUpgrade(request, socket, head, (ws) => this.websocketServer.emit("connection", ws, request, worker.id));
   }
 
@@ -35,7 +45,7 @@ export class WorkerCoordinator {
   }
 
   cancel(workerId: string, taskId: string, attemptId: string): boolean { const connection = this.connections.get(workerId); if (!connection) return false; connection.socket.send(JSON.stringify({ type: "task.cancel", task_id: taskId, attempt_id: attemptId })); return true; }
-  closeWorker(workerId: string): void { this.connections.get(workerId)?.socket.close(4001, "worker removed"); }
+  closeWorker(workerId: string, code = 4001, reason = "worker removed"): void { this.connections.get(workerId)?.socket.close(code, reason); }
   close(): void { for (const connection of this.connections.values()) connection.socket.close(); this.websocketServer.close(); this.connections.clear(); }
 
   private acceptSocket(socket: WebSocket, _request: IncomingMessage, workerId: string): void {
@@ -63,6 +73,7 @@ export class WorkerCoordinator {
       else if (type === "task.started") this.tasks.started(taskId, attemptId, workerId);
       else if (type === "task.progress") this.tasks.progress(taskId, attemptId, workerId, record(message.progress));
       else if (type === "task.log") this.tasks.log(taskId, attemptId, workerId, record(message.log));
+      else if (type === "task.artifact") this.storeArtifact(workerId, taskId, attemptId, record(message.artifact), connection.socket);
       else if (type === "task.result") { this.tasks.result(taskId, attemptId, workerId, record(message.result), record(message.metrics)); connection.socket.send(JSON.stringify({ type: "task.result.ack", task_id: taskId, attempt_id: attemptId })); }
       else if (type === "task.failed") this.tasks.fail(taskId, attemptId, workerId, String(message.code ?? "WORKER_EXECUTION_FAILED"), String(message.message ?? "Worker execution failed."), Date.now(), message.retryable === true);
       else if (type === "task.cancelled") this.tasks.fail(taskId, attemptId, workerId, "CANCELLED_BY_WORKER", "Worker acknowledged cancellation.", Date.now(), false);
@@ -75,5 +86,22 @@ export class WorkerCoordinator {
       const task = this.tasks.get(String(row.id));
       if (task) this.offer(workerId, task, String(row.current_attempt_id));
     }
+  }
+
+  private storeArtifact(workerId: string, taskId: string, attemptId: string, value: JsonRecord, socket: WebSocket): void {
+    if (!this.artifacts) throw new Error("ARTIFACT_UNAVAILABLE");
+    const row = this.tasks.db.one<JsonRecord>("SELECT t.status, t.current_attempt_id FROM tasks t JOIN task_attempts a ON a.id = t.current_attempt_id WHERE t.id = ? AND a.id = ? AND a.worker_id = ?", taskId, attemptId, workerId);
+    if (!row || !["ASSIGNED", "RUNNING"].includes(String(row.status))) throw new Error("ARTIFACT_NOT_FOUND");
+    const encoded = typeof value.data_base64 === "string" ? value.data_base64 : "";
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Error("INVALID_ARTIFACT_ENCODING");
+    const bytes = Buffer.from(encoded, "base64");
+    const limit = Math.min(1_073_741_824, Math.max(1, Number(process.env.PAI_MAX_ARTIFACT_BYTES ?? 1_073_741_824)));
+    if (bytes.byteLength > limit) throw new Error("REQUEST_TOO_LARGE");
+    const mediaTypeRaw = String(value.media_type ?? value.mediaType ?? "application/octet-stream");
+    const mediaType = /^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+(?:;[A-Za-z0-9=._ -]+)*$/.test(mediaTypeRaw) ? mediaTypeRaw.slice(0, 160) : "application/octet-stream";
+    const stored = this.artifacts.write(taskId, String(value.filename ?? "artifact.bin"), mediaType, bytes);
+    this.tasks.db.run("INSERT INTO artifacts(id, task_id, attempt_id, filename, media_type, size_bytes, sha256, storage_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", stored.id, taskId, attemptId, stored.filename, stored.mediaType, stored.sizeBytes, stored.sha256, stored.storagePath, Date.now());
+    this.tasks.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'OUTPUT')", taskId, stored.id);
+    socket.send(JSON.stringify({ type: "task.artifact.ack", task_id: taskId, attempt_id: attemptId, artifact_id: stored.id, sha256: stored.sha256 }));
   }
 }

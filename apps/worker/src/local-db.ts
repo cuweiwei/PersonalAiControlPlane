@@ -27,6 +27,7 @@ export class WorkerLocalDatabase {
   readonly connection: InstanceType<typeof DatabaseSync>;
   constructor(path: string) { if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true }); this.connection = new DatabaseSync(path); this.connection.exec("PRAGMA journal_mode = WAL"); this.connection.exec("PRAGMA foreign_keys = ON"); this.connection.exec("PRAGMA busy_timeout = 5000"); this.connection.exec("PRAGMA synchronous = NORMAL"); this.connection.exec(SCHEMA); }
   transaction<T>(callback: () => T): T { this.connection.exec("BEGIN IMMEDIATE"); try { const result = callback(); this.connection.exec("COMMIT"); return result; } catch (error) { this.connection.exec("ROLLBACK"); throw error; } }
+  clearRuntimeData(): void { this.transaction(() => { this.connection.exec("DELETE FROM results; DELETE FROM assignments; DELETE FROM worker_state;"); }); }
   close(): void { this.connection.close(); }
 }
 

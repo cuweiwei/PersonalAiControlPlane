@@ -49,7 +49,7 @@ export class ResourceScheduler {
       if (!this.coordinator.isConnected(worker.id)) return false;
       const active = Number(this.db.one<Row>("SELECT COUNT(*) AS count FROM task_attempts WHERE worker_id = ? AND status IN ('OFFERED', 'ACCEPTED', 'RUNNING')", worker.id)?.count ?? 0);
       if (active >= Number(worker.max_concurrency ?? 1)) return false;
-      const capabilities = this.db.all<Row>("SELECT * FROM worker_capabilities WHERE worker_id = ? AND status IN ('READY', 'HEALTHY', 'DEGRADED')", worker.id);
+      const capabilities = this.db.all<Row>("SELECT * FROM worker_capabilities WHERE worker_id = ? AND status IN ('READY', 'HEALTHY', 'DEGRADED') AND COALESCE(grant_status, 'DISCOVERED') NOT IN ('REVOKED', 'REQUIRES_REVIEW')", worker.id);
       const names = new Set(capabilities.map((item) => String(item.capability)));
       const requiredCapabilities = requirement.capabilities?.length ? requirement.capabilities : [task.task_type];
       if (!requiredCapabilities.every((name) => names.has(name))) return false;
