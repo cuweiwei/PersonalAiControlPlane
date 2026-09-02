@@ -18,7 +18,9 @@ services:
       PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}
       PAI_MAX_ARTIFACT_BYTES: ${PAI_MAX_ARTIFACT_BYTES:-1073741824}
     volumes:
-      - ${PAI_DATA_ROOT:?PAI_DATA_ROOT must be project-scoped}:/data
+      # Fresh v2 state lives beside, but outside, the legacy v1 data folders.
+      # The override remains available for an operator-managed project root.
+      - ${PAI_DATA_ROOT:-/volume1/docker/PersonalAiControlPlane/identity}:/data
     ports:
       - "127.0.0.1:9084:8080"
     healthcheck:
