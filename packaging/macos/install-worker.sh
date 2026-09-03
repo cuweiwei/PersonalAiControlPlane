@@ -36,8 +36,13 @@ done
 [[ "$refresh_source" == "true" || "$refresh_source" == "false" ]] || die "PAI_WORKER_REFRESH_SOURCE must be true or false"
 [[ "$data_directory" != "/" && "$data_directory" != "$HOME" ]] || die "data directory must be a dedicated Worker directory"
 
-script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-local_source_root=$(cd -- "$script_directory/../.." && pwd)
+script_path=${BASH_SOURCE[0]:-}
+script_directory=""
+local_source_root=""
+if [[ -n "$script_path" ]]; then
+  script_directory=$(cd -- "$(dirname -- "$script_path")" && pwd)
+  local_source_root=$(cd -- "$script_directory/../.." && pwd)
+fi
 cached_source_root="$data_directory/source"
 has_worker_source() {
   [[ -f "$1/package.json" && -f "$1/package-lock.json" && -f "$1/apps/worker/src/cli.ts" && -f "$1/packaging/macos/com.personal-ai.worker.plist" ]]
@@ -47,7 +52,7 @@ tmp_directory=$(mktemp -d "${TMPDIR:-/tmp}/pai-worker-install.XXXXXX")
 cleanup() { rm -rf "$tmp_directory"; }
 trap cleanup EXIT
 
-if has_worker_source "$local_source_root"; then
+if [[ -n "$local_source_root" ]] && has_worker_source "$local_source_root"; then
   source_root=$local_source_root
 elif has_worker_source "$cached_source_root" && [[ "$refresh_source" == "false" ]]; then
   source_root=$cached_source_root
