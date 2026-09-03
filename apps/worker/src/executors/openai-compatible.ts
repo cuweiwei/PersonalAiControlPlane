@@ -14,7 +14,7 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
       const response = await fetch(this.options.statusUrl ?? `${this.options.baseUrl.replace(/\/$/, "")}/models`, { headers: this.headers(), signal: AbortSignal.timeout(1_500) });
       if (!response.ok) {
         if (response.status === 401 && this.options.healthUrl) return this.discoverHealth();
-        return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] };
+        return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE" }], models: [] };
       }
       const payload = await response.json() as { data?: Array<Record<string, any>>; models?: Array<Record<string, any>> };
       const models = (payload.models ?? payload.data ?? []).map((model) => {
@@ -41,7 +41,7 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
   private async discoverHealth(): Promise<{ capabilities: Record<string, JsonValue>[]; models: Record<string, JsonValue>[] }> {
     try {
       const response = await fetch(this.options.healthUrl!, { signal: AbortSignal.timeout(1_500) });
-      if (!response.ok) return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] };
+      if (!response.ok) return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE" }], models: [] };
       const payload = await response.json() as { status?: string; default_model?: unknown; engine_pool?: { loaded_count?: unknown; model_count?: unknown } };
       const model = typeof payload.default_model === "string" ? payload.default_model : "";
       if (!model) return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] };
