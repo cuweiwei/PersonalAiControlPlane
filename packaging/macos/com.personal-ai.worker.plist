@@ -27,6 +27,10 @@
     <string>REPLACE_OMLX_ENABLED</string>
     <key>PAI_OMLX_API_KEY_FILE</key>
     <string>REPLACE_OMLX_API_KEY_FILE</string>
+    <key>PAI_LMSTUDIO_ENABLED</key>
+    <string>REPLACE_LMSTUDIO_ENABLED</string>
+    <key>PAI_OLLAMA_ENABLED</key>
+    <string>REPLACE_OLLAMA_ENABLED</string>
   </dict>
   <key>StandardOutPath</key>
   <string>REPLACE_LOG_PATH/worker.stdout.log</string>

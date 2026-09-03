@@ -24,8 +24,8 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
         const metadata = { ...(loaded === undefined ? {} : { loaded }), ...(loading === undefined ? {} : { loading }), ...(Number(model.actual_size ?? model.resident_estimated_size ?? model.estimated_size ?? 0) > 0 ? { memory_mb: Number(model.actual_size ?? model.resident_estimated_size ?? model.estimated_size) } : {}), ...(typeof model.source_type === "string" ? { source: model.source_type } : {}) };
         return { runtime: this.options.runtime, id: String(model.id), display_name: String(model.id), status: loading ? "loading" : "ready", ...(contextLength > 0 ? { context_length: contextLength } : {}), ...(Object.keys(metadata).length > 0 ? { metadata } : {}) };
       });
-      return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "READY", max_concurrency: 1 }], models };
-    } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] }; }
+      return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: models.length > 0 ? "READY" : "UNAVAILABLE", max_concurrency: 1 }], models };
+    } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE" }], models: [] }; }
   }
   async *execute(task: WorkerTaskOffer, context: { signal?: AbortSignal } = {}): AsyncIterable<ExecutionEvent> { const payload = (task.payload ?? {}) as Record<string, any>; const model = String(task.execution?.model && typeof task.execution.model === "object" ? (task.execution.model as any).name ?? "" : ""); const messages = [{ role: "system", content: String(payload.system_prompt ?? "You are an execution worker.") }, { role: "user", content: String(payload.prompt ?? task.instruction) }]; yield { type: "progress", progress: { phase: "llm.request", runtime: this.options.runtime } }; const timeout = AbortSignal.timeout(Number(task.limits?.timeout_seconds ?? 1800) * 1_000); const signal = context.signal ? AbortSignal.any([timeout, context.signal]) : timeout; const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/chat/completions`, { method: "POST", headers: { "content-type": "application/json", ...this.headers() }, body: JSON.stringify({ model, messages, temperature: payload.temperature ?? 0.2, max_tokens: payload.max_tokens ?? 4096, response_format: payload.response_format }), signal }); if (!response.ok) throw new Error(`LLM_HTTP_${response.status}`); const result = await response.json() as Record<string, any>; const content = result.choices?.[0]?.message?.content ?? ""; yield { type: "result", result: { text: String(content), model, runtime: this.options.runtime }, metrics: { prompt_tokens: Number(result.usage?.prompt_tokens ?? 0), completion_tokens: Number(result.usage?.completion_tokens ?? 0) } }; }
 
@@ -51,6 +51,6 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
         capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE", max_concurrency: 1 }],
         models: [{ runtime: this.options.runtime, id: model, display_name: model, status: "unavailable", metadata: { source: "health", reason: "API_KEY_REQUIRED", loaded: loadedCount > 0, loaded_count: loadedCount, model_count: modelCount } }],
       };
-    } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] }; }
+    } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE" }], models: [] }; }
   }
 }

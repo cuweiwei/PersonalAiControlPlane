@@ -16,7 +16,7 @@ function mapEnv(name: string): Record<string, string> { try { const value = JSON
 export type WorkerServiceOptions = { dataDir: string; origin: string; name?: string; workspaces?: Record<string, string>; pollIntervalMs?: number; heartbeatIntervalMs?: number };
 function providerReports(): Array<Record<string, string>> {
   const providers: Array<[string, string, boolean]> = [
-    ["omlx", "PAI_OMLX_ENABLED", true], ["lmstudio", "PAI_LMSTUDIO_ENABLED", false], ["ollama", "PAI_OLLAMA_ENABLED", false], ["codex", "PAI_CODEX_ENABLED", false], ["python", "PAI_PYTHON_ENABLED", false], ["command", "PAI_COMMAND_ENABLED", false],
+    ["omlx", "PAI_OMLX_ENABLED", true], ["lmstudio", "PAI_LMSTUDIO_ENABLED", true], ["ollama", "PAI_OLLAMA_ENABLED", true], ["codex", "PAI_CODEX_ENABLED", false], ["python", "PAI_PYTHON_ENABLED", false], ["command", "PAI_COMMAND_ENABLED", false],
   ];
   return providers.filter(([, flagName, fallback]) => flag(flagName, fallback)).map(([provider]) => ({ provider, evidence_level: "implemented_local" }));
 }
@@ -27,8 +27,8 @@ export function createWorkerDaemon(options: WorkerServiceOptions): { daemon: Wor
   const omlxBaseUrl = process.env.PAI_OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1";
   const executors: WorkerExecutor[] = [
     new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: omlxBaseUrl, statusUrl: process.env.PAI_OMLX_STATUS_URL ?? `${omlxBaseUrl.replace(/\/$/, "")}/models/status`, enabled: flag("PAI_OMLX_ENABLED", true), apiKey: process.env.PAI_OMLX_API_KEY, apiKeyFile: process.env.PAI_OMLX_API_KEY_FILE ?? join(homedir(), ".omlx", "settings.json"), healthUrl: process.env.PAI_OMLX_HEALTH_URL ?? "http://127.0.0.1:8000/health" }),
-    new OpenAICompatibleExecutor({ runtime: "lmstudio", baseUrl: process.env.PAI_LMSTUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1", enabled: flag("PAI_LMSTUDIO_ENABLED") }),
-    new OllamaExecutor(process.env.PAI_OLLAMA_BASE_URL ?? "http://127.0.0.1:11434", flag("PAI_OLLAMA_ENABLED")),
+    new OpenAICompatibleExecutor({ runtime: "lmstudio", baseUrl: process.env.PAI_LMSTUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1", enabled: flag("PAI_LMSTUDIO_ENABLED", true) }),
+    new OllamaExecutor(process.env.PAI_OLLAMA_BASE_URL ?? "http://127.0.0.1:11434", flag("PAI_OLLAMA_ENABLED", true)),
     new CodexExecutor(workspaces, process.env.PAI_CODEX_EXECUTABLE ?? "codex", flag("PAI_CODEX_ENABLED")),
     new PythonExecutor(workspaces, flag("PAI_PYTHON_ENABLED")),
     new CommandExecutor((() => { try { return JSON.parse(process.env.PAI_COMMAND_PROFILES_JSON ?? "{}") as Record<string, CommandProfile>; } catch { return {}; } })(), flag("PAI_COMMAND_ENABLED")),

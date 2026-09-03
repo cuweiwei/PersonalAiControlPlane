@@ -26,13 +26,17 @@ source_ref=${PAI_WORKER_REF:-main}
 node_version=${PAI_NODE_VERSION:-22.19.0}
 omlx_enabled=${PAI_OMLX_ENABLED:-true}
 omlx_api_key_file=${PAI_OMLX_API_KEY_FILE:-"$HOME/.omlx/settings.json"}
+lmstudio_enabled=${PAI_LMSTUDIO_ENABLED:-true}
+ollama_enabled=${PAI_OLLAMA_ENABLED:-true}
 refresh_source=${PAI_WORKER_REFRESH_SOURCE:-true}
 label=com.personal-ai.worker
 
-for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$refresh_source"; do
+for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$refresh_source"; do
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "arguments must not contain newlines"
 done
 [[ "$omlx_enabled" == "true" || "$omlx_enabled" == "false" ]] || die "PAI_OMLX_ENABLED must be true or false"
+[[ "$lmstudio_enabled" == "true" || "$lmstudio_enabled" == "false" ]] || die "PAI_LMSTUDIO_ENABLED must be true or false"
+[[ "$ollama_enabled" == "true" || "$ollama_enabled" == "false" ]] || die "PAI_OLLAMA_ENABLED must be true or false"
 [[ "$refresh_source" == "true" || "$refresh_source" == "false" ]] || die "PAI_WORKER_REFRESH_SOURCE must be true or false"
 [[ "$data_directory" != "/" && "$data_directory" != "$HOME" ]] || die "data directory must be a dedicated Worker directory"
 
@@ -146,6 +150,8 @@ sed \
   -e "s|REPLACE_DATA_DIRECTORY|$(escape_sed "$data_directory")|g" \
   -e "s|REPLACE_OMLX_ENABLED|$(escape_sed "$omlx_enabled")|g" \
   -e "s|REPLACE_OMLX_API_KEY_FILE|$(escape_sed "$omlx_api_key_file")|g" \
+  -e "s|REPLACE_LMSTUDIO_ENABLED|$(escape_sed "$lmstudio_enabled")|g" \
+  -e "s|REPLACE_OLLAMA_ENABLED|$(escape_sed "$ollama_enabled")|g" \
   -e "s|REPLACE_LOG_PATH|$(escape_sed "$log_directory")|g" \
   "$template" > "$plist_path"
 chmod 600 "$plist_path"

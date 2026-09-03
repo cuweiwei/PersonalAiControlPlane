@@ -5,7 +5,29 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { OpenAICompatibleExecutor } from "../apps/worker/src/executors/openai-compatible.ts";
+import { OllamaExecutor } from "../apps/worker/src/executors/ollama.ts";
 import { CommandExecutor } from "../apps/worker/src/executors/command.ts";
+
+test("LM Studio and Ollama executors probe their local APIs when enabled by default", async () => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/v1/models") { response.end(JSON.stringify({ data: [{ id: "lm-studio-model" }] })); return; }
+    if (request.url === "/api/tags") { response.end(JSON.stringify({ models: [{ name: "ollama-model", size: 1234 }] })); return; }
+    response.statusCode = 404; response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const lmstudio = new OpenAICompatibleExecutor({ runtime: "lmstudio", baseUrl: `http://127.0.0.1:${port}/v1` });
+    const ollama = new OllamaExecutor(`http://127.0.0.1:${port}`);
+    assert.equal((await lmstudio.discover()).models[0].id, "lm-studio-model");
+    assert.equal((await ollama.discover()).models[0].id, "ollama-model");
+    assert.equal(lmstudio.canExecute({ task_id: "task", attempt_id: "attempt", task_type: "llm.inference", instruction: "hello", execution: { runtime: "lmstudio" } }), true);
+    assert.equal(ollama.canExecute({ task_id: "task", attempt_id: "attempt", task_type: "llm.inference", instruction: "hello", execution: { runtime: "ollama" } }), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test("OpenAI-compatible executor discovers models and returns inference result", async () => {
   const server = createServer(async (request, response) => {

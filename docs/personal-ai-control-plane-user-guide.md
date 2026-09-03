@@ -42,15 +42,16 @@ Workers 頁將 enrollment 與已註冊 Worker 分開，提供 Online／Needs att
 
 ## 啟用執行能力
 
-Worker 預設只會啟用明確設定的 executor：
+Worker 會自動探測 oMLX、LM Studio 與 Ollama 的本機標準 API；未安裝或尚未啟動的 runtime 只會回報 `UNAVAILABLE`，不會產生模型或接收該 runtime 的工作。若要停用探測，可在啟動前設定：
 
 ```bash
-PAI_OLLAMA_ENABLED=true \
-PAI_OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+PAI_OMLX_ENABLED=false \
+PAI_LMSTUDIO_ENABLED=false \
+PAI_OLLAMA_ENABLED=false \
 npm run worker:cli -- start
 ```
 
-oMLX 會由 macOS 一鍵安裝預設啟用，預設連到 `http://127.0.0.1:8000/v1`，並從使用者的 `~/.omlx/settings.json` 讀取 API key（只用於本機請求，不會送到 Control Plane）。可用 `PAI_OMLX_ENABLED=false` 關閉，或用 `PAI_OMLX_BASE_URL`、`PAI_OMLX_API_KEY_FILE` 覆寫。若 oMLX API 仍要求 key 但 key file 不可讀，Worker 會以 `/health` 顯示已載入的 default model，但 capability 與 model 會標記為 `UNAVAILABLE`，避免誤派工。LM Studio 使用 `PAI_LMSTUDIO_ENABLED`、`PAI_LMSTUDIO_BASE_URL`；Codex、Python 需要 `PAI_CODEX_ENABLED` / `PAI_PYTHON_ENABLED` 和 logical workspace map；command executor 預設關閉，只有靜態 `PAI_COMMAND_PROFILES_JSON` 且 owner 明確啟用時才會接受。
+oMLX 預設連到 `http://127.0.0.1:8000/v1`，並從使用者的 `~/.omlx/settings.json` 讀取 API key（只用於本機請求，不會送到 Control Plane）。可用 `PAI_OMLX_BASE_URL`、`PAI_OMLX_API_KEY_FILE` 覆寫。若 oMLX API 仍要求 key 但 key file 不可讀，Worker 會以 `/health` 顯示已載入的 default model，但 capability 與 model 會標記為 `UNAVAILABLE`，避免誤派工。LM Studio 可用 `PAI_LMSTUDIO_BASE_URL` 覆寫；Ollama 可用 `PAI_OLLAMA_BASE_URL` 覆寫。Codex、Python 需要 `PAI_CODEX_ENABLED` / `PAI_PYTHON_ENABLED` 和 logical workspace map；command executor 預設關閉，只有靜態 `PAI_COMMAND_PROFILES_JSON` 且 owner 明確啟用時才會接受。
 
 ## Hermes task API
 

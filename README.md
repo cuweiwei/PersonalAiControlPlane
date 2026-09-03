@@ -45,7 +45,7 @@ npm run worker:cli -- start --origin http://127.0.0.1:8080
 npm run worker:cli -- status
 ```
 
-Worker 以 outbound WebSocket 連線，預設在 macOS 使用 Keychain、Windows 使用目前登入使用者的 DPAPI 保護 credential；`PAI_WORKER_CREDENTIAL_BACKEND=file` 僅供本機測試。Workers 管理頁會聚合連線、heartbeat、派工/Drain、活動、credential、capability、provider evidence 與診斷，並支援搜尋、篩選、Rename、Grant/Revoke、Resume 與永久 Remove。Worker 被 Control Plane 移除後會進入 terminal removed 狀態，必須明確執行 `reset` 才會清除本機身分、registration 與 runtime DB，再重新 owner approval。oMLX 會由 macOS 一鍵安裝預設啟用，並讀取使用者的 `~/.omlx/settings.json` API key（只留在本機，不會上報）；也可用 `PAI_OMLX_ENABLED=false` 關閉。LM Studio、Ollama、Codex、Python 和 command executor 仍以明確設定控制，command 預設關閉。
+Worker 以 outbound WebSocket 連線，預設在 macOS 使用 Keychain、Windows 使用目前登入使用者的 DPAPI 保護 credential；`PAI_WORKER_CREDENTIAL_BACKEND=file` 僅供本機測試。Workers 管理頁會聚合連線、heartbeat、派工/Drain、活動、credential、capability、provider evidence 與診斷，並支援搜尋、篩選、Rename、Grant/Revoke、Resume 與永久 Remove。Worker 被 Control Plane 移除後會進入 terminal removed 狀態，必須明確執行 `reset` 才會清除本機身分、registration 與 runtime DB，再重新 owner approval。oMLX、LM Studio 與 Ollama 會由 Worker 預設自動探測本機標準 API；只有端點可回應的 runtime 會上報模型，未安裝或未啟動的 runtime 不會產生模型，也不會被派工。可分別用 `PAI_OMLX_ENABLED=false`、`PAI_LMSTUDIO_ENABLED=false` 或 `PAI_OLLAMA_ENABLED=false` 關閉；LM Studio 預設為 `http://127.0.0.1:1234/v1`，Ollama 預設為 `http://127.0.0.1:11434`。Codex、Python 和 command executor 仍以明確設定控制，command 預設關閉。
 
 ## Architecture boundary
 
