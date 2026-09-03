@@ -153,7 +153,15 @@ chmod 600 "$plist_path"
 
 uid=$(id -u)
 /bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
-/bin/launchctl bootstrap "gui/$uid" "$plist_path"
+bootstrapped=0
+for attempt in 1 2 3 4 5; do
+  if /bin/launchctl bootstrap "gui/$uid" "$plist_path"; then
+    bootstrapped=1
+    break
+  fi
+  sleep 1
+done
+(( bootstrapped == 1 )) || die "launchctl could not bootstrap $label"
 /bin/launchctl kickstart -k "gui/$uid/$label"
 
 echo "Worker installed and started: $label"
