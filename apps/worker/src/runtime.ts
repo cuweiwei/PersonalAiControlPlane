@@ -38,7 +38,7 @@ export class OutboundWorkerRuntime {
       await hello;
     }
     this.ensureTransportHealthy();
-    await this.discover();
+    await this.refreshInventory();
     await this.resendPending();
   }
   async pollOnce(): Promise<number> {
@@ -49,6 +49,7 @@ export class OutboundWorkerRuntime {
     return 0;
   }
   async heartbeat(): Promise<void> { await this.transport.send({ type: "heartbeat", worker_id: this.workerId, timestamp: new Date(this.clock()).toISOString(), ...(this.report?.() ?? {}) }); }
+  async refreshInventory(): Promise<void> { this.ensureTransportHealthy(); await this.discover(); }
   async handleOffer(offer: WorkerTaskOffer): Promise<void> {
     const existing = this.db.connection.prepare("SELECT * FROM assignments WHERE attempt_id = ?").get(offer.attempt_id) as Record<string, any> | undefined;
     if (existing) { if (existing.status === "COMPLETED") await this.resendResult(offer.attempt_id); return; }

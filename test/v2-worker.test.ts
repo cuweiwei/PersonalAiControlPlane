@@ -45,6 +45,19 @@ test("worker persists assignment before accept and resends durable result until 
   db.close();
 });
 
+test("worker refreshes model inventory after the initial connection", async () => {
+  const db = new WorkerLocalDatabase(":memory:");
+  const sent: Record<string, any>[] = [];
+  let revision = 0;
+  const runtime = new OutboundWorkerRuntime({ workerId: "worker-model-refresh", db, transport: { send: (message) => { sent.push(message); } }, executors: [{ type: "llm.inference", canExecute: () => true, discover: async () => ({ capabilities: [{ capability: "llm.inference", status: "READY" }], models: [{ runtime: "omlx", id: `model-${revision += 1}`, status: "ready" }] }), async *execute() {} }] });
+  await runtime.connect();
+  await runtime.refreshInventory();
+  const updates = sent.filter((message) => message.type === "models.update");
+  assert.equal(updates.length, 2);
+  assert.equal(updates.at(-1)?.models[0].id, "model-2");
+  db.close();
+});
+
 test("worker cancellation prevents a late executor result from being sent", async () => {
   const db = new WorkerLocalDatabase(":memory:");
   const sent: Record<string, any>[] = [];

@@ -50,7 +50,7 @@ PAI_OLLAMA_BASE_URL=http://127.0.0.1:11434 \
 npm run worker:cli -- start
 ```
 
-OpenAI-compatible runtime 使用 `PAI_OMLX_ENABLED`、`PAI_OMLX_BASE_URL` 或 `PAI_LMSTUDIO_ENABLED`、`PAI_LMSTUDIO_BASE_URL`。Codex、Python 需要 `PAI_CODEX_ENABLED` / `PAI_PYTHON_ENABLED` 和 logical workspace map；command executor 預設關閉，只有靜態 `PAI_COMMAND_PROFILES_JSON` 且 owner 明確啟用時才會接受。
+oMLX 會由 macOS 一鍵安裝預設啟用，預設連到 `http://127.0.0.1:8000/v1`，並從使用者的 `~/.omlx/settings.json` 讀取 API key（只用於本機請求，不會送到 Control Plane）。可用 `PAI_OMLX_ENABLED=false` 關閉，或用 `PAI_OMLX_BASE_URL`、`PAI_OMLX_API_KEY_FILE` 覆寫。若 oMLX API 仍要求 key 但 key file 不可讀，Worker 會以 `/health` 顯示已載入的 default model，但 capability 與 model 會標記為 `UNAVAILABLE`，避免誤派工。LM Studio 使用 `PAI_LMSTUDIO_ENABLED`、`PAI_LMSTUDIO_BASE_URL`；Codex、Python 需要 `PAI_CODEX_ENABLED` / `PAI_PYTHON_ENABLED` 和 logical workspace map；command executor 預設關閉，只有靜態 `PAI_COMMAND_PROFILES_JSON` 且 owner 明確啟用時才會接受。
 
 ## Hermes task API
 

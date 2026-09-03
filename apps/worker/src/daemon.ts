@@ -45,7 +45,7 @@ export class WorkerDaemon {
       }
       await this.runtime.pollOnce();
       const now = Date.now();
-      if (now - this.heartbeatAt >= this.heartbeatIntervalMs) { await this.runtime.heartbeat(); this.heartbeatAt = now; }
+      if (now - this.heartbeatAt >= this.heartbeatIntervalMs) { await this.runtime.refreshInventory(); await this.runtime.heartbeat(); this.heartbeatAt = now; }
     } catch (error) {
       if (error instanceof Error && (error.name === "WorkerTransportError" || error.message.includes("worker WebSocket") || error.message.includes("WORKER_"))) {
         this.runtime?.close();

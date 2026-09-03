@@ -23,6 +23,10 @@
   <dict>
     <key>PAI_CONTROL_PLANE_ORIGIN</key>
     <string>REPLACE_ORIGIN</string>
+    <key>PAI_OMLX_ENABLED</key>
+    <string>REPLACE_OMLX_ENABLED</string>
+    <key>PAI_OMLX_API_KEY_FILE</key>
+    <string>REPLACE_OMLX_API_KEY_FILE</string>
   </dict>
   <key>StandardOutPath</key>
   <string>REPLACE_LOG_PATH/worker.stdout.log</string>

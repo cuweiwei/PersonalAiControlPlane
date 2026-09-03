@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { OpenAICompatibleExecutor } from "../apps/worker/src/executors/openai-compatible.ts";
 import { CommandExecutor } from "../apps/worker/src/executors/command.ts";
 
@@ -24,6 +27,32 @@ test("OpenAI-compatible executor discovers models and returns inference result",
     assert.equal(events.at(-1)?.result?.text, "fake answer");
     assert.equal(events.at(-1)?.metrics?.completion_tokens, 3);
   } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("OpenAI-compatible executor reads a local API key file and falls back to health discovery", async () => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/v1/models") { response.statusCode = request.headers.authorization === "Bearer local-secret" ? 200 : 401; response.end(request.headers.authorization ? JSON.stringify({ data: [{ id: "authenticated-model" }] }) : JSON.stringify({ error: "API key required" })); return; }
+    if (request.url === "/health") { response.end(JSON.stringify({ status: "healthy", default_model: "health-model", engine_pool: { loaded_count: 1, model_count: 2 } })); return; }
+    response.statusCode = 404; response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const directory = await mkdtemp(join(tmpdir(), "pai-omlx-key-"));
+  const keyFile = join(directory, "settings.json");
+  await writeFile(keyFile, JSON.stringify({ auth: { api_key: "local-secret" } }));
+  try {
+    const authenticated = new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: `http://127.0.0.1:${port}/v1`, apiKeyFile: keyFile, enabled: true });
+    assert.equal((await authenticated.discover()).models[0].id, "authenticated-model");
+    const healthOnly = new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: `http://127.0.0.1:${port}/v1`, healthUrl: `http://127.0.0.1:${port}/health`, enabled: true });
+    const discovery = await healthOnly.discover();
+    assert.equal(discovery.models[0].id, "health-model");
+    assert.equal(discovery.models[0].status, "unavailable");
+    assert.equal(discovery.capabilities[0].status, "UNAVAILABLE");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

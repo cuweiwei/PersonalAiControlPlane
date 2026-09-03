@@ -24,11 +24,16 @@ log_directory=${4:-"$HOME/Library/Logs/PersonalAiWorker"}
 repository=${PAI_WORKER_REPOSITORY:-https://github.com/cuweiwei/PersonalAiControlPlane}
 source_ref=${PAI_WORKER_REF:-main}
 node_version=${PAI_NODE_VERSION:-22.19.0}
+omlx_enabled=${PAI_OMLX_ENABLED:-true}
+omlx_api_key_file=${PAI_OMLX_API_KEY_FILE:-"$HOME/.omlx/settings.json"}
+refresh_source=${PAI_WORKER_REFRESH_SOURCE:-true}
 label=com.personal-ai.worker
 
-for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version"; do
+for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$refresh_source"; do
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "arguments must not contain newlines"
 done
+[[ "$omlx_enabled" == "true" || "$omlx_enabled" == "false" ]] || die "PAI_OMLX_ENABLED must be true or false"
+[[ "$refresh_source" == "true" || "$refresh_source" == "false" ]] || die "PAI_WORKER_REFRESH_SOURCE must be true or false"
 [[ "$data_directory" != "/" && "$data_directory" != "$HOME" ]] || die "data directory must be a dedicated Worker directory"
 
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -44,7 +49,7 @@ trap cleanup EXIT
 
 if has_worker_source "$local_source_root"; then
   source_root=$local_source_root
-elif has_worker_source "$cached_source_root"; then
+elif has_worker_source "$cached_source_root" && [[ "$refresh_source" == "false" ]]; then
   source_root=$cached_source_root
 else
   command -v curl >/dev/null 2>&1 || die "curl is required to bootstrap the Worker source"
@@ -134,6 +139,8 @@ sed \
   -e "s|REPLACE_WORKER_EXECUTABLE|$(escape_sed "$worker_executable")|g" \
   -e "s|REPLACE_ORIGIN|$(escape_sed "$origin")|g" \
   -e "s|REPLACE_DATA_DIRECTORY|$(escape_sed "$data_directory")|g" \
+  -e "s|REPLACE_OMLX_ENABLED|$(escape_sed "$omlx_enabled")|g" \
+  -e "s|REPLACE_OMLX_API_KEY_FILE|$(escape_sed "$omlx_api_key_file")|g" \
   -e "s|REPLACE_LOG_PATH|$(escape_sed "$log_directory")|g" \
   "$template" > "$plist_path"
 chmod 600 "$plist_path"

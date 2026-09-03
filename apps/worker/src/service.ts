@@ -1,4 +1,4 @@
-import { arch, cpus, freemem, hostname, loadavg, platform, totalmem } from "node:os";
+import { arch, cpus, freemem, homedir, hostname, loadavg, platform, totalmem } from "node:os";
 import { join } from "node:path";
 import { WorkerLocalDatabase } from "./local-db.ts";
 import { WorkerDaemon } from "./daemon.ts";
@@ -14,15 +14,18 @@ import { CommandExecutor, type CommandProfile } from "./executors/command.ts";
 function flag(name: string, fallback = false): boolean { return process.env[name] === undefined ? fallback : process.env[name] === "true"; }
 function mapEnv(name: string): Record<string, string> { try { const value = JSON.parse(process.env[name] ?? "{}"); return value && typeof value === "object" ? value as Record<string, string> : {}; } catch { return {}; } }
 export type WorkerServiceOptions = { dataDir: string; origin: string; name?: string; workspaces?: Record<string, string>; pollIntervalMs?: number; heartbeatIntervalMs?: number };
-function providerReports(): Array<Record<string, string>> { return [
-  ["omlx", "PAI_OMLX_ENABLED"], ["lmstudio", "PAI_LMSTUDIO_ENABLED"], ["ollama", "PAI_OLLAMA_ENABLED"], ["codex", "PAI_CODEX_ENABLED"], ["python", "PAI_PYTHON_ENABLED"], ["command", "PAI_COMMAND_ENABLED"],
-].filter(([, flagName]) => process.env[flagName] === "true").map(([provider]) => ({ provider, evidence_level: "implemented_local" })); }
+function providerReports(): Array<Record<string, string>> {
+  const providers: Array<[string, string, boolean]> = [
+    ["omlx", "PAI_OMLX_ENABLED", true], ["lmstudio", "PAI_LMSTUDIO_ENABLED", false], ["ollama", "PAI_OLLAMA_ENABLED", false], ["codex", "PAI_CODEX_ENABLED", false], ["python", "PAI_PYTHON_ENABLED", false], ["command", "PAI_COMMAND_ENABLED", false],
+  ];
+  return providers.filter(([, flagName, fallback]) => flag(flagName, fallback)).map(([provider]) => ({ provider, evidence_level: "implemented_local" }));
+}
 export function createWorkerDaemon(options: WorkerServiceOptions): { daemon: WorkerDaemon; db: WorkerLocalDatabase; enrollment: WorkerEnrollment; resetLocalIdentity: () => void } {
   const db = new WorkerLocalDatabase(join(options.dataDir, "worker.db"));
   const enrollment = new WorkerEnrollment({ dataDir: options.dataDir, origin: options.origin, name: options.name ?? hostname(), platform: platform(), hostname: hostname(), agentVersion: "2.0.0", hardware: { cpu: cpus().map((cpu) => cpu.model), memory_mb: Math.floor(totalmem() / 1_048_576), architecture: arch() }, tokenStore: createWorkerCredentialStore(join(options.dataDir, "worker-token.json")), pendingStore: createWorkerCredentialStore<Pending>(join(options.dataDir, "registration.json"), "registration") });
   const workspaces = options.workspaces ?? mapEnv("PAI_WORKSPACES_JSON");
   const executors: WorkerExecutor[] = [
-    new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: process.env.PAI_OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1", enabled: flag("PAI_OMLX_ENABLED") }),
+    new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: process.env.PAI_OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1", enabled: flag("PAI_OMLX_ENABLED", true), apiKey: process.env.PAI_OMLX_API_KEY, apiKeyFile: process.env.PAI_OMLX_API_KEY_FILE ?? join(homedir(), ".omlx", "settings.json"), healthUrl: process.env.PAI_OMLX_HEALTH_URL ?? "http://127.0.0.1:8000/health" }),
     new OpenAICompatibleExecutor({ runtime: "lmstudio", baseUrl: process.env.PAI_LMSTUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1", enabled: flag("PAI_LMSTUDIO_ENABLED") }),
     new OllamaExecutor(process.env.PAI_OLLAMA_BASE_URL ?? "http://127.0.0.1:11434", flag("PAI_OLLAMA_ENABLED")),
     new CodexExecutor(workspaces, process.env.PAI_CODEX_EXECUTABLE ?? "codex", flag("PAI_CODEX_ENABLED")),
