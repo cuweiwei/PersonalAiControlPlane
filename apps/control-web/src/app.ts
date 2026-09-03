@@ -224,7 +224,7 @@ function Models({ refreshVersion }: { refreshVersion: number }) {
   const [items, setItems] = useState<Item[] | null>(null);
   useEffect(() => { request("/api/v2/models").then((value) => setItems(value.items ?? [])); }, [refreshVersion]);
   if (!items) return h(Loading);
-  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "MODEL INVENTORY"), h("h1", null, "Models"), h("div", { className: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Worker", "Runtime", "Model", "Status", "Context", "Load"].map((header) => h("th", { key: header }, header)))), h("tbody", null, items.map((item) => h("tr", { key: `${item.workerId}-${item.runtime}-${item.model}` }, h("td", null, item.worker), h("td", null, item.runtime), h("td", null, item.displayName ?? item.model), h("td", null, h(Status, { value: item.status })), h("td", null, item.contextLength ?? "—"), h("td", null, item.workerStatus)))))));
+  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "MODEL INVENTORY"), h("h1", null, "Models"), h("div", { className: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Worker", "Runtime", "Model", "Status", "Context", "Load"].map((header) => h("th", { key: header }, header)))), h("tbody", null, items.map((item) => { const loaded = item.metadata?.loaded === true ? "LOADED" : item.metadata?.loaded === false ? "AVAILABLE" : "—"; return h("tr", { key: `${item.workerId}-${item.runtime}-${item.model}` }, h("td", null, item.worker), h("td", null, item.runtime), h("td", null, item.displayName ?? item.model), h("td", null, h(Status, { value: item.status })), h("td", null, item.contextLength ?? "—"), h("td", null, loaded)); })))));
 }
 
 function Systems({ refreshVersion }: { refreshVersion: number }) {

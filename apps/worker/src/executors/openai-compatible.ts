@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import type { JsonValue } from "../../../../packages/contracts/src/index.ts";
 import type { WorkerExecutor, WorkerTaskOffer, ExecutionEvent } from "../runtime.ts";
 
-export type OpenAICompatibleOptions = { runtime: string; baseUrl: string; enabled?: boolean; apiKey?: string; apiKeyFile?: string; healthUrl?: string };
+export type OpenAICompatibleOptions = { runtime: string; baseUrl: string; enabled?: boolean; apiKey?: string; apiKeyFile?: string; healthUrl?: string; statusUrl?: string };
 export class OpenAICompatibleExecutor implements WorkerExecutor {
   readonly type = "llm.inference";
   private readonly options: OpenAICompatibleOptions;
@@ -11,15 +11,18 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
   async discover(): Promise<{ capabilities: Record<string, JsonValue>[]; models: Record<string, JsonValue>[] }> {
     if (this.options.enabled === false) return { capabilities: [], models: [] };
     try {
-      const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/models`, { headers: this.headers(), signal: AbortSignal.timeout(1_500) });
+      const response = await fetch(this.options.statusUrl ?? `${this.options.baseUrl.replace(/\/$/, "")}/models`, { headers: this.headers(), signal: AbortSignal.timeout(1_500) });
       if (!response.ok) {
         if (response.status === 401 && this.options.healthUrl) return this.discoverHealth();
         return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] };
       }
-      const payload = await response.json() as { data?: Array<Record<string, any>> };
-      const models = (payload.data ?? []).map((model) => {
-        const contextLength = Number(model.context_length ?? 0);
-        return { runtime: this.options.runtime, id: String(model.id), display_name: String(model.id), status: "ready", ...(contextLength > 0 ? { context_length: contextLength } : {}) };
+      const payload = await response.json() as { data?: Array<Record<string, any>>; models?: Array<Record<string, any>> };
+      const models = (payload.models ?? payload.data ?? []).map((model) => {
+        const contextLength = Number(model.model_context_length ?? model.context_length ?? model.max_model_len ?? 0);
+        const loaded = typeof model.loaded === "boolean" ? model.loaded : undefined;
+        const loading = typeof model.is_loading === "boolean" ? model.is_loading : undefined;
+        const metadata = { ...(loaded === undefined ? {} : { loaded }), ...(loading === undefined ? {} : { loading }), ...(Number(model.actual_size ?? model.resident_estimated_size ?? model.estimated_size ?? 0) > 0 ? { memory_mb: Number(model.actual_size ?? model.resident_estimated_size ?? model.estimated_size) } : {}), ...(typeof model.source_type === "string" ? { source: model.source_type } : {}) };
+        return { runtime: this.options.runtime, id: String(model.id), display_name: String(model.id), status: loading ? "loading" : "ready", ...(contextLength > 0 ? { context_length: contextLength } : {}), ...(Object.keys(metadata).length > 0 ? { metadata } : {}) };
       });
       return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "READY", max_concurrency: 1 }], models };
     } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] }; }
@@ -46,7 +49,7 @@ export class OpenAICompatibleExecutor implements WorkerExecutor {
       const modelCount = Number(payload.engine_pool?.model_count ?? 0);
       return {
         capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "UNAVAILABLE", max_concurrency: 1 }],
-        models: [{ runtime: this.options.runtime, id: model, display_name: model, status: "unavailable", metadata: { source: "health", reason: "API_KEY_REQUIRED", loaded_count: loadedCount, model_count: modelCount } }],
+        models: [{ runtime: this.options.runtime, id: model, display_name: model, status: "unavailable", metadata: { source: "health", reason: "API_KEY_REQUIRED", loaded: loadedCount > 0, loaded_count: loadedCount, model_count: modelCount } }],
       };
     } catch { return { capabilities: [{ capability: "llm.inference", runtime: this.options.runtime, status: "DEGRADED" }], models: [] }; }
   }

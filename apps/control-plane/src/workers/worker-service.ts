@@ -25,7 +25,7 @@ function safeHardware(value: unknown): Record<string, unknown> {
   return { cpu, memoryMb: boundedNumber(item.memory_mb ?? item.memoryMb, 0, 4_194_304), architecture: boundedString(item.architecture, 40), os: boundedString(item.os, 40) };
 }
 function safeModelMetadata(value: unknown): Record<string, unknown> {
-  const item = record(value); return { family: boundedString(item.family, 80), quantization: boundedString(item.quantization, 80), parameterCount: boundedNumber(item.parameterCount ?? item.parameter_count, 0, 1_000_000_000_000), source: boundedString(item.source, 160) };
+  const item = record(value); return { family: boundedString(item.family, 80), quantization: boundedString(item.quantization, 80), parameterCount: boundedNumber(item.parameterCount ?? item.parameter_count, 0, 1_000_000_000_000), source: boundedString(item.source ?? item.source_type, 160), loaded: typeof item.loaded === "boolean" ? item.loaded : null, loading: typeof item.loading === "boolean" ? item.loading : null, memoryMb: boundedNumber(item.memoryMb ?? item.memory_mb, 0, 4_194_304) };
 }
 function safeDescriptor(value: unknown): Record<string, unknown> {
   const item = record(value); const properties = record(item.properties ?? item.descriptor);

@@ -31,6 +31,25 @@ test("OpenAI-compatible executor discovers models and returns inference result",
   }
 });
 
+test("OpenAI-compatible executor preserves detailed model load state", async () => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/v1/models/status") { response.end(JSON.stringify({ models: [{ id: "loaded-model", loaded: true, is_loading: false, model_context_length: 262144, actual_size: 1234, source_type: "local" }, { id: "library-model", loaded: false, is_loading: false, model_context_length: 8192 }] })); return; }
+    response.statusCode = 404; response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const executor = new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: `http://127.0.0.1:${port}/v1`, statusUrl: `http://127.0.0.1:${port}/v1/models/status`, enabled: true });
+    const discovery = await executor.discover();
+    assert.equal((discovery.models[0].metadata as Record<string, unknown>).loaded, true);
+    assert.equal(discovery.models[0].context_length, 262144);
+    assert.equal((discovery.models[1].metadata as Record<string, unknown>).loaded, false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("OpenAI-compatible executor reads a local API key file and falls back to health discovery", async () => {
   const server = createServer((request, response) => {
     response.setHeader("content-type", "application/json");

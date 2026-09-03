@@ -24,8 +24,9 @@ export function createWorkerDaemon(options: WorkerServiceOptions): { daemon: Wor
   const db = new WorkerLocalDatabase(join(options.dataDir, "worker.db"));
   const enrollment = new WorkerEnrollment({ dataDir: options.dataDir, origin: options.origin, name: options.name ?? hostname(), platform: platform(), hostname: hostname(), agentVersion: "2.0.0", hardware: { cpu: cpus().map((cpu) => cpu.model), memory_mb: Math.floor(totalmem() / 1_048_576), architecture: arch() }, tokenStore: createWorkerCredentialStore(join(options.dataDir, "worker-token.json")), pendingStore: createWorkerCredentialStore<Pending>(join(options.dataDir, "registration.json"), "registration") });
   const workspaces = options.workspaces ?? mapEnv("PAI_WORKSPACES_JSON");
+  const omlxBaseUrl = process.env.PAI_OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1";
   const executors: WorkerExecutor[] = [
-    new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: process.env.PAI_OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1", enabled: flag("PAI_OMLX_ENABLED", true), apiKey: process.env.PAI_OMLX_API_KEY, apiKeyFile: process.env.PAI_OMLX_API_KEY_FILE ?? join(homedir(), ".omlx", "settings.json"), healthUrl: process.env.PAI_OMLX_HEALTH_URL ?? "http://127.0.0.1:8000/health" }),
+    new OpenAICompatibleExecutor({ runtime: "omlx", baseUrl: omlxBaseUrl, statusUrl: process.env.PAI_OMLX_STATUS_URL ?? `${omlxBaseUrl.replace(/\/$/, "")}/models/status`, enabled: flag("PAI_OMLX_ENABLED", true), apiKey: process.env.PAI_OMLX_API_KEY, apiKeyFile: process.env.PAI_OMLX_API_KEY_FILE ?? join(homedir(), ".omlx", "settings.json"), healthUrl: process.env.PAI_OMLX_HEALTH_URL ?? "http://127.0.0.1:8000/health" }),
     new OpenAICompatibleExecutor({ runtime: "lmstudio", baseUrl: process.env.PAI_LMSTUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1", enabled: flag("PAI_LMSTUDIO_ENABLED") }),
     new OllamaExecutor(process.env.PAI_OLLAMA_BASE_URL ?? "http://127.0.0.1:11434", flag("PAI_OLLAMA_ENABLED")),
     new CodexExecutor(workspaces, process.env.PAI_CODEX_EXECUTABLE ?? "codex", flag("PAI_CODEX_ENABLED")),
