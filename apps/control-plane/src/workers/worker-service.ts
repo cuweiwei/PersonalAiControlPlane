@@ -73,10 +73,11 @@ export class WorkerService {
 
   constructor(db: ControlPlaneDatabase, events = new EventHub()) { this.db = db; this.events = events; }
 
-  register(input: { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; hardware: Record<string, JsonValue> }, now = Date.now()): RegistrationResult {
+  register(input: { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; hardware: Record<string, JsonValue>; onboardingId?: string }, now = Date.now()): RegistrationResult {
     if (input.registrationSecret.length < 16) throw new Error("REGISTRATION_SECRET_TOO_SHORT");
     const id = uuidv7(now);
-    this.db.run("INSERT INTO worker_registration_requests(id, name, registration_secret_hash, platform, hostname, agent_version, hardware_json, status, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)", id, input.name, safeTokenHash(input.registrationSecret), input.platform, input.hostname ?? null, input.agentVersion ?? null, JSON.stringify(safeHardware(input.hardware)), now + 10 * 60_000, now);
+    if (input.onboardingId && !this.db.one("SELECT id FROM worker_onboarding WHERE id = ? AND abandoned_at IS NULL", input.onboardingId)) throw new Error("ONBOARDING_NOT_FOUND");
+    this.db.run("INSERT INTO worker_registration_requests(id, name, registration_secret_hash, platform, hostname, agent_version, hardware_json, status, expires_at, created_at, onboarding_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)", id, input.name, safeTokenHash(input.registrationSecret), input.platform, input.hostname ?? null, input.agentVersion ?? null, JSON.stringify(safeHardware(input.hardware)), now + 10 * 60_000, now, input.onboardingId ?? null);
     this.appendAudit("worker", "worker.registration.created", null, { registrationId: id, name: input.name, platform: input.platform }, now);
     this.events.publish({ type: "registration.created", registrationId: id });
     return { registrationId: id, status: "pending" };
@@ -118,6 +119,7 @@ export class WorkerService {
       this.db.run("INSERT INTO workers(id, name, platform, hostname, status, enabled, agent_version, metadata_json, credential_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'OFFLINE', 1, ?, ?, ?, ?, ?)", workerId, row.name, row.platform, row.hostname, row.agent_version, JSON.stringify({ hardware: safeHardware(json(row.hardware_json)) }), now + 90 * 24 * 60 * 60_000, now, now);
       this.db.run("INSERT INTO worker_tokens(worker_id, token_hash, created_at) VALUES (?, ?, ?)", workerId, safeTokenHash(token), now);
       this.db.run("UPDATE worker_registration_requests SET status = 'APPROVED', decided_at = ?, decided_by = ?, worker_id = ? WHERE id = ? AND status = 'PENDING'", now, actor, workerId, id);
+      if (row.onboarding_id) this.db.run("UPDATE worker_onboarding SET registration_id = ?, worker_id = ?, last_step = 'CAPABILITIES', updated_at = ? WHERE id = ? AND abandoned_at IS NULL", id, workerId, now, row.onboarding_id);
     });
     this.pendingTokens.set(id, token);
     this.appendAudit(actor, "worker.registration.approved", workerId, { registrationId: id }, now);
@@ -182,7 +184,7 @@ export class WorkerService {
     }).filter((item) => item.capability.length > 0 && item.capability.length <= 120 && (item.runtime === null || item.runtime.length <= 120));
     this.db.transaction(() => {
       const existing = this.db.all<Row>("SELECT capability, runtime FROM worker_capabilities WHERE worker_id = ?", workerId);
-      for (const row of existing) if (!incoming.some((item) => item.capability === row.capability && item.runtime === (row.runtime ?? null))) this.db.run("DELETE FROM worker_capabilities WHERE worker_id = ? AND capability = ? AND runtime IS ?", workerId, row.capability, row.runtime ?? null);
+      for (const row of existing) if (!incoming.some((item) => item.capability === row.capability && item.runtime === (row.runtime ?? ""))) this.db.run("DELETE FROM worker_capabilities WHERE worker_id = ? AND capability = ? AND runtime = ?", workerId, row.capability, row.runtime ?? "");
       for (const item of incoming) {
         const value = item.value;
         const maxConcurrency = Math.max(1, Math.min(256, Math.floor(boundedNumber(value.max_concurrency ?? value.maxConcurrency, 1, 256) ?? 1)));
@@ -193,6 +195,8 @@ export class WorkerService {
         const descriptorChanged = prior?.descriptor_hash && prior.descriptor_hash !== descriptorHash;
         const grantStatus = descriptorChanged && prior.grant_status === "GRANTED" ? "REQUIRES_REVIEW" : String(prior?.grant_status ?? "DISCOVERED");
         this.db.run("INSERT INTO worker_capabilities(worker_id, capability, runtime, runtime_version, max_concurrency, descriptor_json, descriptor_hash, grant_status, superseded_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id, capability, runtime) DO UPDATE SET runtime_version = excluded.runtime_version, max_concurrency = excluded.max_concurrency, descriptor_json = excluded.descriptor_json, descriptor_hash = excluded.descriptor_hash, grant_status = excluded.grant_status, superseded_at = excluded.superseded_at, status = excluded.status, updated_at = excluded.updated_at", workerId, item.capability, item.runtime, boundedString(value.runtime_version ?? value.runtimeVersion, 80), maxConcurrency, JSON.stringify(item.descriptor), descriptorHash, grantStatus, descriptorChanged ? now : null, status, now);
+        const workspaceIds = (record(item.descriptor.properties).workspaceIds ?? []) as unknown[];
+        for (const workspaceId of workspaceIds.filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(id))) this.upsertWorkspace(workerId, { workspaceId, capabilities: [item.capability], state: status === "UNAVAILABLE" ? "UNKNOWN" : "READY" }, now);
       }
     });
     this.events.publish({ type: "worker.updated", workerId });
@@ -200,20 +204,83 @@ export class WorkerService {
 
   updateModels(workerId: string, values: Record<string, any>[], now = Date.now()): void {
     this.db.transaction(() => {
-      this.db.run("DELETE FROM worker_models WHERE worker_id = ?", workerId);
+      this.db.run("UPDATE worker_models SET present = 0, updated_at = ? WHERE worker_id = ?", now, workerId);
       for (const value of values.slice(0, 500)) {
         const modelId = String(value.id ?? value.model_id ?? value.model ?? ""); if (!modelId) continue;
         if (modelId.length > 200) continue;
         const status = ["READY", "LOADING", "UNAVAILABLE"].includes(String(value.status ?? "ready").toUpperCase()) ? String(value.status ?? "ready").toUpperCase() : "UNAVAILABLE";
-        this.db.run("INSERT INTO worker_models(worker_id, runtime, model_id, display_name, status, context_length, metadata_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", workerId, boundedString(value.runtime ?? value.provider ?? "unknown", 120) ?? "unknown", modelId, boundedString(value.display_name ?? value.displayName ?? modelId, 240) ?? modelId, status, boundedNumber(value.context_length ?? value.contextLength, 0, 10_000_000), JSON.stringify(safeModelMetadata(value.metadata ?? {})), now);
+        const runtime = boundedString(value.runtime ?? value.provider ?? "unknown", 120) ?? "unknown";
+        this.db.run("INSERT INTO worker_models(worker_id, runtime, model_id, display_name, status, context_length, metadata_json, present, last_seen_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(worker_id, runtime, model_id) DO UPDATE SET display_name = excluded.display_name, status = excluded.status, context_length = excluded.context_length, metadata_json = excluded.metadata_json, present = 1, last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at", workerId, runtime, modelId, boundedString(value.display_name ?? value.displayName ?? modelId, 240) ?? modelId, status, boundedNumber(value.context_length ?? value.contextLength, 0, 10_000_000), JSON.stringify(safeModelMetadata(value.metadata ?? {})), now, now);
       }
     });
     this.events.publish({ type: "model.updated", workerId });
   }
 
+  setProtocolFeatures(workerId: string, features: unknown[], now = Date.now()): void {
+    const normalized = Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string" && feature.length <= 80).slice(0, 100) : [];
+    this.db.run("UPDATE workers SET protocol_features_json = ?, updated_at = ? WHERE id = ?", JSON.stringify([...new Set(normalized)]), now, workerId);
+  }
+
+  updateAvailability(workerId: string, availability: Record<string, unknown>, now = Date.now()): void {
+    const runningIds = availability.running_attempt_ids ?? availability.runningAttemptIds;
+    const observedRaw = availability.observed_at ?? availability.observedAt;
+    const observedAt = typeof observedRaw === "number" ? observedRaw : typeof observedRaw === "string" && Number.isFinite(Date.parse(observedRaw)) ? Date.parse(observedRaw) : now;
+    const value = { supported: availability.supported === true, sessionScope: boundedString(availability.session_scope ?? availability.sessionScope, 80), idleSeconds: boundedNumber(availability.idle_seconds ?? availability.idleSeconds, 0, 86_400), canAccept: availability.can_accept === true || availability.canAccept === true, reason: boundedString(availability.reason, 160), runningAttemptIds: Array.isArray(runningIds) ? runningIds.filter((id: unknown): id is string => typeof id === "string").slice(0, 256) : [], observedAt, preferencesAppliedVersion: boundedNumber(availability.preferences_applied_version ?? availability.preferencesAppliedVersion, 0, Number.MAX_SAFE_INTEGER) };
+    this.db.run("UPDATE workers SET availability_json = ?, preferences_applied_version = COALESCE(?, preferences_applied_version), updated_at = ? WHERE id = ?", JSON.stringify(value), value.preferencesAppliedVersion, now, workerId);
+    this.events.publish({ type: "worker.updated", workerId, availability: value });
+  }
+
+  recordSettingsApplied(workerId: string, settingsVersion: number, preferencesVersion: number, state: string, now = Date.now()): void {
+    if (state !== "APPLIED") return;
+    this.db.run("UPDATE workers SET settings_applied_version = MAX(settings_applied_version, ?), preferences_applied_version = MAX(preferences_applied_version, ?), updated_at = ? WHERE id = ?", settingsVersion, preferencesVersion, now, workerId);
+    this.events.publish({ type: "worker.updated", workerId, settingsVersion, preferencesVersion, state });
+  }
+
+  upsertWorkspace(workerId: string, value: { workspaceId: string; displayName?: string; capabilities?: string[]; state?: string; configVersion?: number }, now = Date.now()): void {
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(value.workspaceId)) throw new Error("INVALID_WORKSPACE_ID");
+    const state = ["READY", "MISSING", "DISABLED", "UNKNOWN"].includes(value.state ?? "") ? value.state : "UNKNOWN";
+    this.db.run("INSERT INTO worker_workspaces(worker_id, workspace_id, display_name, capabilities_json, state, config_version, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id, workspace_id) DO UPDATE SET display_name = excluded.display_name, capabilities_json = excluded.capabilities_json, state = excluded.state, config_version = excluded.config_version, checked_at = excluded.checked_at", workerId, value.workspaceId, value.displayName ?? value.workspaceId, JSON.stringify(value.capabilities ?? []), state, value.configVersion ?? 0, now);
+  }
+
+  updatePreferences(workerId: string, input: { mode?: "NORMAL" | "IDLE_ONLY"; idleThresholdSeconds?: number | null; pause?: { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } }, expectedVersion?: number, now = Date.now()): Record<string, unknown> {
+    return this.db.transaction(() => {
+      const current = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", workerId);
+      const version = Number(current?.version ?? 0);
+      if (expectedVersion !== undefined && expectedVersion !== version) throw new Error("WORKER_PREFERENCES_CHANGED");
+      const mode = input.mode ?? current?.mode ?? "NORMAL";
+      const threshold = input.idleThresholdSeconds === undefined ? current?.idle_threshold_seconds ?? null : input.idleThresholdSeconds;
+      let pauseId = current?.pause_id ?? null; let pauseUntil = current?.pause_until ?? null; let indefinite = Number(current?.pause_indefinite ?? 0);
+      if (input.pause) {
+        if (input.pause.kind === "NONE") { pauseId = null; pauseUntil = null; indefinite = 0; }
+        else {
+          pauseId = uuidv7(now); indefinite = input.pause.kind === "INDEFINITE" ? 1 : 0;
+          const duration = Number(input.pause.durationSeconds ?? 3600);
+          if (input.pause.kind === "TIMED" && (!Number.isInteger(duration) || duration < 60 || duration > 86_400)) throw new Error("INVALID_WORKER_PREFERENCE");
+          pauseUntil = indefinite ? null : now + duration * 1000;
+        }
+      }
+      if (mode !== "NORMAL" && mode !== "IDLE_ONLY") throw new Error("INVALID_WORKER_PREFERENCE");
+      if (threshold !== null && (!Number.isInteger(Number(threshold)) || Number(threshold) < 60 || Number(threshold) > 7_200)) throw new Error("INVALID_WORKER_PREFERENCE");
+      this.db.run("INSERT INTO worker_preferences(worker_id, version, mode, pause_id, pause_until, pause_indefinite, idle_threshold_seconds, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET version = excluded.version, mode = excluded.mode, pause_id = excluded.pause_id, pause_until = excluded.pause_until, pause_indefinite = excluded.pause_indefinite, idle_threshold_seconds = excluded.idle_threshold_seconds, updated_at = excluded.updated_at", workerId, version + 1, mode, pauseId, pauseUntil, indefinite, threshold, now);
+      this.events.publish({ type: "worker.updated", workerId, preferencesVersion: version + 1 });
+      return this.preferences(workerId);
+    });
+  }
+
+  preferences(workerId: string): Record<string, unknown> {
+    const row = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", workerId);
+    return { version: Number(row?.version ?? 0), mode: row?.mode ?? "NORMAL", pause: row?.pause_id ? { id: row.pause_id, until: iso(row.pause_until), indefinite: Boolean(row.pause_indefinite) } : null, idleThresholdSeconds: row?.idle_threshold_seconds ?? null };
+  }
+
+  expirePauses(now = Date.now()): number {
+    const result = this.db.connection.prepare("UPDATE worker_preferences SET version = version + 1, pause_id = NULL, pause_until = NULL, pause_indefinite = 0, updated_at = ? WHERE pause_indefinite = 0 AND pause_until IS NOT NULL AND pause_until <= ?").run(now, now);
+    if (Number(result.changes) > 0) this.events.publish({ type: "worker.updated", preferencesExpired: Number(result.changes) });
+    return Number(result.changes);
+  }
+
   listWorkers(now = Date.now()): Record<string, unknown>[] { return this.db.all<Row>("SELECT * FROM workers WHERE removed_at IS NULL ORDER BY name, id").map((row) => this.publicWorker(row, now)); }
   getWorker(id: string, now = Date.now()): Record<string, unknown> | undefined { const row = this.db.one<Row>("SELECT * FROM workers WHERE id = ? AND removed_at IS NULL", id); return row ? this.publicWorker(row, now) : undefined; }
-  listModels(): Record<string, unknown>[] { return this.db.all<Row>("SELECT m.*, w.name AS worker_name, w.status AS worker_status FROM worker_models m JOIN workers w ON w.id = m.worker_id WHERE w.removed_at IS NULL ORDER BY w.name, m.runtime, m.model_id").map((row) => ({ workerId: row.worker_id, worker: row.worker_name, workerStatus: row.worker_status, runtime: row.runtime, model: row.model_id, displayName: row.display_name, status: row.status, contextLength: row.context_length, metadata: json(row.metadata_json) })); }
+  listModels(includeHistory = false): Record<string, unknown>[] { return this.db.all<Row>(`SELECT m.*, w.name AS worker_name, w.status AS worker_status FROM worker_models m JOIN workers w ON w.id = m.worker_id WHERE w.removed_at IS NULL ${includeHistory ? "" : "AND m.present = 1"} ORDER BY w.name, m.runtime, m.model_id`).map((row) => ({ workerId: row.worker_id, worker: row.worker_name, workerStatus: row.worker_status, runtime: row.runtime, model: row.model_id, instanceKey: Buffer.from(JSON.stringify([row.worker_id, row.runtime, row.model_id]), "utf8").toString("base64url"), displayName: row.display_name, status: row.status, present: Boolean(row.present), contextLength: row.context_length, metadata: json(row.metadata_json), loaded: json(row.metadata_json, {}).loaded ?? null, loading: json(row.metadata_json, {}).loading ?? null, dispatchable: Boolean(row.present) && row.status === "READY" && row.worker_status === "ONLINE", unavailableReasons: row.present ? [] : ["MODEL_NOT_PRESENT"], lastSeenAt: iso(row.last_seen_at ?? row.updated_at) })); }
 
   setEnabled(id: string, enabled: boolean, actor = "owner", now = Date.now()): void { const result = this.db.connection.prepare("UPDATE workers SET enabled = ?, status = ?, updated_at = ? WHERE id = ? AND removed_at IS NULL").run(enabled ? 1 : 0, enabled ? "OFFLINE" : "DISABLED", now, id); if (Number(result.changes) !== 1) throw new Error("WORKER_NOT_FOUND"); this.appendAudit(actor, enabled ? "worker.enabled" : "worker.disabled", id, {}, now); this.events.publish({ type: "worker.updated", workerId: id, status: enabled ? "OFFLINE" : "DISABLED" }); }
   setDrain(id: string, drain: boolean, actor = "owner", now = Date.now()): void { const result = this.db.connection.prepare("UPDATE workers SET drain = ?, updated_at = ? WHERE id = ? AND removed_at IS NULL").run(drain ? 1 : 0, now, id); if (Number(result.changes) !== 1) throw new Error("WORKER_NOT_FOUND"); this.appendAudit(actor, drain ? "worker.drained" : "worker.resumed", id, {}, now); this.events.publish({ type: "worker.updated", workerId: id, drain }); }
@@ -333,7 +400,7 @@ export class WorkerService {
 
   private publicWorker(row: Row, now: number): Record<string, unknown> {
     const capabilities = this.db.all<Row>("SELECT id, capability, runtime, runtime_version AS runtimeVersion, max_concurrency AS maxConcurrency, descriptor_json AS descriptor, descriptor_hash AS descriptorHash, grant_status AS grantStatus, superseded_at AS supersededAt, status FROM worker_capabilities WHERE worker_id = ? ORDER BY capability, runtime", row.id).map((item) => ({ ...item, runtime: item.runtime || null, descriptor: json(item.descriptor), supersededAt: iso(item.supersededAt) }));
-    const models = this.db.all<Row>("SELECT runtime, model_id AS model, display_name AS displayName, status, context_length AS contextLength, metadata_json AS metadata FROM worker_models WHERE worker_id = ? ORDER BY runtime, model_id", row.id).map((item) => ({ ...item, metadata: json(item.metadata) }));
+    const models = this.db.all<Row>("SELECT runtime, model_id AS model, display_name AS displayName, status, context_length AS contextLength, metadata_json AS metadata, present, last_seen_at AS lastSeenAt FROM worker_models WHERE worker_id = ? ORDER BY runtime, model_id", row.id).map((item) => ({ ...item, present: Boolean(item.present), lastSeenAt: iso(item.lastSeenAt), metadata: json(item.metadata) }));
     const active = this.db.one<Row>("SELECT COUNT(*) AS count, SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) AS running, SUM(CASE WHEN status = 'OFFERED' THEN 1 ELSE 0 END) AS offered FROM task_attempts WHERE worker_id = ? AND status IN ('OFFERED', 'ACCEPTED', 'RUNNING')", row.id);
     const activeCount = Number(active?.count ?? 0);
     const runningCount = Number(active?.running ?? 0);
@@ -346,7 +413,7 @@ export class WorkerService {
     if (!row.enabled || row.status === "DISABLED") { dispatchState = "BLOCKED"; dispatchReason = "Worker 已停用"; }
     else if (row.drain) { dispatchState = activeCount > 0 ? "DRAINING" : "DRAINED"; dispatchReason = activeCount > 0 ? "等待現有工作完成" : "已停止接收新工作"; }
     else if (connectionState !== "ONLINE") { dispatchState = "BLOCKED"; dispatchReason = connectionReason; }
-    else if (capabilities.length === 0 || !capabilities.some((capability: Row) => ["READY", "HEALTHY", "DEGRADED"].includes(String(capability.status)) && !["REVOKED", "REQUIRES_REVIEW"].includes(String(capability.grantStatus)))) { dispatchState = "BLOCKED"; dispatchReason = "尚未有可派工 capability"; }
+    else if (capabilities.length === 0 || !capabilities.some((capability: Row) => ["READY", "HEALTHY"].includes(String(capability.status)) && !["REVOKED", "REQUIRES_REVIEW"].includes(String(capability.grantStatus)))) { dispatchState = "BLOCKED"; dispatchReason = "尚未有可派工 capability"; }
     else if (activeCount >= maxConcurrency) { dispatchState = "BLOCKED"; dispatchReason = "已達最大併發數"; }
     const credential = this.db.one<Row>("SELECT created_at AS createdAt, revoked_at AS revokedAt FROM worker_tokens WHERE worker_id = ?", row.id);
     const credentialState = !credential ? "REMOVED" : credential.revokedAt ? "REVOKED" : row.credential_expires_at && Number(row.credential_expires_at) <= now ? "EXPIRED" : "ACTIVE";
@@ -369,7 +436,7 @@ export class WorkerService {
       dispatch: { state: dispatchState, reason: dispatchReason, maxConcurrency },
       activity: { activeAttempts: activeCount, runningAttempts: runningCount, queuedOffers: offeredCount, liveReservations: 0, maxConcurrency },
       credential: { state: credentialState, createdAt: iso(credential?.createdAt), expiresAt: iso(row.credential_expires_at), revokedAt: iso(credential?.revokedAt) },
-      providers,
+      providers, protocolFeatures: json(row.protocol_features_json, []), inventoryRevision: Number(row.inventory_revision ?? 0), settingsAppliedVersion: Number(row.settings_applied_version ?? 0), preferencesAppliedVersion: Number(row.preferences_applied_version ?? 0), availability: json(row.availability_json, null), preferences: this.preferences(row.id), workspaces: this.db.all<Row>("SELECT workspace_id AS workspaceId, display_name AS displayName, capabilities_json AS capabilities, state, config_version AS configVersion, checked_at AS checkedAt FROM worker_workspaces WHERE worker_id = ? ORDER BY workspace_id", row.id).map((workspace) => ({ ...workspace, capabilities: json(workspace.capabilities, []), checkedAt: iso(workspace.checkedAt) })),
       diagnostics: { cpu: json(row.cpu_json, null), memory: json(row.memory_json, null), gpu: json(row.gpu_json, null), lastErrorCode: row.last_error_code ?? null },
       availableActions,
     };

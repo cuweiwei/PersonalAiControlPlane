@@ -12,7 +12,7 @@ export class PythonExecutor implements WorkerExecutor {
   canExecute(task: WorkerTaskOffer): boolean { return this.enabled && task.task_type === "python"; }
   async discover() { return this.enabled ? { capabilities: [{ capability: "python", status: "READY", max_concurrency: 1 }], models: [] } : { capabilities: [], models: [] }; }
   async *execute(task: WorkerTaskOffer, context: { signal?: AbortSignal } = {}): AsyncIterable<ExecutionEvent> {
-    const payload = task.payload as any; const root = this.workspaces[String(payload.workspace_id ?? "")];
+    const payload = task.payload as any; const root = this.workspaces[String(payload.workspace_id ?? (task.execution as any)?.workspace_id ?? "")];
     if (!root || !existsSync(root) || !resolvePathWithinRoots(resolve(root), [resolve(root)])) throw new Error("WORKSPACE_UNAVAILABLE");
     if (context.signal?.aborted) throw new Error("PYTHON_CANCELLED");
     const child = spawn("python3", ["-c", String(payload.script ?? "")], { cwd: resolve(root), stdio: ["ignore", "pipe", "pipe"] });

@@ -11,6 +11,9 @@ import { HermesCallbackDispatcher } from "./callbacks/outbox.ts";
 import { SettingsService } from "./settings/settings-service.ts";
 import { HealthMonitor } from "./systems/health-monitor.ts";
 import { createControlPlaneServer } from "./server.ts";
+import { ModelTestService } from "./models/model-test-service.ts";
+import { ModelPreferenceService } from "./models/model-preference-service.ts";
+import { OnboardingService } from "./workers/onboarding-service.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
 function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -24,10 +27,13 @@ const db = new ControlPlaneDatabase(join(dataDir, "controlplane.db"));
 const artifacts = new ArtifactStorage(artifactRoot);
 const tasks = new TaskService(db, events);
 const workers = new WorkerService(db, events);
-const coordinator = new WorkerCoordinator(workers, tasks, events, artifacts);
+const settings = new SettingsService(db);
+const coordinator = new WorkerCoordinator(workers, tasks, events, artifacts, settings);
 const scheduler = new ResourceScheduler(db, tasks, workers, coordinator, events);
 const callback = new HermesCallbackDispatcher(db);
-const settings = new SettingsService(db);
+const modelTests = new ModelTestService(db, tasks);
+const modelPreferences = new ModelPreferenceService(db);
+const onboarding = new OnboardingService(db);
 const health = new HealthMonitor(db, events);
 health.seed();
 
@@ -35,14 +41,14 @@ let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, callback, modelTests, modelPreferences, onboarding, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }
   coordinator.handleUpgrade(request, socket, head);
 });
 
-const schedulerTimer = setInterval(() => { try { scheduler.tick(); scheduler.expireTasks(); schedulerAlive = true; } catch (error) { schedulerAlive = false; console.error(JSON.stringify({ event: "scheduler.error", message: error instanceof Error ? error.message : "SCHEDULER_FAILED" })); } }, numberEnv("PAI_SCHEDULER_INTERVAL_MS", 1_000, 100, 60_000));
+const schedulerTimer = setInterval(() => { try { workers.expirePauses(); scheduler.tick(); scheduler.expireTasks(); modelTests.syncAll(); schedulerAlive = true; } catch (error) { schedulerAlive = false; console.error(JSON.stringify({ event: "scheduler.error", message: error instanceof Error ? error.message : "SCHEDULER_FAILED" })); } }, numberEnv("PAI_SCHEDULER_INTERVAL_MS", 1_000, 100, 60_000));
 const staleTimer = setInterval(() => { try { scheduler.staleSweep(Date.now(), numberEnv("PAI_WORKER_OFFLINE_SECONDS", 90, 10, 86_400) * 1_000); } catch (error) { console.error(JSON.stringify({ event: "worker.stale_sweep_error", message: error instanceof Error ? error.message : "STALE_SWEEP_FAILED" })); } }, 15_000);
 const healthTimer = setInterval(() => { void health.checkOnce().catch((error) => console.error(JSON.stringify({ event: "system.health_error", message: error instanceof Error ? error.message : "HEALTH_CHECK_FAILED" }))); }, numberEnv("PAI_SYSTEM_HEALTH_INTERVAL_SECONDS", 30, 10, 86_400) * 1_000);
 const callbackTimer = setInterval(() => { void callback.dispatchOnce().catch((error) => console.error(JSON.stringify({ event: "hermes.callback_error", message: error instanceof Error ? error.message : "CALLBACK_FAILED" }))); }, 2_000);

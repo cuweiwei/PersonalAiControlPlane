@@ -19,10 +19,13 @@ export type TaskExecution = {
   model?: TaskModelRequirement;
   resources?: { minRamMb?: number; gpuRequired?: boolean };
   workspaceId?: string;
+  preferenceId?: string | null;
 };
+export type TaskSourceRef = { kind: string; id: string; title?: string | null; url?: string | null };
 export type CreateTaskInput = {
   source: string;
   correlationId?: string | null;
+  sourceRef?: TaskSourceRef | null;
   groupId?: string | null;
   parentTaskId?: string | null;
   title: string;
@@ -34,12 +37,14 @@ export type CreateTaskInput = {
   limits: { timeoutSeconds: number; maxAttempts: number };
   priority: TaskPriority;
   inputArtifactIds: string[];
+  purpose?: "USER" | "MODEL_TEST" | "WORKER_TEST";
+  settingsVersion?: number | null;
 };
 
 export type TaskEventName =
   | "TASK_CREATED" | "TASK_ASSIGNED" | "WORKER_ACCEPTED" | "TASK_STARTED"
   | "TASK_PROGRESS" | "TASK_LOG" | "TASK_SUCCEEDED" | "TASK_FAILED"
-  | "TASK_CANCELLED" | "TASK_REQUEUED" | "LATE_ATTEMPT_RESULT";
+  | "TASK_CANCELLED" | "TASK_REQUEUED" | "LATE_ATTEMPT_RESULT" | "TASK_DISPATCH_CHANGED";
 
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -73,12 +78,12 @@ function stringValue(value: unknown, field: string, max = 500): string { if (typ
 function optionalString(value: unknown, field: string): string | null | undefined { if (value === undefined || value === null) return value as null | undefined; return stringValue(value, field, 500); }
 function nonNegativeInt(value: unknown, field: string, fallback: number, maximum: number): number { if (value === undefined) return fallback; if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > maximum) throw new Error(`${field} must be a bounded non-negative integer`); return value; }
 
-export function parseCreateTaskInput(value: unknown): CreateTaskInput {
+export function parseCreateTaskInput(value: unknown, defaults: { timeoutSeconds?: number; maxAttempts?: number } = {}): CreateTaskInput {
   if (!isRecord(value)) throw new Error("request body must be an object");
-  rejectUnknown(value, ["source", "correlation_id", "group_id", "parent_task_id", "title", "task_type", "instruction", "context", "payload", "execution", "limits", "priority", "input_artifact_ids"], "request");
+  rejectUnknown(value, ["source", "source_ref", "correlation_id", "group_id", "parent_task_id", "title", "task_type", "instruction", "context", "payload", "execution", "limits", "priority", "input_artifact_ids"], "request");
   const executionRaw = value.execution;
   if (!isRecord(executionRaw)) throw new Error("execution must be an object");
-  rejectUnknown(executionRaw, ["capabilities", "worker_id", "runtime", "model", "resources", "workspace_id"], "execution");
+  rejectUnknown(executionRaw, ["capabilities", "worker_id", "runtime", "model", "resources", "workspace_id", "preference_id"], "execution");
   const capabilities = executionRaw.capabilities;
   if (!Array.isArray(capabilities) || capabilities.length === 0 || capabilities.length > 20 || capabilities.some((item) => typeof item !== "string" || item.length === 0 || item.length > 100)) throw new Error("execution.capabilities is invalid");
   const modelRaw = executionRaw.model;
@@ -88,6 +93,7 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
     rejectUnknown(modelRaw, ["name", "mode"], "execution.model");
     model = { name: optionalString(modelRaw.name, "execution.model.name") ?? undefined, mode: (modelRaw.mode ?? "any") as TaskModelRequirement["mode"] };
     if (!["required", "preferred", "any"].includes(model.mode ?? "")) throw new Error("execution.model.mode is invalid");
+    if (["required", "preferred"].includes(model.mode ?? "") && !model.name) throw new Error("execution.model.name is required for this mode");
   }
   const resourcesRaw = executionRaw.resources;
   let resources: TaskExecution["resources"];
@@ -97,11 +103,12 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
     resources = { minRamMb: nonNegativeInt(resourcesRaw.min_ram_mb, "execution.resources.min_ram_mb", 0, 1_048_576), gpuRequired: resourcesRaw.gpu_required === true };
   }
   const limitsRaw = value.limits;
-  if (!isRecord(limitsRaw)) throw new Error("limits must be an object");
-  rejectUnknown(limitsRaw, ["timeout_seconds", "max_attempts"], "limits");
-  const timeoutSeconds = nonNegativeInt(limitsRaw.timeout_seconds, "limits.timeout_seconds", 1800, 86_400);
+  if (limitsRaw !== undefined && !isRecord(limitsRaw)) throw new Error("limits must be an object");
+  const limits = isRecord(limitsRaw) ? limitsRaw : {};
+  rejectUnknown(limits, ["timeout_seconds", "max_attempts"], "limits");
+  const timeoutSeconds = nonNegativeInt(limits.timeout_seconds, "limits.timeout_seconds", defaults.timeoutSeconds ?? 1800, 86_400);
   if (timeoutSeconds < 1) throw new Error("limits.timeout_seconds must be positive");
-  const maxAttempts = nonNegativeInt(limitsRaw.max_attempts, "limits.max_attempts", 2, 10);
+  const maxAttempts = nonNegativeInt(limits.max_attempts, "limits.max_attempts", defaults.maxAttempts ?? 2, 10);
   if (maxAttempts < 1) throw new Error("limits.max_attempts must be positive");
   const priority = (value.priority ?? "normal") as TaskPriority;
   if (!TASK_PRIORITIES.includes(priority)) throw new Error("priority is invalid");
@@ -112,9 +119,19 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
   if (!isRecord(context) || !isRecord(payload)) throw new Error("context and payload must be objects");
   const inputArtifactIds = value.input_artifact_ids ?? [];
   if (!Array.isArray(inputArtifactIds) || inputArtifactIds.some((item) => typeof item !== "string")) throw new Error("input_artifact_ids is invalid");
+  const legacyWorkspace = isRecord(payload) ? optionalString(payload.workspace_id, "payload.workspace_id") : undefined;
+  const executionWorkspace = optionalString(executionRaw.workspace_id, "execution.workspace_id");
+  if (legacyWorkspace && executionWorkspace && legacyWorkspace !== executionWorkspace) throw new Error("WORKSPACE_CONFLICT");
+  let sourceRef: TaskSourceRef | null | undefined;
+  if (value.source_ref !== undefined && value.source_ref !== null) {
+    if (!isRecord(value.source_ref)) throw new Error("source_ref must be an object");
+    rejectUnknown(value.source_ref, ["kind", "id", "title", "url"], "source_ref");
+    sourceRef = { kind: stringValue(value.source_ref.kind, "source_ref.kind", 80), id: stringValue(value.source_ref.id, "source_ref.id", 500), title: optionalString(value.source_ref.title, "source_ref.title") ?? null, url: optionalString(value.source_ref.url, "source_ref.url") ?? null };
+  }
   return {
     source: stringValue(value.source ?? "hermes", "source"),
     correlationId: optionalString(value.correlation_id, "correlation_id"),
+    sourceRef,
     groupId: optionalString(value.group_id, "group_id"),
     parentTaskId: optionalString(value.parent_task_id, "parent_task_id"),
     title: stringValue(value.title, "title", 1_000),
@@ -122,19 +139,19 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
     instruction: stringValue(value.instruction, "instruction", 100_000),
     context: context as Record<string, JsonValue>,
     payload: payload as Record<string, JsonValue>,
-    execution: { capabilities: [...capabilities] as string[], workerId: optionalString(executionRaw.worker_id, "execution.worker_id"), runtime: optionalString(executionRaw.runtime, "execution.runtime") ?? "auto", model, resources, workspaceId: optionalString(executionRaw.workspace_id, "execution.workspace_id") ?? undefined },
+    execution: { capabilities: [...capabilities] as string[], workerId: optionalString(executionRaw.worker_id, "execution.worker_id"), runtime: optionalString(executionRaw.runtime, "execution.runtime") ?? "auto", model, resources, workspaceId: executionWorkspace ?? legacyWorkspace ?? undefined, preferenceId: optionalString(executionRaw.preference_id, "execution.preference_id") ?? null },
     limits: { timeoutSeconds, maxAttempts },
     priority,
     inputArtifactIds,
   };
 }
 
-export function parseRegistrationInput(value: unknown): { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; hardware: Record<string, JsonValue>; capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] } {
+export function parseRegistrationInput(value: unknown): { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; onboardingId?: string; hardware: Record<string, JsonValue>; capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] } {
   if (!isRecord(value)) throw new Error("request body must be an object");
-  rejectUnknown(value, ["name", "registration_secret", "platform", "hostname", "agent_version", "hardware", "capabilities", "models"], "request");
+  rejectUnknown(value, ["name", "registration_secret", "platform", "hostname", "agent_version", "onboarding_id", "hardware", "capabilities", "models"], "request");
   const hardware = value.hardware ?? {};
   if (!isRecord(hardware)) throw new Error("hardware must be an object");
-  return { name: stringValue(value.name, "name", 200), registrationSecret: stringValue(value.registration_secret, "registration_secret", 500), platform: stringValue(value.platform, "platform", 80), hostname: optionalString(value.hostname, "hostname") ?? undefined, agentVersion: optionalString(value.agent_version, "agent_version") ?? undefined, hardware: hardware as Record<string, JsonValue>, capabilities: Array.isArray(value.capabilities) ? value.capabilities as Record<string, JsonValue>[] : undefined, models: Array.isArray(value.models) ? value.models as Record<string, JsonValue>[] : undefined };
+  return { name: stringValue(value.name, "name", 200), registrationSecret: stringValue(value.registration_secret, "registration_secret", 500), platform: stringValue(value.platform, "platform", 80), hostname: optionalString(value.hostname, "hostname") ?? undefined, agentVersion: optionalString(value.agent_version, "agent_version") ?? undefined, onboardingId: optionalString(value.onboarding_id, "onboarding_id") ?? undefined, hardware: hardware as Record<string, JsonValue>, capabilities: Array.isArray(value.capabilities) ? value.capabilities as Record<string, JsonValue>[] : undefined, models: Array.isArray(value.models) ? value.models as Record<string, JsonValue>[] : undefined };
 }
 
 export const priorityNumber: Record<TaskPriority, number> = { low: 20, normal: 50, high: 80 };
