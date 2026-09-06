@@ -148,7 +148,8 @@ exit /b %workerExit%
 
   $principalUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
   $arguments = "start --origin `"$Origin`" --data-dir `"$DataDirectory`""
-  $action = New-ScheduledTaskAction -Execute $WorkerExecutable -Argument $arguments -WorkingDirectory $workerDirectory
+  $commandArguments = '/d /s /c ""' + $WorkerExecutable + '" ' + $arguments + '"'
+  $action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument $commandArguments -WorkingDirectory $workerDirectory
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $principalUser
   $principal = New-ScheduledTaskPrincipal -UserId $principalUser -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden

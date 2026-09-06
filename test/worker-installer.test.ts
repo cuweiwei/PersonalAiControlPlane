@@ -22,7 +22,7 @@ test("macOS Worker installer is a self-bootstrapping shell script", () => {
 
 test("Windows Worker installer bootstraps source, Node.js, launcher, and Scheduled Task", () => {
   const source = readFileSync(windowsInstaller, "utf8");
-  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED"]) {
+  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "$env:ComSpec", "/d /s /c", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
