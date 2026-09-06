@@ -47,14 +47,14 @@ export class WindowsCredentialStore<T extends Record<string, unknown>> implement
   private readonly path: string;
   constructor(path: string) { this.path = path; }
   read(): T | undefined {
-    const script = "$p=$args[0]; if (!(Test-Path -LiteralPath $p)) { exit 3 }; $blob=[Convert]::FromBase64String((Get-Content -Raw -LiteralPath $p)); $plain=[Security.Cryptography.ProtectedData]::Unprotect($blob,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Text.Encoding]::UTF8.GetString($plain))";
+    const script = "$p=$args[0]; if (!(Test-Path -LiteralPath $p)) { exit 3 }; $encrypted=Get-Content -Raw -LiteralPath $p; try { $secure=ConvertTo-SecureString -String $encrypted; $ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); try { [Console]::Out.Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }; exit 0 } catch { Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue; Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction SilentlyContinue; $blob=[Convert]::FromBase64String($encrypted); $plain=[System.Security.Cryptography.ProtectedData]::Unprotect($blob,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Text.Encoding]::UTF8.GetString($plain)) }";
     const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, this.path], { encoding: "utf8" });
     if (result.status !== 0 || result.error) return undefined;
     return decoded<T>(result.stdout);
   }
   write(value: T): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    const script = "$p=$args[0]; $plain=[Convert]::FromBase64String($args[1]); $blob=[Security.Cryptography.ProtectedData]::Protect($plain,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [IO.File]::WriteAllText($p,[Convert]::ToBase64String($blob))";
+    const script = "$p=$args[0]; $plain=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[1])); $secure=ConvertTo-SecureString -String $plain -AsPlainText -Force; [IO.File]::WriteAllText($p,(ConvertFrom-SecureString -SecureString $secure))";
     const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, this.path, encoded(value)], { encoding: "utf8" });
     if (result.status !== 0 || result.error) throw new Error("WORKER_CREDENTIAL_STORE_FAILED");
   }
