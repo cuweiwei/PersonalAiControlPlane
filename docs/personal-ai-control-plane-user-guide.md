@@ -24,6 +24,14 @@ curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/mai
 
 預設連線到 `https://gnest.taila77e5f.ts.net`；若要指定其他 origin，可在同一個腳本命令後以 `bash -s -- "https://example.invalid"` 傳入。啟動後到 Control Web → Workers → Pending enrollment 按 Approve。重跑腳本是冪等的，會重新載入 LaunchAgent。
 
+Windows 可直接使用一鍵 PowerShell 安裝腳本。腳本會準備 source、Node.js 22.19+ 與依賴，建立 `pai-worker.cmd`，註冊目前登入使用者的 Scheduled Task 並立即啟動，不需要先手動 clone repo、安裝 Node.js 或建立 launcher：
+
+```powershell
+irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
+```
+
+腳本預設連線到 `https://gnest.taila77e5f.ts.net`，使用 `%LOCALAPPDATA%\.personal-ai-worker` 保存 Worker runtime data，登入後會自動啟動。安裝完成後到 Control Web → Workers → Pending enrollment 按 Approve；重跑腳本會更新 source、依賴與 Scheduled Task，但沿用既有 Worker identity。
+
 ```bash
 npm run worker:cli -- enroll --origin http://127.0.0.1:8080
 # 在 Control Web → Workers → Pending Registration 按 Approve

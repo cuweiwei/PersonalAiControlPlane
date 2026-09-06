@@ -39,6 +39,6 @@ export class OnboardingService {
     if (!["darwin", "win32"].includes(platform)) throw new Error("INVALID_ONBOARDING_PLATFORM");
     if (onboardingId && !this.get(onboardingId)) throw new Error("ONBOARDING_NOT_FOUND");
     const platformKey = platform === "darwin" ? "DARWIN" : "WIN32"; const url = process.env[`PAI_WORKER_RELEASE_URL_${platformKey}`] ?? process.env.PAI_WORKER_RELEASE_URL ?? null;
-    return { platform, onboardingId, releaseVersion: process.env.PAI_WORKER_RELEASE_VERSION ?? "2.0.0", downloadUrl: url, origin: process.env.PAI_CONTROL_PLANE_ORIGIN ?? null, checks: ["node_version", "worker_executable", "control_plane_origin"], installCommand: platform === "darwin" ? "install.sh" : "pai-worker.cmd", instructions: platform === "darwin" ? ["下載已發布的 Worker bundle", "確認 Control Plane origin", "登入後啟用常駐服務"] : ["下載已發布的 Worker bundle", "確認 Control Plane origin", "登入後啟用 Scheduled Task"] };
+    return { platform, onboardingId, releaseVersion: process.env.PAI_WORKER_RELEASE_VERSION ?? "2.0.0", downloadUrl: url, origin: process.env.PAI_CONTROL_PLANE_ORIGIN ?? null, checks: ["node_version", "worker_executable", "control_plane_origin"], installCommand: platform === "darwin" ? "install-worker.sh" : "install-worker.ps1", instructions: platform === "darwin" ? ["執行一鍵 Worker 安裝腳本", "確認 Control Plane origin", "登入後啟用常駐服務"] : ["執行一鍵 PowerShell 安裝腳本", "確認 Control Plane origin", "登入後啟用登入後常駐的 Scheduled Task"] };
   }
 }

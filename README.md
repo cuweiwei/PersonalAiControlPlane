@@ -35,6 +35,14 @@ curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/mai
 
 安裝完成後，到 Control Web → Workers 按 Approve。腳本會使用使用者層級的 Keychain 保存 credential，不需要先手動 clone repo、安裝 Node.js 或建立 `pai-worker`。若已在 repo 目錄內執行腳本，則會直接使用目前 checkout；可用第一個參數覆寫 Control Plane origin。
 
+Windows 可用 PowerShell 一鍵安裝；它會自動下載 Worker source、Node.js 22.19+、依賴，建立 `pai-worker.cmd`，並註冊目前登入使用者的 Scheduled Task。關閉 PowerShell 或重新登入後 Worker 仍會自動啟動：
+
+```powershell
+irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
+```
+
+安裝完成後，到 Control Web → Workers 按 Approve。Windows credential 使用目前登入使用者的 DPAPI；腳本會沿用 `%LOCALAPPDATA%\.personal-ai-worker`，因此重跑安裝不會無故建立新的 Worker identity。
+
 手動啟動與診斷仍可使用：
 
 ```bash

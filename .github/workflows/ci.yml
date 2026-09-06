@@ -22,9 +22,18 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build:web
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse Windows installer
+        shell: pwsh
+        run: |
+          $source = Get-Content packaging/windows/install-worker.ps1 -Raw
+          [void][scriptblock]::Create($source)
   image:
     if: github.event_name == 'push'
-    needs: check
+    needs: [check, windows-installer]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
