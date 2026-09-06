@@ -24,6 +24,7 @@ export class FileWorkerTokenStore<T extends Record<string, unknown> = WorkerToke
 function credentialService(path: string): string { return `PersonalAiWorker-${createHash("sha256").update(path).digest("hex").slice(0, 24)}`; }
 function encoded(value: unknown): string { return Buffer.from(JSON.stringify(value), "utf8").toString("base64"); }
 function decoded<T>(value: string): T | undefined { try { return JSON.parse(Buffer.from(value.trim(), "base64").toString("utf8")) as T; } catch { return undefined; } }
+function parsed<T>(value: string): T | undefined { try { return JSON.parse(value.trim()) as T; } catch { return undefined; } }
 function powershellEncodedCommand(script: string): string { return Buffer.from(script, "utf16le").toString("base64"); }
 function powershellEncodedValue(value: string): string { return Buffer.from(value, "utf8").toString("base64"); }
 
@@ -53,7 +54,7 @@ export class WindowsCredentialStore<T extends Record<string, unknown>> implement
     const script = `$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${path}')); if (!(Test-Path -LiteralPath $p)) { exit 3 }; $encrypted=Get-Content -Raw -LiteralPath $p; try { $secure=ConvertTo-SecureString -String $encrypted; $ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); try { [Console]::Out.Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }; exit 0 } catch { Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue; Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction SilentlyContinue; $blob=[Convert]::FromBase64String($encrypted); $plain=[System.Security.Cryptography.ProtectedData]::Unprotect($blob,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Text.Encoding]::UTF8.GetString($plain)) }`;
     const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", powershellEncodedCommand(script)], { encoding: "utf8" });
     if (result.status !== 0 || result.error) return undefined;
-    return decoded<T>(result.stdout);
+    return parsed<T>(result.stdout);
   }
   write(value: T): void {
     mkdirSync(dirname(this.path), { recursive: true });
