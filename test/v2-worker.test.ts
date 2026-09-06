@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { WorkerLocalDatabase } from "../apps/worker/src/local-db.ts";
 import { OutboundWorkerRuntime, type WorkerTaskOffer } from "../apps/worker/src/runtime.ts";
 import { WorkerEnrollment } from "../apps/worker/src/enrollment.ts";
+import { WorkerDaemon } from "../apps/worker/src/daemon.ts";
 
 const offer: WorkerTaskOffer = {
   task_id: "task-1",
@@ -18,6 +19,18 @@ const offer: WorkerTaskOffer = {
   execution: { capabilities: ["generic"] },
   limits: { timeout_seconds: 30 },
 };
+
+test("worker daemon wait keeps the start command alive until an explicit stop", async () => {
+  const daemon = new WorkerDaemon({ createRuntime: async () => undefined, pollIntervalMs: 50 });
+  daemon.start();
+  let settled = false;
+  const waiting = daemon.wait().then(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false);
+  daemon.stop();
+  await waiting;
+  assert.equal(settled, true);
+});
 
 test("worker persists assignment before accept and resends durable result until acknowledged", async () => {
   const db = new WorkerLocalDatabase(":memory:");

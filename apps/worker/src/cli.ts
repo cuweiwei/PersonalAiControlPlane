@@ -16,5 +16,12 @@ else if (command === "status") { const token = service.enrollment.readToken(); j
 else if (command === "models") { json({ status: "use_start_to_publish_models", worker: arg("--name") ?? hostname() }); service.db.close(); }
 else if (command === "configure") { const current = readWorkerConfig(configurationPath); const executor = arg("--executor"); const enabled = arg("--enabled"); if (executor) { if (enabled !== "true" && enabled !== "false") { json({ error: "INVALID_EXECUTOR_ENABLED", expected: "true|false" }); process.exitCode = 2; } else { current.executors[executor] = { enabled: enabled === "true" }; writeWorkerConfig(configurationPath, current); json({ status: "saved", configPath: configurationPath, config: current }); } } else { json({ status: "config", configPath: configurationPath, config: current }); } service.db.close(); }
 else if (command === "workspace" && process.argv[3] === "add") { try { const updated = addWorkspace(configurationPath, arg("--id") ?? "", arg("--name") ?? "", arg("--path") ?? ""); writeWorkerConfig(configurationPath, updated); json({ status: "saved", configPath: configurationPath, workspace: updated.workspaces[arg("--id") ?? ""] }); } catch (error) { json({ error: error instanceof Error ? error.message : "WORKSPACE_CONFIG_FAILED" }); process.exitCode = 2; } service.db.close(); }
-else if (command === "start") { service.daemon.start(); process.on("SIGINT", () => service.daemon.stop()); process.on("SIGTERM", () => service.daemon.stop()); }
+else if (command === "start") {
+  const stop = () => service.daemon.stop();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  service.daemon.start();
+  await service.daemon.wait();
+  service.db.close();
+}
 else { json({ error: "UNKNOWN_COMMAND", commands: ["enroll", "start", "status", "reset", "models", "configure", "workspace add"] }); process.exitCode = 2; service.db.close(); }

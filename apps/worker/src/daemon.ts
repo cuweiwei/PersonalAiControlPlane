@@ -6,6 +6,8 @@ export class WorkerDaemon {
   private timer?: ReturnType<typeof setTimeout>;
   private heartbeatAt = 0;
   private running = false;
+  private stopped?: () => void;
+  private lifecycleHandle?: ReturnType<typeof setInterval>;
   private readonly pollIntervalMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly options: WorkerDaemonOptions;
@@ -20,9 +22,26 @@ export class WorkerDaemon {
   start(): void {
     if (this.running) return;
     this.running = true;
+    // Keep the CLI resident even while enrollment/network work is between ticks.
+    this.lifecycleHandle = setInterval(() => undefined, 60_000);
     void this.tick();
   }
-  stop(): void { this.running = false; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.runtime?.close(); this.runtime = undefined; }
+  stop(): void {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    if (this.lifecycleHandle) clearInterval(this.lifecycleHandle);
+    this.lifecycleHandle = undefined;
+    this.runtime?.close();
+    this.runtime = undefined;
+    const resolve = this.stopped;
+    this.stopped = undefined;
+    resolve?.();
+  }
+  async wait(): Promise<void> {
+    if (!this.running) return;
+    await new Promise<void>((resolve) => { this.stopped = resolve; });
+  }
   private async tick(): Promise<void> {
     if (!this.running) return;
     try {
