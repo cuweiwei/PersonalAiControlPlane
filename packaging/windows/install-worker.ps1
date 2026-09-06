@@ -147,9 +147,16 @@ exit /b %workerExit%
   [IO.File]::WriteAllText($WorkerExecutable, $launcher, [Text.UTF8Encoding]::new($false))
 
   $principalUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $arguments = "start --origin `"$Origin`" --data-dir `"$DataDirectory`""
-  $commandArguments = '/d /s /c ""' + $WorkerExecutable + '" ' + $arguments + '"'
-  $action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument $commandArguments -WorkingDirectory $workerDirectory
+  $launchCommand = "`"$WorkerExecutable`" start --origin `"$Origin`" --data-dir `"$DataDirectory`""
+  $hiddenLauncherPath = Join-Path $workerDirectory "pai-worker-hidden.vbs"
+  $vbsCommand = $launchCommand.Replace('"', '""')
+  $hiddenLauncher = @"
+Set shell = CreateObject("WScript.Shell")
+exitCode = shell.Run("$vbsCommand", 0, True)
+WScript.Quit exitCode
+"@
+  [IO.File]::WriteAllText($hiddenLauncherPath, $hiddenLauncher, [Text.UTF8Encoding]::new($false))
+  $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR "System32\wscript.exe") -Argument "`"$hiddenLauncherPath`"" -WorkingDirectory $workerDirectory
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $principalUser
   $principal = New-ScheduledTaskPrincipal -UserId $principalUser -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
@@ -162,7 +169,7 @@ exit /b %workerExit%
     $logTail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join [Environment]::NewLine } else { "(worker log was not created)" }
     Fail "Scheduled Task is $taskState instead of Running. LastTaskResult=$($taskInfo.LastTaskResult). Log: $logPath`n$logTail"
   }
-  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; source = $sourceCache; node = $nodeBinary; log = $logPath; runLevel = "Limited" })
+  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; backgroundLauncher = $hiddenLauncherPath; source = $sourceCache; node = $nodeBinary; log = $logPath; runLevel = "Limited" })
   Write-Output "Worker installed and started. Existing approved identities do not create a new pending enrollment."
 } finally {
   if (Test-Path -LiteralPath $tempDirectory) { Remove-Item -LiteralPath $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue }
