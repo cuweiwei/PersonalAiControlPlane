@@ -5,7 +5,8 @@ param(
   [string]$Repository = "",
   [string]$SourceRef = "",
   [string]$NodeVersion = "22.19.0",
-  [string]$RefreshSource = ""
+  [string]$RefreshSource = "",
+  [string]$LogDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +47,7 @@ function CmdLiteral([string]$Value) { return $Value.Replace("%", "%%") }
 if ([string]::IsNullOrWhiteSpace($Repository)) { $Repository = if ($env:PAI_WORKER_REPOSITORY) { $env:PAI_WORKER_REPOSITORY } else { "https://github.com/cuweiwei/PersonalAiControlPlane" } }
 if ([string]::IsNullOrWhiteSpace($SourceRef)) { $SourceRef = if ($env:PAI_WORKER_REF) { $env:PAI_WORKER_REF } else { "main" } }
 if ([string]::IsNullOrWhiteSpace($WorkerExecutable)) { $WorkerExecutable = Join-Path $DataDirectory "bin\pai-worker.cmd" }
+if ([string]::IsNullOrWhiteSpace($LogDirectory)) { $LogDirectory = Join-Path $DataDirectory "logs" }
 $refresh = if ([string]::IsNullOrWhiteSpace($RefreshSource)) { $env:PAI_WORKER_REFRESH_SOURCE -ne "false" } else { $RefreshSource -eq "true" }
 $omlxEnabled = if ($env:PAI_OMLX_ENABLED) { $env:PAI_OMLX_ENABLED } else { "true" }
 $omlxApiKeyFile = if ($env:PAI_OMLX_API_KEY_FILE) { $env:PAI_OMLX_API_KEY_FILE } else { Join-Path $env:USERPROFILE ".omlx\settings.json" }
@@ -59,17 +61,19 @@ foreach ($entry in @(
   @{ Name = "Repository"; Value = $Repository },
   @{ Name = "SourceRef"; Value = $SourceRef },
   @{ Name = "NodeVersion"; Value = $NodeVersion },
+  @{ Name = "LogDirectory"; Value = $LogDirectory },
   @{ Name = "OmlxApiKeyFile"; Value = $omlxApiKeyFile }
 )) { Assert-SafeValue $entry.Name $entry.Value }
 if ($omlxEnabled -notin @("true", "false")) { Fail "PAI_OMLX_ENABLED must be true or false" }
 if ($lmstudioEnabled -notin @("true", "false")) { Fail "PAI_LMSTUDIO_ENABLED must be true or false" }
 if ($ollamaEnabled -notin @("true", "false")) { Fail "PAI_OLLAMA_ENABLED must be true or false" }
 if (!(Test-Path -LiteralPath $DataDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null }
+if (!(Test-Path -LiteralPath $LogDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null }
 
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($task) {
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 500
+  Start-Sleep -Seconds 1
 }
 
 $tempDirectory = Join-Path ([IO.Path]::GetTempPath()) ("pai-worker-install-" + [Guid]::NewGuid().ToString("N"))
@@ -125,6 +129,7 @@ try {
 
   $workerDirectory = Split-Path $WorkerExecutable -Parent
   New-Item -ItemType Directory -Force -Path $workerDirectory | Out-Null
+  $logPath = Join-Path $LogDirectory "worker.log"
   $launcher = @"
 @echo off
 setlocal
@@ -132,8 +137,12 @@ set "PAI_OMLX_ENABLED=$(CmdLiteral $omlxEnabled)"
 set "PAI_OMLX_API_KEY_FILE=$(CmdLiteral $omlxApiKeyFile)"
 set "PAI_LMSTUDIO_ENABLED=$(CmdLiteral $lmstudioEnabled)"
 set "PAI_OLLAMA_ENABLED=$(CmdLiteral $ollamaEnabled)"
+set "PAI_WORKER_LOG=$(CmdLiteral $logPath)"
+echo [%date% %time%] Worker launcher starting>>"%PAI_WORKER_LOG%"
 "$(CmdLiteral $nodeBinary)" --experimental-strip-types "$(CmdLiteral (Join-Path $sourceCache 'apps\worker\src\cli.ts'))" %*
-exit /b %ERRORLEVEL%
+set "workerExit=%ERRORLEVEL%"
+echo [%date% %time%] Worker launcher exited with code %workerExit%>>"%PAI_WORKER_LOG%"
+exit /b %workerExit%
 "@
   [IO.File]::WriteAllText($WorkerExecutable, $launcher, [Text.UTF8Encoding]::new($false))
 
@@ -145,8 +154,15 @@ exit /b %ERRORLEVEL%
   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
   Start-ScheduledTask -TaskName $taskName
-  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; source = $sourceCache; node = $nodeBinary; runLevel = "Limited" })
-  Write-Output "Worker installed and started. Approve the newest pending enrollment in Control Web -> Workers."
+  Start-Sleep -Seconds 3
+  $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+  $taskState = (Get-ScheduledTask -TaskName $taskName).State
+  if ($taskState -ne "Running") {
+    $logTail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join [Environment]::NewLine } else { "(worker log was not created)" }
+    Fail "Scheduled Task is $taskState instead of Running. LastTaskResult=$($taskInfo.LastTaskResult). Log: $logPath`n$logTail"
+  }
+  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; source = $sourceCache; node = $nodeBinary; log = $logPath; runLevel = "Limited" })
+  Write-Output "Worker installed and started. Existing approved identities do not create a new pending enrollment."
 } finally {
   if (Test-Path -LiteralPath $tempDirectory) { Remove-Item -LiteralPath $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue }
 }

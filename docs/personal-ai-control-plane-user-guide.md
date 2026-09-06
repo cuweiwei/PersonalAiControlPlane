@@ -30,7 +30,7 @@ Windows 可直接使用一鍵 PowerShell 安裝腳本。腳本會準備 source�
 irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
 ```
 
-腳本預設連線到 `https://gnest.taila77e5f.ts.net`，使用 `%LOCALAPPDATA%\.personal-ai-worker` 保存 Worker runtime data，登入後會自動啟動。安裝完成後到 Control Web → Workers → Pending enrollment 按 Approve；重跑腳本會更新 source、依賴與 Scheduled Task，但沿用既有 Worker identity。
+腳本預設連線到 `https://gnest.taila77e5f.ts.net`，使用 `%LOCALAPPDATA%\.personal-ai-worker` 保存 Worker runtime data，登入後會自動啟動。只有尚未核准的全新 identity 需要到 Control Web → Workers → Pending enrollment 按 Approve；重跑腳本會更新 source、依賴與 Scheduled Task，但沿用既有 Worker identity。啟動錯誤會寫入 `%LOCALAPPDATA%\.personal-ai-worker\logs\worker.log`。
 
 ```bash
 npm run worker:cli -- enroll --origin http://127.0.0.1:8080

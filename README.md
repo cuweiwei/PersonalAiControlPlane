@@ -41,7 +41,7 @@ Windows 可用 PowerShell 一鍵安裝；它會自動下載 Worker source、Node
 irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
 ```
 
-安裝完成後，到 Control Web → Workers 按 Approve。Windows credential 使用目前登入使用者的 DPAPI；腳本會沿用 `%LOCALAPPDATA%\.personal-ai-worker`，因此重跑安裝不會無故建立新的 Worker identity。
+安裝完成後，只有尚未核准的全新 identity 才需要到 Control Web → Workers 按 Approve；已核准的 Worker 不會重新產生 pending enrollment。Windows credential 使用目前登入使用者的 DPAPI；腳本會沿用 `%LOCALAPPDATA%\.personal-ai-worker`，錯誤與啟動紀錄寫入 `%LOCALAPPDATA%\.personal-ai-worker\logs\worker.log`。
 
 手動啟動與診斷仍可使用：
 
