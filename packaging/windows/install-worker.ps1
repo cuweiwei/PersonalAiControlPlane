@@ -139,7 +139,7 @@ set "PAI_LMSTUDIO_ENABLED=$(CmdLiteral $lmstudioEnabled)"
 set "PAI_OLLAMA_ENABLED=$(CmdLiteral $ollamaEnabled)"
 set "PAI_WORKER_LOG=$(CmdLiteral $logPath)"
 echo [%date% %time%] Worker launcher starting>>"%PAI_WORKER_LOG%"
-"$(CmdLiteral $nodeBinary)" --experimental-strip-types "$(CmdLiteral (Join-Path $sourceCache 'apps\worker\src\cli.ts'))" %*
+"$(CmdLiteral $nodeBinary)" --experimental-strip-types "$(CmdLiteral (Join-Path $sourceCache 'apps\worker\src\cli.ts'))" %* >>"%PAI_WORKER_LOG%" 2>&1
 set "workerExit=%ERRORLEVEL%"
 echo [%date% %time%] Worker launcher exited with code %workerExit%>>"%PAI_WORKER_LOG%"
 exit /b %workerExit%
