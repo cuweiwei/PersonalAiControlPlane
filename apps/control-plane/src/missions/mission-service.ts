@@ -99,6 +99,35 @@ export class MissionService {
     const row = this.db.one<Row>("SELECT * FROM mission_commands WHERE id = ?", commandId); return row ? { id: row.id, missionRunId: row.mission_run_id, kind: row.kind, logicalKey: row.logical_key, envelope: parseJson(row.envelope_json), requestHash: row.request_hash, transportState: row.transport_state, processingState: row.processing_state, result: parseJson(row.result_json, null) } : undefined;
   }
 
+  retryCommand(missionId: string, commandId: string, idempotencyKey: string, expectedControlRevision?: number, now = Date.now()): Record<string, unknown> {
+    if (!idempotencyKey) throw new Error("MISSING_IDEMPOTENCY_KEY");
+    const request = { commandId, expectedControlRevision: expectedControlRevision ?? null };
+    const requestHash = safeHash(request); const scope = `mission:command-retry:${missionId}`;
+    const prior = this.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = ? AND operation_key = ?", scope, idempotencyKey);
+    if (prior) { if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT"); return parseJson(prior.response_json) as Record<string, unknown>; }
+    let result!: Record<string, unknown>;
+    this.db.transaction(() => {
+      const row = this.db.one<Row>("SELECT c.*, r.mission_id, r.phase, r.control, r.control_revision, r.authority_epoch, m.office_id FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ? AND m.id = ? AND m.archived_at IS NULL", commandId, missionId);
+      if (!row) throw new Error("COMMAND_NOT_FOUND");
+      if (expectedControlRevision !== undefined && Number(row.control_revision) !== expectedControlRevision) throw new Error("REVISION_CONFLICT");
+      if (this.terminal(String(row.phase)) || String(row.control) !== "ACTIVE") throw new Error("STALE_EXECUTION");
+      const attempt = row.current_brain_attempt_id ? this.db.one<Row>("SELECT state FROM mission_command_attempts WHERE id = ? AND command_id = ?", row.current_brain_attempt_id, commandId) : undefined;
+      const transportRetry = String(row.processing_state) === "NOT_STARTED" && String(row.transport_state) === "ATTENTION" && !row.current_brain_attempt_id;
+      const brainRetry = String(row.processing_state) === "FAILED" && String(row.transport_state) === "ACCEPTED" && String(attempt?.state) === "FAILED" && ["plan.requested", "plan.repair", "plan.revise", "mission.finalize"].includes(String(row.kind));
+      if (!transportRetry && !brainRetry) {
+        if (String(attempt?.state) === "UNKNOWN") throw new Error("RECOVERY_RECONCILIATION_REQUIRED");
+        throw new Error("COMMAND_RETRY_NOT_AVAILABLE");
+      }
+      this.db.run("UPDATE mission_commands SET transport_state = 'PENDING', processing_state = 'NOT_STARTED', next_send_at = ?, claim_token = NULL, claim_until = NULL, current_brain_attempt_id = NULL, last_error = NULL WHERE id = ?", now, commandId);
+      this.db.run("UPDATE missions SET updated_at = ? WHERE id = ?", now, missionId);
+      this.appendEvent(String(row.office_id), missionId, String(row.mission_run_id), "mission.command.retry_requested", { commandId, kind: row.kind, previousTransportState: row.transport_state, previousProcessingState: row.processing_state, controlRevision: Number(row.control_revision) }, now);
+      result = { missionId, missionRunId: row.mission_run_id, commandId, kind: row.kind, transportState: "PENDING", processingState: "NOT_STARTED", controlRevision: Number(row.control_revision), replayed: false };
+      this.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at, retain_until) VALUES (?, ?, ?, 202, ?, ?, ?)", scope, idempotencyKey, requestHash, JSON.stringify(result), now, now + 90 * 24 * 60 * 60 * 1000);
+    });
+    this.events.publish({ type: "mission.updated", missionId, missionRunId: result.missionRunId, phase: "PLANNING", commandId });
+    return result;
+  }
+
   control(missionId: string, action: "PAUSE" | "RESUME" | "CANCEL", idempotencyKey: string, expectedControlRevision?: number, now = Date.now()): Record<string, unknown> {
     if (!idempotencyKey) throw new Error("MISSING_IDEMPOTENCY_KEY");
     const request = { action, expectedControlRevision: expectedControlRevision ?? null };

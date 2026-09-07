@@ -100,6 +100,25 @@ test("Hermes command dispatch without a configured adapter enters attention inst
   }
 });
 
+test("Owner can retry a transport-attention command idempotently", async () => {
+  const fixture = setup();
+  try {
+    const role = fixture.office.createRole({ name: "主管", responsibilities: "提交規劃。", contract: {} });
+    fixture.office.createMember("office-1", { roleId: String(role.id), roleVersion: 1, displayName: "Hermes", seatKey: "manager", binding: { kind: "HERMES_PROFILE", profile_id: "manager" }, maxConcurrency: 1 });
+    const mission = fixture.missions.create({ officeId: "office-1", title: "Retry command", goal: "恢復 Hermes command。", inputs: [], scope: { workspaceIds: [], capabilities: [], externalEffects: [] } }, "retry-command");
+    const commandId = String(mission.response.planCommandId);
+    await fixture.coordinator.dispatchOnce();
+    const first = fixture.missions.retryCommand(String(mission.response.missionId), commandId, "retry-key", 1, 1_700_000_000_100);
+    assert.equal(first.transportState, "PENDING");
+    assert.equal((await fixture.coordinator.dispatchOnce()).valueOf() >= 1, true);
+    assert.equal(fixture.db.one<{ transport_state: string }>("SELECT transport_state FROM mission_commands WHERE id = ?", commandId)?.transport_state, "ATTENTION");
+    assert.deepEqual(fixture.missions.retryCommand(String(mission.response.missionId), commandId, "retry-key", 1, 1_700_000_000_101), first);
+  } finally {
+    fixture.coordinator.close();
+    fixture.db.close();
+  }
+});
+
 test("Recovery mode fences new Hermes admissions and pauses command transport", async () => {
   const fixture = setup();
   try {

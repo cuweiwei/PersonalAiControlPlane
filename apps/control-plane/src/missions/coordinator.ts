@@ -51,6 +51,7 @@ export class MissionCoordinator {
     const attempts = this.db.connection.prepare("UPDATE mission_command_attempts SET state = 'UNKNOWN', finished_at = ?, process_evidence_json = ? WHERE state IN ('ADMITTED', 'RUNNING') AND deadline_at IS NOT NULL AND deadline_at < ?").run(now, JSON.stringify({ reason: "brain_attempt_deadline_expired", observed_at: new Date(now).toISOString() }), now);
     recovered += Number(attempts.changes);
     if (Number(attempts.changes) > 0) {
+      this.db.run("UPDATE mission_commands SET processing_state = 'FAILED', transport_state = 'ACCEPTED', last_error = 'BRAIN_ATTEMPT_DEADLINE_EXPIRED' WHERE current_brain_attempt_id IN (SELECT id FROM mission_command_attempts WHERE state = 'UNKNOWN') AND processing_state IN ('ADMITTED', 'RUNNING')");
       this.db.run("UPDATE mission_step_executions SET state = 'UNKNOWN', resource_state = 'UNKNOWN' WHERE command_id IN (SELECT command_id FROM mission_command_attempts WHERE state = 'UNKNOWN') AND state IN ('CREATED', 'QUEUED', 'RUNNING')");
       this.db.run("UPDATE office_resource_slots SET state = 'UNKNOWN', released_at = NULL WHERE brain_attempt_id IN (SELECT id FROM mission_command_attempts WHERE state = 'UNKNOWN') AND state <> 'FREE'");
     }
@@ -168,6 +169,32 @@ export class MissionCoordinator {
     });
     this.events.publish({ type: "mission.command.stopped", commandId, brainAttemptId: attemptId, state });
     return { commandId, brainAttemptId: attemptId, state, replayed };
+  }
+
+  failCommand(commandId: string, input: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
+    const attemptId = String(input.brain_attempt_id ?? ""); const code = String(record(input.error).code ?? input.error_code ?? "BRAIN_FAILED").slice(0, 200);
+    if (!attemptId || !code) throw new Error("INVALID_COMMAND_FAILURE");
+    let replayed = false;
+    this.db.transaction(() => {
+      const row = this.db.one<Row>("SELECT c.*, r.authority_epoch FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN mission_command_attempts a ON a.command_id = c.id AND a.id = ? WHERE c.id = ?", attemptId, commandId);
+      if (!row) throw new Error("STALE_EXECUTION");
+      if (String(input.authority_epoch ?? "") !== String(row.authority_epoch)) throw new Error("STALE_EXECUTION");
+      const attempt = this.db.one<Row>("SELECT * FROM mission_command_attempts WHERE id = ? AND command_id = ?", attemptId, commandId);
+      if (!attempt) throw new Error("STALE_EXECUTION");
+      if (["FAILED", "STOPPED"].includes(String(attempt.state))) { replayed = true; return; }
+      const unknown = String(input.stop_state ?? "") === "UNKNOWN";
+      const attemptState = unknown ? "UNKNOWN" : "FAILED";
+      this.db.run("UPDATE mission_command_attempts SET state = ?, finished_at = ?, process_evidence_json = ? WHERE id = ?", attemptState, now, JSON.stringify(input.evidence ?? { code }), attemptId);
+      if (unknown) {
+        this.db.run("UPDATE mission_step_executions SET state = 'UNKNOWN', resource_state = 'UNKNOWN' WHERE command_id = ? AND state IN ('CREATED', 'QUEUED', 'RUNNING')", commandId);
+        this.db.run("UPDATE office_resource_slots SET state = 'UNKNOWN', released_at = NULL WHERE brain_attempt_id = ? AND state <> 'FREE'", attemptId);
+      } else {
+        this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, attemptId);
+      }
+      this.db.run("UPDATE mission_commands SET processing_state = 'FAILED', transport_state = 'ACCEPTED', last_error = ? WHERE id = ?", code, commandId);
+    });
+    if (!replayed) this.events.publish({ type: "mission.command.failed", commandId, brainAttemptId: attemptId, code });
+    return { commandId, brainAttemptId: attemptId, state: "FAILED", errorCode: code, replayed };
   }
 
   applyCommandResult(commandId: string, input: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
