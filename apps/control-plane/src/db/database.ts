@@ -1,6 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import { officeMigrations } from "./office-migrations.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -428,6 +430,8 @@ export class ControlPlaneDatabase {
       ensureColumn("task_attempts", "occupancy", "TEXT NOT NULL DEFAULT 'RELEASED'");
       ensureColumn("task_attempts", "cancel_requested_at", "INTEGER");
       ensureColumn("task_attempts", "cancel_ack_at", "INTEGER");
+      ensureColumn("task_attempts", "stop_evidence_json", "TEXT");
+      ensureColumn("task_attempts", "effect_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
       ensureColumn("artifacts", "display_filename", "TEXT");
       ensureColumn("artifacts", "storage_state", "TEXT NOT NULL DEFAULT 'AVAILABLE'");
       ensureColumn("artifacts", "expired_at", "INTEGER");
@@ -450,6 +454,12 @@ export class ControlPlaneDatabase {
       ensureColumn("worker_models", "present", "INTEGER NOT NULL DEFAULT 1");
       ensureColumn("worker_models", "last_seen_at", "INTEGER");
       ensureColumn("systems", "entry_url", "TEXT");
+      ensureColumn("worker_workspaces", "resource_id", "TEXT");
+      ensureColumn("operation_receipts", "retain_until", "INTEGER");
+      ensureColumn("artifacts", "owner_scope_json", "TEXT");
+      ensureColumn("tasks", "owner_kind", "TEXT NOT NULL DEFAULT 'STANDALONE'");
+      ensureColumn("tasks", "mission_execution_id", "TEXT");
+      this.connection.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_mission_execution ON tasks(mission_execution_id) WHERE mission_execution_id IS NOT NULL");
       this.connection.exec(`
         CREATE TABLE IF NOT EXISTS task_runs (
           id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), run_number INTEGER NOT NULL,
@@ -499,6 +509,17 @@ export class ControlPlaneDatabase {
       for (const [version, checksum] of [[3, "task-runs-and-receipts"], [4, "artifact-callback-projection"], [5, "worker-preferences-and-workspaces"], [6, "model-tests-and-preferences"]] as const) {
         this.connection.prepare("INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)").run(version, checksum, Date.now());
       }
+      for (const [version, checksum, migration] of officeMigrations) {
+        const applied = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = ?").get(version) as { checksum?: string } | undefined;
+        if (applied && applied.checksum !== checksum) throw new Error(`MIGRATION_CHECKSUM_MISMATCH:${version}`);
+        if (!applied) {
+          this.connection.exec(migration);
+          this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)").run(version, checksum, Date.now());
+        }
+      }
+      this.connection.prepare("INSERT OR IGNORE INTO offices(id, name, layout_json, presentation_revision, created_at, updated_at) VALUES ('office-1', 'Personal AI Office', ?, 1, ?, ?)").run(JSON.stringify({ version: 1, zones: ["reception", "manager", "work", "review", "deliverables"] }), Date.now(), Date.now());
+      this.connection.prepare("INSERT INTO runtime_metadata(key, value_json) VALUES ('office_authority_epoch', ?) ON CONFLICT(key) DO NOTHING").run(JSON.stringify(randomUUID()));
+      this.connection.prepare("INSERT INTO runtime_metadata(key, value_json) VALUES ('office_recovery_mode', 'false') ON CONFLICT(key) DO NOTHING");
       this.connection.exec("COMMIT");
     } catch (error) {
       this.connection.exec("ROLLBACK");

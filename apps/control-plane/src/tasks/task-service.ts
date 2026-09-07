@@ -11,10 +11,11 @@ function parseJson(value: unknown, fallback: unknown = {}): any { try { return v
 function iso(value: unknown): string | null { return typeof value === "number" ? new Date(value).toISOString() : null; }
 function taskPublic(row: TaskRow, inputArtifactIds: string[] = []): Record<string, unknown> {
   const execution = parseJson(row.execution_json);
-  return { id: row.id, source: row.source, sourceRef: parseJson(row.source_ref_json, null), correlationId: row.correlation_id, groupId: row.group_id, parentTaskId: row.parent_task_id, title: row.title, taskType: row.task_type, purpose: row.purpose ?? "USER", instruction: row.instruction, context: parseJson(row.context_json), payload: parseJson(row.payload_json), execution, preferenceSnapshot: parseJson(row.preference_snapshot_json, null), inputArtifactIds, priority: row.priority >= 80 ? "high" : row.priority <= 20 ? "low" : "normal", status: row.status, currentAttemptId: row.current_attempt_id, currentRunId: row.current_run_id, revision: Number(row.revision ?? 1), createdSeq: row.created_seq ?? null, timeoutSeconds: row.timeout_seconds, maxAttempts: row.max_attempts, attemptCount: row.attempt_count, result: parseJson(row.result_summary_json, null), failure: row.failure_code ? { code: row.failure_code, message: row.failure_message } : null, createdAt: iso(row.created_at), assignedAt: iso(row.assigned_at), startedAt: iso(row.started_at), finishedAt: iso(row.finished_at), updatedAt: iso(row.updated_at) };
+  return { id: row.id, source: row.source, sourceRef: parseJson(row.source_ref_json, null), correlationId: row.correlation_id, groupId: row.group_id, parentTaskId: row.parent_task_id, title: row.title, taskType: row.task_type, purpose: row.purpose ?? "USER", ownerKind: row.owner_kind ?? "STANDALONE", missionExecutionId: row.mission_execution_id ?? null, instruction: row.instruction, context: parseJson(row.context_json), payload: parseJson(row.payload_json), execution, preferenceSnapshot: parseJson(row.preference_snapshot_json, null), inputArtifactIds, priority: row.priority >= 80 ? "high" : row.priority <= 20 ? "low" : "normal", status: row.status, currentAttemptId: row.current_attempt_id, currentRunId: row.current_run_id, revision: Number(row.revision ?? 1), createdSeq: row.created_seq ?? null, timeoutSeconds: row.timeout_seconds, maxAttempts: row.max_attempts, attemptCount: row.attempt_count, result: parseJson(row.result_summary_json, null), failure: row.failure_code ? { code: row.failure_code, message: row.failure_message } : null, createdAt: iso(row.created_at), assignedAt: iso(row.assigned_at), startedAt: iso(row.started_at), finishedAt: iso(row.finished_at), updatedAt: iso(row.updated_at) };
 }
 
 export type TaskServiceOptions = { callbackPath?: string; callbackEnabled?: boolean };
+export type TaskOwnership = { ownerKind: "STANDALONE" | "MISSION"; missionExecutionId?: string | null };
 export type TaskListFilters = { status?: string; workerId?: string; taskType?: string; search?: string; workspaceId?: string; purpose?: string; createdFrom?: number; createdTo?: number; finishedFrom?: number; finishedTo?: number; sort?: "created_desc" | "created_asc" | "finished_desc"; limit?: number; cursor?: string };
 
 export class TaskService {
@@ -31,28 +32,34 @@ export class TaskService {
   }
 
   create(input: CreateTaskInput, now = Date.now()): Record<string, unknown> {
+    const created = this.db.transaction(() => this.createInTx(input, now, { ownerKind: "STANDALONE" }));
+    const row = this.getRow(created.id)!;
+    this.events.publish({ type: "task.updated", taskId: created.id, status: "QUEUED" });
+    return this.publicTask(row);
+  }
+
+  /** Internal unit-of-work entry. The caller owns the surrounding transaction. */
+  createInTx(input: CreateTaskInput, now = Date.now(), ownership: TaskOwnership = { ownerKind: "STANDALONE" }): { id: string; runId: string } {
     const id = uuidv7(now); const runId = uuidv7(now + 1);
+    if (ownership.ownerKind === "MISSION" && !ownership.missionExecutionId) throw new Error("MISSION_EXECUTION_REQUIRED");
+    if (ownership.ownerKind === "STANDALONE" && ownership.missionExecutionId) throw new Error("INVALID_TASK_OWNERSHIP");
     let preferenceSnapshot: Record<string, unknown> | null = null;
     if (input.execution.preferenceId) {
       const preference = this.db.one<TaskRow>("SELECT * FROM model_preferences WHERE id = ? AND deleted_at IS NULL", input.execution.preferenceId);
       if (!preference) throw new Error("PREFERENCE_NOT_FOUND");
       preferenceSnapshot = { id: preference.id, name: preference.name, taskType: preference.task_type, version: Number(preference.version), targets: parseJson(preference.targets_json, []), allowFallback: Boolean(preference.allow_fallback) };
     }
-    this.db.transaction(() => {
-      const sequenceRow = this.db.one<{ value_json: string }>("SELECT value_json FROM runtime_metadata WHERE key = 'next_task_seq'");
-      const createdSeq = Number(sequenceRow ? JSON.parse(sequenceRow.value_json) : 1);
-      this.db.run("INSERT INTO runtime_metadata(key, value_json) VALUES ('next_task_seq', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", JSON.stringify(createdSeq + 1));
-      this.db.run(`INSERT INTO tasks (id, source, correlation_id, group_id, parent_task_id, title, task_type, instruction, context_json, payload_json, execution_json, priority, status, timeout_seconds, max_attempts, created_at, updated_at, created_seq, current_run_id, revision, purpose, source_ref_json, preference_snapshot_json, settings_version, request_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`, id, input.source, input.correlationId ?? null, input.groupId ?? null, input.parentTaskId ?? null, input.title, input.taskType, input.instruction, input.context ? JSON.stringify(input.context) : "{}", JSON.stringify(input.payload), JSON.stringify(input.execution), priorityNumber[input.priority], input.limits.timeoutSeconds, input.limits.maxAttempts, now, now, createdSeq, runId, input.purpose ?? "USER", input.sourceRef ? JSON.stringify(input.sourceRef) : null, preferenceSnapshot ? JSON.stringify(preferenceSnapshot) : null, input.settingsVersion ?? null, JSON.stringify(input));
-      this.db.run("INSERT INTO task_runs(id, task_id, run_number, trigger, status, max_attempts, attempts_used, created_at) VALUES (?, ?, 1, 'INITIAL', 'QUEUED', ?, 0, ?)", runId, id, input.limits.maxAttempts, now);
-      for (const artifactId of input.inputArtifactIds) {
-        if (!this.db.one("SELECT id FROM artifacts WHERE id = ?", artifactId)) throw new Error("ARTIFACT_NOT_FOUND");
-        this.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'INPUT')", id, artifactId);
-      }
-      this.appendEvent(id, "TASK_CREATED", null, null, { source: input.source, taskType: input.taskType, runId }, now);
-    });
-    const row = this.getRow(id)!;
-    this.events.publish({ type: "task.updated", taskId: id, status: "QUEUED" });
-    return this.publicTask(row);
+    const sequenceRow = this.db.one<{ value_json: string }>("SELECT value_json FROM runtime_metadata WHERE key = 'next_task_seq'");
+    const createdSeq = Number(sequenceRow ? JSON.parse(sequenceRow.value_json) : 1);
+    this.db.run("INSERT INTO runtime_metadata(key, value_json) VALUES ('next_task_seq', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", JSON.stringify(createdSeq + 1));
+    this.db.run(`INSERT INTO tasks (id, source, correlation_id, group_id, parent_task_id, title, task_type, instruction, context_json, payload_json, execution_json, priority, status, timeout_seconds, max_attempts, created_at, updated_at, created_seq, current_run_id, revision, purpose, source_ref_json, preference_snapshot_json, settings_version, request_snapshot_json, owner_kind, mission_execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`, id, input.source, input.correlationId ?? null, input.groupId ?? null, input.parentTaskId ?? null, input.title, input.taskType, input.instruction, input.context ? JSON.stringify(input.context) : "{}", JSON.stringify(input.payload), JSON.stringify(input.execution), priorityNumber[input.priority], input.limits.timeoutSeconds, input.limits.maxAttempts, now, now, createdSeq, runId, input.purpose ?? "USER", input.sourceRef ? JSON.stringify(input.sourceRef) : null, preferenceSnapshot ? JSON.stringify(preferenceSnapshot) : null, input.settingsVersion ?? null, JSON.stringify(input), ownership.ownerKind, ownership.missionExecutionId ?? null);
+    this.db.run("INSERT INTO task_runs(id, task_id, run_number, trigger, status, max_attempts, attempts_used, created_at) VALUES (?, ?, 1, 'INITIAL', 'QUEUED', ?, 0, ?)", runId, id, input.limits.maxAttempts, now);
+    for (const artifactId of input.inputArtifactIds) {
+      if (!this.db.one("SELECT id FROM artifacts WHERE id = ?", artifactId)) throw new Error("ARTIFACT_NOT_FOUND");
+      this.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'INPUT')", id, artifactId);
+    }
+    this.appendEvent(id, "TASK_CREATED", null, null, { source: input.source, taskType: input.taskType, runId }, now);
+    return { id, runId };
   }
 
   getRow(id: string): TaskRow | undefined { return this.db.one<TaskRow>("SELECT * FROM tasks WHERE id = ?", id); }
@@ -226,9 +233,11 @@ export class TaskService {
 
   cancelled(taskId: string, attemptId: string, workerId: string, now = Date.now()): boolean {
     return this.db.transaction(() => {
-      const attempt = this.db.one<AttemptRow>("SELECT * FROM task_attempts WHERE id = ? AND task_id = ? AND worker_id = ?", attemptId, taskId, workerId);
+      const attempt = this.db.one<AttemptRow>("SELECT a.*, t.owner_kind FROM task_attempts a JOIN tasks t ON t.id = a.task_id WHERE a.id = ? AND a.task_id = ? AND a.worker_id = ?", attemptId, taskId, workerId);
       if (!attempt || attempt.status !== "CANCELLED") return false;
-      this.db.run("UPDATE task_attempts SET occupancy = 'RELEASED', cancel_ack_at = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND occupancy = 'RELEASING'", now, now, attemptId);
+      const evidence = parseJson(attempt.stop_evidence_json, null) as Record<string, any> | null;
+      const confirmed = attempt.owner_kind !== "MISSION" || (evidence?.stop_state === "STOPPED" && evidence.children_accounted_for === true);
+      this.db.run("UPDATE task_attempts SET occupancy = CASE WHEN ? = 1 THEN 'RELEASED' ELSE 'RELEASING' END, cancel_ack_at = CASE WHEN ? = 1 THEN ? ELSE cancel_ack_at END, finished_at = CASE WHEN ? = 1 THEN COALESCE(finished_at, ?) ELSE finished_at END WHERE id = ? AND occupancy = 'RELEASING'", confirmed ? 1 : 0, confirmed ? 1 : 0, now, confirmed ? 1 : 0, now, attemptId);
       this.appendEvent(taskId, "TASK_CANCELLED", attemptId, workerId, { acknowledged: true }, now);
       this.events.publish({ type: "task.updated", taskId, status: "CANCELLED", workerId, attemptId });
       return true;

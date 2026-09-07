@@ -14,6 +14,11 @@ import { createControlPlaneServer } from "./server.ts";
 import { ModelTestService } from "./models/model-test-service.ts";
 import { ModelPreferenceService } from "./models/model-preference-service.ts";
 import { OnboardingService } from "./workers/onboarding-service.ts";
+import { OfficeService } from "./office/office-service.ts";
+import { MissionService } from "./missions/mission-service.ts";
+import { PlanService } from "./missions/plan-service.ts";
+import { MissionCommandDispatcher } from "./missions/command-dispatcher.ts";
+import { MissionCoordinator } from "./missions/coordinator.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
 function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -34,6 +39,11 @@ const callback = new HermesCallbackDispatcher(db);
 const modelTests = new ModelTestService(db, tasks);
 const modelPreferences = new ModelPreferenceService(db);
 const onboarding = new OnboardingService(db);
+const office = new OfficeService(db, events, settings);
+const missions = new MissionService(db, events, settings);
+const plans = new PlanService(db, events, missions);
+const missionCommands = new MissionCommandDispatcher(db);
+const missionCoordinator = new MissionCoordinator(db, events, tasks, missions, plans, missionCommands, coordinator);
 const health = new HealthMonitor(db, events);
 health.seed();
 
@@ -41,14 +51,15 @@ let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, callback, modelTests, modelPreferences, onboarding, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }
   coordinator.handleUpgrade(request, socket, head);
 });
 
-const schedulerTimer = setInterval(() => { try { workers.expirePauses(); scheduler.tick(); scheduler.expireTasks(); modelTests.syncAll(); schedulerAlive = true; } catch (error) { schedulerAlive = false; console.error(JSON.stringify({ event: "scheduler.error", message: error instanceof Error ? error.message : "SCHEDULER_FAILED" })); } }, numberEnv("PAI_SCHEDULER_INTERVAL_MS", 1_000, 100, 60_000));
+const schedulerTimer = setInterval(() => { try { workers.expirePauses(); missionCoordinator.tick(); scheduler.tick(); scheduler.expireTasks(); modelTests.syncAll(); schedulerAlive = true; coordinatorAlive = true; } catch (error) { schedulerAlive = false; console.error(JSON.stringify({ event: "scheduler.error", message: error instanceof Error ? error.message : "SCHEDULER_FAILED" })); } }, numberEnv("PAI_SCHEDULER_INTERVAL_MS", 1_000, 100, 60_000));
+const missionCommandTimer = setInterval(() => { void missionCoordinator.dispatchOnce().catch((error) => { coordinatorAlive = false; console.error(JSON.stringify({ event: "mission.command_dispatch_error", message: error instanceof Error ? error.message : "MISSION_COMMAND_DISPATCH_FAILED" })); }); }, 2_000);
 const staleTimer = setInterval(() => { try { scheduler.staleSweep(Date.now(), numberEnv("PAI_WORKER_OFFLINE_SECONDS", 90, 10, 86_400) * 1_000); } catch (error) { console.error(JSON.stringify({ event: "worker.stale_sweep_error", message: error instanceof Error ? error.message : "STALE_SWEEP_FAILED" })); } }, 15_000);
 const healthTimer = setInterval(() => { void health.checkOnce().catch((error) => console.error(JSON.stringify({ event: "system.health_error", message: error instanceof Error ? error.message : "HEALTH_CHECK_FAILED" }))); }, numberEnv("PAI_SYSTEM_HEALTH_INTERVAL_SECONDS", 30, 10, 86_400) * 1_000);
 const callbackTimer = setInterval(() => { void callback.dispatchOnce().catch((error) => console.error(JSON.stringify({ event: "hermes.callback_error", message: error instanceof Error ? error.message : "CALLBACK_FAILED" }))); }, 2_000);
@@ -57,6 +68,6 @@ const readinessTimer = setInterval(() => { databaseReady = db.isWritable(); arti
 server.listen(port, bindAddress, () => console.log(JSON.stringify({ event: "control-plane.started", version: "2.0.0", port, bindAddress, dataDir, artifactRoot })));
 
 let stopping = false;
-async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); coordinator.close(); await close(server); db.close(); }
+async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); missionCoordinator.close(); coordinator.close(); await close(server); db.close(); }
 function signal(): void { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); }
 process.once("SIGINT", signal); process.once("SIGTERM", signal);

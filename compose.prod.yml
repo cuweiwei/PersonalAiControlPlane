@@ -13,6 +13,8 @@ services:
       PAI_DATA_DIR: /data
       PAI_ARTIFACT_DIR: /data/artifacts
       PAI_HERMES_URL: ${PAI_HERMES_URL:-http://hermes-agent:9119}
+      PAI_HERMES_OFFICE_URL: ${PAI_HERMES_OFFICE_URL:-http://hermes-agent:9121}
+      PAI_OFFICE_TRUSTED_PEERS: ${PAI_OFFICE_TRUSTED_PEERS:-}
       PAI_HERMES_TASK_EVENT_PATH: ${PAI_HERMES_TASK_EVENT_PATH:-/api/internal/control-plane/task-events}
       PAI_CONTEXTHUB_URL: ${PAI_CONTEXTHUB_URL:-http://contexthub:8787}
       PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}

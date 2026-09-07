@@ -37,7 +37,7 @@ export type CreateTaskInput = {
   limits: { timeoutSeconds: number; maxAttempts: number };
   priority: TaskPriority;
   inputArtifactIds: string[];
-  purpose?: "USER" | "MODEL_TEST" | "WORKER_TEST";
+  purpose?: "USER" | "MISSION" | "MODEL_TEST" | "WORKER_TEST";
   settingsVersion?: number | null;
 };
 
@@ -155,3 +155,5 @@ export function parseRegistrationInput(value: unknown): { name: string; registra
 }
 
 export const priorityNumber: Record<TaskPriority, number> = { low: 20, normal: 50, high: 80 };
+
+export * from "./office/index.ts";

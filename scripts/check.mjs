@@ -11,6 +11,12 @@ const required = [
   "apps/control-plane/src/index.ts",
   "apps/control-plane/src/server.ts",
   "apps/control-plane/src/db/database.ts",
+  "apps/control-plane/src/db/office-migrations.ts",
+  "apps/control-plane/src/office/office-service.ts",
+  "apps/control-plane/src/missions/mission-service.ts",
+  "apps/control-plane/src/missions/plan-service.ts",
+  "apps/control-plane/src/missions/coordinator.ts",
+  "apps/control-plane/src/missions/command-dispatcher.ts",
   "apps/control-plane/src/tasks/task-service.ts",
   "apps/control-plane/src/tasks/task-state-machine.ts",
   "apps/control-plane/src/scheduler/scheduler.ts",
@@ -25,6 +31,7 @@ const required = [
   "apps/worker/src/transport.ts",
   "apps/worker/src/local-db.ts",
   "packages/contracts/src/index.ts",
+  "packages/contracts/src/office/index.ts",
   "packages/worker/src/index.ts",
   "packaging/macos/com.personal-ai.worker.plist",
   "packaging/macos/install-worker.sh",
@@ -35,6 +42,7 @@ const required = [
   "apps/control-web/src/styles.css",
   "apps/control-web/vite.config.ts",
   "scripts/release-artifact.mjs",
+  "scripts/production-acceptance.mjs",
   "docs/implementation-status.md",
   "schemas/api/v2/task-create.schema.json",
   "schemas/worker/v2/message.schema.json",
@@ -47,7 +55,7 @@ for (const relative of required) {
 
 const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 if (packageJson.name !== "personal-ai-control-plane") throw new Error("unexpected package name");
-for (const script of ["test", "start", "build:web", "typecheck"]) {
+for (const script of ["test", "start", "build:web", "typecheck", "acceptance:production"]) {
   if (!packageJson.scripts?.[script]) throw new Error(`required script is missing: ${script}`);
 }
 

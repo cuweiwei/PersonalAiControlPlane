@@ -90,9 +90,14 @@ export class ResourceScheduler {
     if (!this.coordinator.isConnected(String(worker.id)) || worker.status !== "ONLINE") return { code: "WORKER_OFFLINE", count: 1, message: "等待指定裝置重新連線" };
     const preferences = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", worker.id);
     const features = parse(worker.protocol_features_json, []);
-    if (Array.isArray(features) && features.length > 0) {
+    if (task.owner_kind === "MISSION" || (Array.isArray(features) && features.length > 0)) {
       const requiredFeatures = new Set(["resolved_execution_v1", "task_run_v1"]);
       if (task.task_type === "codex") requiredFeatures.add("workspace_inventory_v1");
+      if (task.owner_kind === "MISSION") {
+        requiredFeatures.add("mission_execution_v1");
+        requiredFeatures.add("stop_evidence_v1");
+        requiredFeatures.add("workspace_exclusion_v1");
+      }
       if (preferences && (preferences.mode === "IDLE_ONLY" || preferences.pause_id || Number(preferences.pause_indefinite ?? 0) === 1)) { requiredFeatures.add("availability_v1"); requiredFeatures.add("settings_apply_v1"); }
       if ([...requiredFeatures].some((feature) => !features.includes(feature))) return { code: "WORKER_UPDATE_REQUIRED", count: 1, message: "Worker 需要更新才能執行此工作" };
     }
@@ -106,6 +111,15 @@ export class ResourceScheduler {
       if (!availability || availability.supported !== true || !fresh || now - observedAt > 15_000 || (availability.can_accept !== true && availability.canAccept !== true) || !Number.isFinite(idleSeconds) || idleSeconds < idleThreshold) return { code: "IDLE_REQUIRED", count: 1, message: "等待個人電腦閒置" };
     }
     if (this.activeCount(worker.id) >= Math.max(1, Number(worker.max_concurrency ?? 1))) return { code: "CAPACITY_BUSY", count: 1, message: "等待其他工作完成" };
+    const workspaceId = requirement.workspaceId ?? null;
+    if (task.owner_kind === "MISSION" && workspaceId) {
+      const activeMissionTasks = this.db.all<Row>("SELECT t.execution_json FROM tasks t WHERE t.owner_kind = 'MISSION' AND t.id <> ? AND t.status IN ('ASSIGNED', 'RUNNING')", task.id);
+      const occupied = activeMissionTasks.some((item) => {
+        const execution = parse(item.execution_json, {}); const current = execution.workspaceId ?? execution.workspace_id;
+        return current === workspaceId && execution.workspaceAccess !== "NONE";
+      });
+      if (occupied) return { code: "WORKSPACE_CONFLICT", count: 1, message: "等待同一專案的其他 mission execution 完成" };
+    }
     const requiredMemory = Number(requirement.resources?.minRamMb ?? 0);
     if (requiredMemory > 0) {
       const memory = parse(worker.memory_json, {});

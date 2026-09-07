@@ -2,7 +2,7 @@
 
 日期：2026-09-07
 
-狀態：待實作的設計規格；本文件不代表功能、schema、endpoint 或跨服務整合已存在。
+狀態：實作基準；截至 2026-09-07，Contracts/DB/Office/Mission intake、Plan validation/activation、Coordinator 派工、Hermes adapter、Worker mission features、UI 與 fail-closed recovery/acceptance probe 均有 `implemented_local` 證據。本文件不把本機實作誤代表完整 production/provider acceptance。
 
 上位設計：[虛擬辦公室 HLD](virtual-office-hld.md)。
 
@@ -12,7 +12,7 @@
 
 本次原始碼基準為 PersonalAiControlPlane `22996c0`、AiSecretaryChloe `7e8fdc0`。現有 migration 編號已到 6；Task Service 自行開 transaction；EventHub 為記憶體通知；Hermes callback receiver 目前寫入 JSONL。以上為本機程式觀察，不是正式環境證據。
 
-文件完成後提交 HLD、本文及 README 索引；實作、資料 migration、Hermes 修改與 NAS 部署不在本次交付範圍。
+文件原始交付只包含 HLD、本文及 README 索引；本次已依工作包 1–5 加入 additive schema migration、Coordinator、Hermes adapter、Worker protocol 與 Office UI，並加入 recovery/acceptance probe。NAS 部署、真實 provider turn、實體 Worker 與跨服務 production acceptance 仍須取得對應授權與證據。
 
 ### 1.1 通用格式
 
@@ -457,7 +457,7 @@ Hermes 目前 repository 是固定 upstream image digest 加 adapters，沒有�
 
 在 Hermes image 增加一個 s6 管理的 `office-adapter` longrun（不是每角色一個程序）；HTTP receiver、SQLite inbox、consumer 在此服務內，工作階段以有界 child process 執行。與現有 `hermes_evidence` receiver 分開 command schema，保留原 task callback endpoint。
 
-預設 adapter 監聽 container 私有 `0.0.0.0:9120`，CP 使用固定 `PAI_HERMES_OFFICE_URL=http://hermes-agent:9120`；不新增 NAS host port 或 Tailscale browser 入口。此 port 為新配置，需 release preflight 確認無衝突；保留既有 9119 legacy callback origin。沿用容器非 root Hermes 使用者與已核准 data mount，無需新增任意 host mount。
+Adapter 使用 container 私有 port，CP 使用固定 `PAI_HERMES_OFFICE_URL`；不新增 NAS host port 或 Tailscale browser 入口。現有 pinned upstream dashboard 已占用 `9120`，因此本 implementation profile 使用 `9121`，保留既有 9119 legacy callback origin；若未來 upstream dashboard port 改為非衝突值，可在 release preflight 以同一環境變數切換。沿用容器非 root Hermes 使用者與已核准 data mount，無需新增任意 host mount。
 
 新增自有 Python `BrainDriver` 邊界，以下方法是**需實作的 adapter 介面，不宣稱 upstream 已提供同名 API**：
 
@@ -775,7 +775,7 @@ Metrics 不以 Mission ID 作無上限 label；ID 放 logs/event lookup。告警
 
 ### 16.1 必要測試集合
 
-以下為未來實作時需建立的行為驗收；本次不新增 runtime 測試或宣稱它們已通過。
+以下為完整 Virtual Office 仍需建立的行為驗收；目前已新增 Mission/Plan contract、去重、transaction、Coordinator→Worker execution、Hermes no-config fail-closed 與 HTTP projection 測試，不能宣稱下列完整 production/provider 案例已通過。
 
 | HLD ID | 測試／注入點 | 必須斷言 |
 | --- | --- | --- |
@@ -842,4 +842,4 @@ Metrics 不以 Mission ID 作無上限 label；ID 放 logs/event lookup。告警
 - [SQLite transactions](https://www.sqlite.org/lang_transaction.html)：BEGIN 不可巢狀；設計以共享交易 context 維持原子性。
 - [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)：Windows 程序群組管理與子程序生命週期；實作需限制 breakaway，測試停止證據。
 
-本文只提交設計文件。`implemented_local`、`ci_verified`、`live_verified`、`provider_verified` 的功能狀態，應在後續實作與取得對應證據後才更新。
+本文是設計與實作追蹤基準；目前本機切片的狀態記錄於 `docs/implementation-status.md`。`ci_verified`、`live_verified`、`provider_verified` 仍須在取得對應證據後才更新。

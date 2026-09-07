@@ -1,6 +1,6 @@
 # v2 實作狀態與證據
 
-更新：2026-09-02
+更新：2026-09-07
 
 ## 本機 repository evidence
 
@@ -18,15 +18,20 @@
 | Hermes callback outbox | `live_verified` | claim、at-least-once POST、bounded retry；live Hermes callback receiver 回 `202 accepted` |
 | Systems health | `live_verified` | NAS shared network 上 Hermes/ContextHub 均回 `HEALTHY HTTP_200` |
 | Control Web | `implemented_local` | React/Vite Dashboard、Tasks、Workers、Models、Systems、Settings |
+| Virtual Office domain | `implemented_local` | Office/Mission schema migrations 7–10、strict Mission/Plan contracts、role/member configuration、idempotent intake、transactional Plan validation/activation、Mission Coordinator DAG execution、pause/cancel、resource/limit gates、Office/Mission HTTP projection；`test/virtual-office*.test.ts` |
+| Hermes wake-up and recovery contract | `implemented_local` | Durable command dispatcher、transport lease recovery、authority epoch/fencing、CP admission/progress/stop/result/delivery receipts；Hermes-side `services/hermes_office_adapter/` durable inbox、bounded fixed HTTP BrainDriver、idempotent command receive；provider turn execution remains unverified |
+| Worker mission execution | `implemented_local` | Mission task ownership、protocol negotiation、mission context、workspace `WRITE_EXCLUSIVE` exclusion、conservative stop evidence and cross-restart result durability |
+| Virtual Office UI | `implemented_local` | `/office`、`/office/members`、`/missions`、`/missions/new`、`/missions/:id` routes with intake, plan/run projection, controls, timeline and results |
+| Cross-service recovery and acceptance probe | `implemented_local` | Recovery mode/authority epoch API and fail-closed `scripts/production-acceptance.mjs`; live restart, real Worker, Hermes provider and backup/restore evidence remain required |
 | CI/release compose | `implemented_local` | immutable image workflow、digest-pinned compose、`/healthz`/`/readyz` |
-| Local checks | `ci_verified` | `npm run check`、strict `npm run typecheck`、17 tests、`npm run build:web` 全部通過；main CI `33618947655` 成功 |
+| Local checks | `implemented_local` | 本次執行 `npm run check`、strict `npm run typecheck`、38 Node tests、`npm run build:web` 與 AiSecretaryChloe CI dependency 下的 24 Python tests |
 | NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |
 
 ## 明確未宣告的事項
 
-本文件不把 UI 顯示、health、executor flag 或 unit/integration tests 誤當成 production、provider、memory authority、backup/restore 或實體 worker acceptance。ContextHub 仍是記憶 authority；Control Plane 沒有 memory projection 或 conversation archive。
+本文件不把 UI 顯示、health、executor flag 或 unit/integration tests 誤當成 production、provider、memory authority、backup/restore 或實體 worker acceptance。ContextHub 仍是記憶 authority；Control Plane 沒有 memory projection 或 conversation archive。Virtual Office 的本機實作已涵蓋 durable wake-up contract、Coordinator、Worker mission path、UI 與 recovery gates；尚不代表真實 Hermes provider turn、實體 Worker 執行、跨服務重啟、備份還原或 Mission 可跨日完成。
 
 ## 驗證命令
 
@@ -35,5 +40,6 @@ npm run check
 npm run typecheck
 npm test
 npm run build:web
+npm run acceptance:production
 npm run release:artifact -- --commit <40-char-sha> --repository <owner/repo> --image <commit-bound-image> --digest sha256:<64-hex>
 ```

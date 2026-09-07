@@ -1,13 +1,13 @@
 import type { IncomingMessage, Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { EventHub } from "../events/event-hub.ts";
-import { TaskService } from "../tasks/task-service.ts";
+import { TaskService, safeHash } from "../tasks/task-service.ts";
 import { ArtifactStorage } from "../artifacts/artifact-storage.ts";
 import { WorkerService } from "./worker-service.ts";
 import { SettingsService } from "../settings/settings-service.ts";
 
 type JsonRecord = Record<string, any>;
-type SocketRecord = { socket: WebSocket; workerId: string; hello: boolean };
+type SocketRecord = { socket: WebSocket; workerId: string; hello: boolean; features: Set<string> };
 
 function record(value: unknown): JsonRecord { return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {}; }
 function messagePayload(value: unknown): JsonRecord { const parsed = typeof value === "string" ? JSON.parse(value) : value; return record(parsed); }
@@ -42,11 +42,13 @@ export class WorkerCoordinator {
 
   offer(workerId: string, task: Record<string, any>, attemptId: string): boolean {
     const connection = this.connections.get(workerId); if (!connection || !connection.hello || connection.socket.readyState !== 1) return false;
+    if (task.ownerKind === "MISSION" && ["mission_execution_v1", "stop_evidence_v1", "workspace_exclusion_v1"].some((feature) => !connection.features.has(feature))) return false;
     const execution = (task as JsonRecord).resolvedExecution ?? task.execution;
     const currentAttempt = this.tasks.db.one<JsonRecord>("SELECT run_id, attempt_number, attempt_in_run, deadline_at FROM task_attempts WHERE id = ?", attemptId);
     const runNumber = currentAttempt?.run_id ? this.tasks.db.one<JsonRecord>("SELECT run_number FROM task_runs WHERE id = ?", currentAttempt.run_id)?.run_number ?? null : null;
     const remaining = currentAttempt?.deadline_at ? Math.max(0, Math.ceil((Number(currentAttempt.deadline_at) - Date.now()) / 1000)) : Number(task.timeoutSeconds ?? 1800);
-    connection.socket.send(JSON.stringify({ type: "task.offer", task_id: task.id, run_id: task.currentRunId ?? currentAttempt?.run_id ?? null, run_number: runNumber, attempt_id: attemptId, attempt_number: currentAttempt?.attempt_number ?? null, attempt_in_run: currentAttempt?.attempt_in_run ?? null, task_type: task.taskType, purpose: task.purpose ?? "USER", title: task.title, instruction: task.instruction, context: task.context, payload: task.payload, execution: { ...(execution ?? {}), worker_id: workerId, workspace_id: execution?.workspaceId ?? execution?.workspace_id ?? null, model: execution?.model ?? null }, limits: { timeout_seconds: task.timeoutSeconds, remaining_seconds: remaining }, input_artifact_ids: task.inputArtifactIds ?? [] }));
+    const missionContext = task.ownerKind === "MISSION" && task.missionExecutionId ? this.tasks.db.one<JsonRecord>("SELECT e.generation, e.retry_safety, e.operation_key, s.id AS step_id, p.revision AS plan_revision, r.id AS mission_run_id, r.mission_id, r.authority_epoch, m.scope_json FROM mission_step_executions e JOIN mission_steps s ON s.id = e.step_id JOIN mission_plans p ON p.id = s.plan_id JOIN mission_runs r ON r.id = p.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE e.id = ?", task.missionExecutionId) : undefined;
+    connection.socket.send(JSON.stringify({ type: "task.offer", task_id: task.id, run_id: task.currentRunId ?? currentAttempt?.run_id ?? null, run_number: runNumber, attempt_id: attemptId, attempt_number: currentAttempt?.attempt_number ?? null, attempt_in_run: currentAttempt?.attempt_in_run ?? null, task_type: task.taskType, purpose: task.purpose ?? "USER", title: task.title, instruction: task.instruction, context: task.context, payload: task.payload, execution: { ...(execution ?? {}), worker_id: workerId, workspace_id: execution?.workspaceId ?? execution?.workspace_id ?? null, model: execution?.model ?? null }, limits: { timeout_seconds: task.timeoutSeconds, remaining_seconds: remaining }, input_artifact_ids: task.inputArtifactIds ?? [], ...(missionContext ? { mission_context: { authority_epoch: missionContext.authority_epoch, mission_id: missionContext.mission_id, mission_run_id: missionContext.mission_run_id, plan_revision: Number(missionContext.plan_revision), step_id: missionContext.step_id, execution_generation: Number(missionContext.generation), operation_key: missionContext.operation_key, retry_safety: missionContext.retry_safety, scope_hash: missionContext.scope_json ? safeHash(JSON.parse(String(missionContext.scope_json))) : null, workspace_access: task.taskType === "codex" ? "WRITE_EXCLUSIVE" : "NONE" } } : {}) }));
     return true;
   }
 
@@ -56,7 +58,7 @@ export class WorkerCoordinator {
 
   private acceptSocket(socket: WebSocket, _request: IncomingMessage, workerId: string): void {
     const previous = this.connections.get(workerId); previous?.socket.close(4000, "replaced");
-    const connection: SocketRecord = { socket, workerId, hello: false }; this.connections.set(workerId, connection); this.workers.markConnected(workerId);
+    const connection: SocketRecord = { socket, workerId, hello: false, features: new Set() }; this.connections.set(workerId, connection); this.workers.markConnected(workerId);
     const timeout = setTimeout(() => { if (!connection.hello) socket.close(4002, "hello required"); }, 10_000); timeout.unref();
     socket.on("message", (raw) => { void this.handleMessage(connection, raw.toString()); });
     socket.on("close", () => { clearTimeout(timeout); if (this.connections.get(workerId) === connection) { this.connections.delete(workerId); this.workers.markDisconnected(workerId); } });
@@ -68,7 +70,7 @@ export class WorkerCoordinator {
     const type = String(message.type ?? ""); const workerId = connection.workerId; const taskId = String(message.task_id ?? ""); const attemptId = String(message.attempt_id ?? "");
     if (!connection.hello) {
       if (type !== "hello" || String(message.worker_id ?? "") !== workerId || Number(message.protocol_version) !== 2) { connection.socket.close(4004, "protocol version unsupported"); return; }
-      connection.hello = true; const clientFeatures = Array.isArray(message.features) ? message.features.filter((feature): feature is string => typeof feature === "string") : []; this.workers.setProtocolFeatures(workerId, clientFeatures); const effective = this.settings?.getEffective(); const preferences = this.workers.preferences(workerId); const serverFeatures = ["resolved_execution_v1", "task_run_v1", "workspace_inventory_v1", "settings_apply_v1", "availability_v1", "result_manifest_v1", "artifact_ack_v1"]; connection.socket.send(JSON.stringify({ type: "hello.ack", server_version: "2.0.0", heartbeat_interval_seconds: Number(effective?.values.heartbeat_interval_seconds ?? 30), features: serverFeatures.filter((feature) => clientFeatures.includes(feature)) })); if (effective) connection.socket.send(JSON.stringify({ type: "config.apply", settings_version: effective.version, preferences_version: preferences.version, config: { ...effective.values, mode: preferences.mode, idle_threshold_seconds: preferences.idleThresholdSeconds ?? effective.values.idle_threshold_seconds, pause_id: preferences.pause && (preferences.pause as JsonRecord).id ? (preferences.pause as JsonRecord).id : null, pause_until: preferences.pause && (preferences.pause as JsonRecord).until ? (preferences.pause as JsonRecord).until : null, pause_indefinite: Boolean((preferences.pause as JsonRecord | null)?.indefinite) } })); this.flushAssigned(workerId); this.events.publish({ type: "worker.updated", workerId, status: "ONLINE" }); return;
+      connection.hello = true; const clientFeatures = Array.isArray(message.features) ? message.features.filter((feature): feature is string => typeof feature === "string") : []; this.workers.setProtocolFeatures(workerId, clientFeatures); const effective = this.settings?.getEffective(); const preferences = this.workers.preferences(workerId); const serverFeatures = ["resolved_execution_v1", "task_run_v1", "workspace_inventory_v1", "settings_apply_v1", "availability_v1", "result_manifest_v1", "artifact_ack_v1", "mission_execution_v1", "stop_evidence_v1", "workspace_exclusion_v1"]; const negotiated = serverFeatures.filter((feature) => clientFeatures.includes(feature)); connection.features = new Set(negotiated); connection.socket.send(JSON.stringify({ type: "hello.ack", server_version: "2.0.0", heartbeat_interval_seconds: Number(effective?.values.heartbeat_interval_seconds ?? 30), features: negotiated })); if (effective) connection.socket.send(JSON.stringify({ type: "config.apply", settings_version: effective.version, preferences_version: preferences.version, config: { ...effective.values, mode: preferences.mode, idle_threshold_seconds: preferences.idleThresholdSeconds ?? effective.values.idle_threshold_seconds, pause_id: preferences.pause && (preferences.pause as JsonRecord).id ? (preferences.pause as JsonRecord).id : null, pause_until: preferences.pause && (preferences.pause as JsonRecord).until ? (preferences.pause as JsonRecord).until : null, pause_indefinite: Boolean((preferences.pause as JsonRecord | null)?.indefinite) } })); this.flushAssigned(workerId); this.events.publish({ type: "worker.updated", workerId, status: "ONLINE" }); return;
     }
     try {
       if (type === "heartbeat") this.workers.heartbeat(workerId, message, Date.now());
@@ -85,6 +87,7 @@ export class WorkerCoordinator {
       else if (type === "task.artifact") this.storeArtifact(workerId, taskId, attemptId, record(message.artifact), connection.socket);
       else if (type === "task.result") { this.tasks.result(taskId, attemptId, workerId, record(message.result), record(message.metrics), Date.now(), record(message.result_manifest ?? message.resultManifest)); connection.socket.send(JSON.stringify({ type: "task.result.ack", task_id: taskId, attempt_id: attemptId })); }
       else if (type === "task.failed") this.tasks.fail(taskId, attemptId, workerId, String(message.code ?? "WORKER_EXECUTION_FAILED"), String(message.message ?? "Worker execution failed."), Date.now(), message.retryable === true);
+      else if (type === "task.stop.receipt") this.recordStopReceipt(taskId, attemptId, workerId, message);
       else if (type === "task.cancelled") this.tasks.cancelled(taskId, attemptId, workerId);
     } catch (error) { connection.socket.send(JSON.stringify({ type: "error", code: error instanceof Error ? error.message : "INTERNAL_ERROR" })); }
   }
@@ -115,5 +118,14 @@ export class WorkerCoordinator {
     this.tasks.db.run("INSERT INTO artifacts(id, task_id, attempt_id, filename, media_type, size_bytes, sha256, storage_path, created_at, display_filename, artifact_key, preview_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", stored.id, taskId, attemptId, stored.filename, stored.mediaType, stored.sizeBytes, stored.sha256, stored.storagePath, Date.now(), displayFilename, artifactKey, previewKind);
     this.tasks.db.run("INSERT INTO task_artifacts(task_id, artifact_id, direction) VALUES (?, ?, 'OUTPUT')", taskId, stored.id);
     socket.send(JSON.stringify({ type: "task.artifact.ack", task_id: taskId, attempt_id: attemptId, artifact_id: stored.id, artifact_key: artifactKey, sha256: stored.sha256 }));
+  }
+
+  private recordStopReceipt(taskId: string, attemptId: string, workerId: string, message: JsonRecord): void {
+    const attempt = this.tasks.db.one<JsonRecord>("SELECT * FROM task_attempts WHERE id = ? AND task_id = ? AND worker_id = ?", attemptId, taskId, workerId);
+    if (!attempt || attempt.status !== "CANCELLED") throw new Error("STALE_EXECUTION");
+    const evidence = record(message.evidence); const stopped = message.stop_state === "STOPPED" && evidence.children_accounted_for === true;
+    const effectState = ["NONE", "CONFIRMED", "UNKNOWN"].includes(String(message.effect_state)) ? String(message.effect_state) : "UNKNOWN";
+    this.tasks.db.run("UPDATE task_attempts SET stop_evidence_json = ?, effect_state = ?, occupancy = CASE WHEN ? = 1 THEN 'RELEASED' ELSE 'RELEASING' END, cancel_ack_at = CASE WHEN ? = 1 THEN ? ELSE cancel_ack_at END WHERE id = ?", JSON.stringify({ ...evidence, stop_state: message.stop_state }), effectState, stopped ? 1 : 0, stopped ? 1 : 0, Date.now(), attemptId);
+    this.events.publish({ type: "task.stop.receipt", taskId, attemptId, workerId, stopState: message.stop_state, effectState, confirmed: stopped });
   }
 }

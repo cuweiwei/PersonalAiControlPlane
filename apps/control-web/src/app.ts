@@ -4,6 +4,8 @@ type Item = Record<string, any>;
 const h = React.createElement;
 const nav = [
   ["/", "工作總覽"],
+  ["/office", "Virtual Office"],
+  ["/missions", "Missions"],
   ["/tasks", "任務"],
   ["/workers", "執行裝置"],
   ["/models", "模型"],
@@ -267,6 +269,58 @@ function Settings({ refreshVersion }: { refreshVersion: number }) {
   return h(React.Fragment, null, h("p", { className: "eyebrow" }, "執行環境設定"), h("h1", null, "設定"), h("p", null, "只送出有變更的欄位；環境變數鎖定的欄位不能在此修改。"), dirty ? h("p", { className: "notice", role: "status" }, "目前有未保存草稿；背景同步已暫停。") : null, h("form", { className: "editor", onSubmit: save }, fields.map((field) => { const value = draft[field.key]; const locked = field.editable === false; return h("label", { key: field.key }, `${field.label}${field.unit ? `（${field.unit}）` : ""}`, h("small", null, `${field.description} · 來源：${field.source} · 套用：${field.applyScope}`), h("input", { type: field.type === "boolean" ? "checkbox" : field.type === "integer" ? "number" : "text", disabled: locked, checked: field.type === "boolean" ? Boolean(value) : undefined, value: field.type !== "boolean" ? value ?? "" : undefined, min: field.min ?? undefined, max: field.max ?? undefined, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { setDirty(true); setDraft({ ...draft, [field.key]: field.type === "boolean" ? event.target.checked : field.type === "integer" ? Number(event.target.value) : event.target.value }); } })); }), h("button", { type: "submit" }, "保存設定"), message ? h("p", { className: "notice", role: "status" }, message) : null));
 }
 
+function OfficePage({ refreshVersion }: { refreshVersion: number }) {
+  const [data, setData] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null);
+  const load = () => Promise.all([request("/api/v2/offices"), request("/api/v2/office/recovery")]).then(async ([offices, recovery]) => { const office = offices.items?.[0]; if (!office) throw new Error("尚未建立 Office"); const detail = await request(`/api/v2/offices/${encodeURIComponent(office.id)}`); const missions = await request(`/api/v2/missions?office_id=${encodeURIComponent(office.id)}&limit=12`); setData({ office: detail, missions: missions.items ?? [], recovery }); setError(null); }).catch(setError);
+  useEffect(() => { void load(); }, [refreshVersion]);
+  if (!data) return error ? h(React.Fragment, null, h(ErrorPanel, { error }), h("button", { type: "button", onClick: () => void load() }, "重新載入")) : h(Loading);
+  const office = data.office as Item; const health = office.workflowHealth ?? {}; const metrics = office.metrics ?? {};
+  return h(React.Fragment, null,
+    h("section", { className: "office-hero" }, h("div", null, h("p", { className: "eyebrow" }, "VIRTUAL OFFICE / COMMAND FLOOR"), h("h1", null, office.name), h("p", null, "Hermes 負責思考與規劃，Control Plane 維持 mission 狀態，Worker 執行可驗證的步驟。")), h("div", { className: "office-health" }, h(Status, { value: health.state }), h("small", null, health.hermesAdapterConfigured ? "Hermes adapter 已設定" : "等待 Hermes adapter"), data.recovery.recoveryMode ? h("strong", null, "Recovery mode") : null)),
+    h("section", { className: "metric-grid" }, h(Card, { title: "Active missions", value: metrics.activeMissions ?? 0 }), h(Card, { title: "Waiting", value: metrics.waitingMissions ?? 0 }), h(Card, { title: "Office members", value: metrics.memberCount ?? office.members?.length ?? 0 }), h(Card, { title: "Authority epoch", value: display(data.recovery.authorityEpoch).slice(0, 12), detail: data.recovery.unknownExecutions ? `${data.recovery.unknownExecutions} 個 execution 待對帳` : "目前沒有 UNKNOWN execution" })),
+    data.recovery.recoveryMode ? h("p", { className: "notice error" }, "Recovery mode：新派工與新 Hermes admission 已停止；請先完成外部 effect 對帳，再由 owner 清除。") : null,
+    h("section", { className: "office-floor" }, (office.members ?? []).map((member: Item) => h("article", { className: "office-seat", key: member.id }, h("span", { className: "seat-light" }), h("p", { className: "eyebrow" }, member.seatKey), h("h2", null, member.displayName), h("p", null, member.role?.name ?? "—"), h("small", null, `concurrency ${member.maxConcurrency} · ${display(member.binding?.runtime ?? member.binding?.worker_id ?? "未綁定")}`), h("a", { href: "/office/members" }, "查看設定 →")))),
+    h("section", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "MISSION QUEUE"), h("h2", null, "最近交辦")), h("a", { className: "button-link", href: "/missions/new" }, "建立 Mission")),
+    h("div", { className: "card-grid" }, data.missions.length ? data.missions.map((mission: Item) => h("article", { className: "card", key: mission.id }, h("div", { className: "card-title-row" }, h("h3", null, h("a", { href: `/missions/${mission.id}` }, mission.title)), h(Status, { value: mission.run?.phase ?? "UNKNOWN" })), h("p", null, mission.goal), h("small", null, `${display(mission.run?.waitSummary?.reason ?? "—")} · ${time(mission.updatedAt)}`))) : h("p", { className: "notice" }, "尚未建立 Mission。"))
+  );
+}
+
+function OfficeMembers({ refreshVersion }: { refreshVersion: number }) {
+  const [office, setOffice] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null);
+  useEffect(() => { request("/api/v2/offices").then((value) => value.items?.[0] ? request(`/api/v2/offices/${encodeURIComponent(value.items[0].id)}`) : null).then(setOffice).catch(setError); }, [refreshVersion]);
+  if (!office) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const cards = (office.members ?? []).map((member: Item) => {
+    const summary = { memberId: member.id, role: member.role?.id, roleVersion: member.role?.version, worker: member.binding?.worker_id ?? member.binding?.workerId, runtime: member.binding?.runtime, model: member.binding?.model_id ?? member.binding?.modelId, workspace: member.binding?.workspace_id ?? member.binding?.workspaceId, capabilities: member.binding?.capabilities, maxConcurrency: member.maxConcurrency };
+    return h("article", { className: "card", key: member.id }, h("div", { className: "card-title-row" }, h("h2", null, member.displayName), h(Status, { value: member.binding?.worker_id ? "READY" : "UNKNOWN" })), h("p", null, `${member.role?.name ?? "—"} · seat ${member.seatKey}`), h(Details, { item: summary }));
+  });
+  return h(React.Fragment, null, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "OFFICE MEMBERS"), h("h1", null, "成員與綁定")), h("a", { className: "button-link secondary", href: "/office" }, "回到 Office")), h("p", { className: "notice" }, "角色與 binding 是 mission admission 的來源；變更前請確認 Worker capability、model 與 workspace scope。"), h("div", { className: "card-grid" }, cards));
+}
+
+function MissionList({ refreshVersion }: { refreshVersion: number }) {
+  const [items, setItems] = useState<Item[] | null>(null); const [error, setError] = useState<unknown>(null); const [phase, setPhase] = useState("");
+  useEffect(() => { const query = phase ? `?phase=${encodeURIComponent(phase)}` : ""; request(`/api/v2/missions${query}`).then((value) => setItems(value.items ?? [])).catch(setError); }, [refreshVersion, phase]);
+  if (!items) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const rows = items.map((item) => h("tr", { key: item.id }, h("td", null, h("a", { href: `/missions/${item.id}` }, item.title), h("small", null, item.id), h("p", null, item.goal)), h("td", null, h(Status, { value: item.run?.phase ?? "UNKNOWN" })), h("td", null, item.run?.control ?? "—"), h("td", null, item.run?.activePlanRevision ?? "—"), h("td", null, item.run?.waitSummary?.reason ?? "—"), h("td", null, time(item.updatedAt))));
+  const table = h("div", { className: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, ["Mission", "階段", "控制", "Plan", "等待原因", "更新時間"].map((header) => h("th", { key: header }, header)))), h("tbody", null, rows)));
+  const phases = ["PLANNING", "EXECUTING", "REVIEWING", "COMPLETED", "FAILED", "CANCELLED"].map((value) => h("option", { key: value, value }, value));
+  return h(React.Fragment, null, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "MISSION CONTROL"), h("h1", null, "Missions")), h("div", { className: "actions" }, h("select", { value: phase, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setPhase(event.target.value) }, h("option", { value: "" }, "全部階段"), phases), h("a", { className: "button-link", href: "/missions/new" }, "建立 Mission"))), items.length === 0 ? h("p", { className: "notice" }, "目前沒有符合條件的 Mission。") : table);
+}
+
+function MissionIntake() {
+  const [title, setTitle] = useState(""); const [goal, setGoal] = useState(""); const [input, setInput] = useState(""); const [scope, setScope] = useState(""); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState(false); const [key] = useState(() => `ui-mission-${Date.now()}`);
+  const create = async (event: React.FormEvent) => { event.preventDefault(); setBusy(true); try { const result = await request("/api/v2/missions", { method: "POST", headers: { "idempotency-key": key }, body: JSON.stringify({ office_id: "office-1", title, goal, inputs: input.trim() ? [{ kind: "TEXT", text: input }] : [], scope: { workspace_ids: scope.split(",").map((value) => value.trim()).filter(Boolean), capabilities: [], external_effects: [] }, delivery: { mode: "OFFICE_ONLY" } }) }); window.history.pushState({}, "", `/missions/${result.missionId}`); window.dispatchEvent(new PopStateEvent("popstate")); } catch (reason) { setError(reason); } finally { setBusy(false); } };
+  return h(React.Fragment, null, h("p", { className: "eyebrow" }, "MISSION INTAKE"), h("h1", null, "建立 Mission"), h("p", null, "先交辦目標與 scope；Hermes 會提出 versioned plan，Control Plane 只在合法 DAG 與 admission gate 後派工。"), error ? h(ErrorPanel, { error }) : null, h("form", { className: "editor mission-editor", onSubmit: create }, h("label", null, "標題", h("input", { required: true, maxLength: 200, value: title, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setTitle(event.target.value) })), h("label", null, "目標", h("textarea", { required: true, rows: 5, value: goal, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setGoal(event.target.value) })), h("label", null, "輸入資料（可選）", h("textarea", { rows: 4, value: input, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setInput(event.target.value) })), h("label", null, "允許的 workspace ID（逗號分隔）", h("input", { value: scope, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setScope(event.target.value), placeholder: "workspace-1" })), h("button", { type: "submit", disabled: busy || !title.trim() || !goal.trim() }, busy ? "建立中…" : "送出 Mission")));
+}
+
+function MissionDetail({ id, refreshVersion }: { id: string; refreshVersion: number }) {
+  const [item, setItem] = useState<Item | null>(null); const [results, setResults] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState(false);
+  const load = () => Promise.all([request(`/api/v2/missions/${encodeURIComponent(id)}`), request(`/api/v2/missions/${encodeURIComponent(id)}/results`)]).then(([mission, output]) => { setItem(mission); setResults(output); }).catch(setError);
+  useEffect(() => { void load(); }, [id, refreshVersion]);
+  if (!item) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const run = item.run ?? {}; const control = async (action: string) => { setBusy(true); try { await request(`/api/v2/missions/${encodeURIComponent(id)}/control`, { method: "POST", headers: { "idempotency-key": `ui-mission-${id}-${action}-${run.controlRevision ?? 0}` }, body: JSON.stringify({ action, expected_control_revision: run.controlRevision }) }); await load(); } catch (reason) { setError(reason); } finally { setBusy(false); } };
+  return h(React.Fragment, null, h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "MISSION DETAIL"), h("h1", null, item.title), h("p", null, item.goal)), h(Status, { value: run.phase ?? "UNKNOWN" })), h("div", { className: "actions" }, run.control !== "CANCEL_REQUESTED" && !["COMPLETED", "FAILED", "CANCELLED"].includes(run.phase) ? h("button", { type: "button", disabled: busy, onClick: () => void control(run.control === "PAUSE_REQUESTED" ? "RESUME" : "PAUSE") }, run.control === "PAUSE_REQUESTED" ? "繼續" : "暫停") : null, !["COMPLETED", "FAILED", "CANCELLED"].includes(run.phase) ? h("button", { className: "danger", type: "button", disabled: busy, onClick: () => window.confirm("取消這個 Mission？") && void control("CANCEL") }, "取消 Mission") : null, h("a", { className: "button-link secondary", href: "/missions" }, "全部 Missions")), h("section", { className: "detail-grid" }, h("article", { className: "card" }, h("h2", null, "Run"), h(Details, { item: { missionRunId: run.id, runNumber: run.runNumber, phase: run.phase, control: run.control, planRevision: run.activePlanRevision, wait: run.waitSummary?.reason, authorityEpoch: run.authorityEpoch, startedAt: time(run.startedAt), finishedAt: time(run.finishedAt) } })), h("article", { className: "card" }, h("h2", null, "Acceptance"), h(Details, { item: { availability: results?.availability, acceptedSteps: results?.acceptance?.acceptedSteps, requiredSteps: results?.acceptance?.requiredSteps, finalManifest: results?.finalManifest, delivery: results?.delivery?.state } }))), h("section", { className: "card" }, h("div", { className: "section-heading" }, h("h2", null, "Plan / Steps"), h("span", null, `revision ${item.plan?.revision ?? "—"}`)), item.plan ? h("div", { className: "mission-steps" }, (item.steps ?? []).map((step: Item) => h("article", { className: "mission-step", key: step.id }, h("div", { className: "card-title-row" }, h("strong", null, step.key), h(Status, { value: step.state })), h("p", null, `${step.kind} · ${step.member?.displayName ?? step.member?.id ?? "—"}`), step.waitReason ? h("small", null, `等待：${step.waitReason}`) : null, step.failure ? h("pre", null, display(step.failure)) : null))) : h("p", { className: "notice" }, "等待 Hermes plan。")), h("section", { className: "card" }, h("h2", null, "Timeline"), h("div", { className: "timeline" }, (item.events ?? []).map((event: Item) => h("article", { key: event.eventId }, h(Status, { value: event.type }), h("span", null, time(event.createdAt)), h("p", null, display(event.payload))))), h("p", null, h("a", { href: `/api/v2/missions/${encodeURIComponent(id)}/results` }, "開啟 results API"))));
+}
+
 function currentPath(): string { return typeof window === "undefined" ? "/" : window.location.pathname; }
 
 export function App({ initialPath = currentPath() }: { initialPath?: string }) {
@@ -290,6 +344,11 @@ export function App({ initialPath = currentPath() }: { initialPath?: string }) {
     const parts = path.split("/").filter(Boolean);
     if (parts[0] === "tasks" && parts[1]) return h(TaskDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "tasks") return h(Tasks, { refreshVersion });
+    if (parts[0] === "office" && parts[1] === "members") return h(OfficeMembers, { refreshVersion });
+    if (parts[0] === "office") return h(OfficePage, { refreshVersion });
+    if (parts[0] === "missions" && parts[1] === "new") return h(MissionIntake);
+    if (parts[0] === "missions" && parts[1]) return h(MissionDetail, { id: parts[1], refreshVersion });
+    if (parts[0] === "missions") return h(MissionList, { refreshVersion });
     if (parts[0] === "workers" && parts[1] === "new") return h(WorkerOnboarding);
     if (parts[0] === "workers" && parts[1]) return h(WorkerDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "workers") return h(Workers, { refreshVersion });

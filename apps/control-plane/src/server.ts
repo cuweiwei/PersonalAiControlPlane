@@ -14,10 +14,14 @@ import { HermesCallbackDispatcher } from "./callbacks/outbox.ts";
 import { ModelTestService } from "./models/model-test-service.ts";
 import { ModelPreferenceService } from "./models/model-preference-service.ts";
 import { OnboardingService } from "./workers/onboarding-service.ts";
+import { OfficeService } from "./office/office-service.ts";
+import { MissionService } from "./missions/mission-service.ts";
+import { PlanService } from "./missions/plan-service.ts";
+import { MissionCoordinator } from "./missions/coordinator.ts";
 import { safeHash } from "./tasks/task-service.ts";
-import { parseCreateTaskInput, parseRegistrationInput } from "../../../packages/contracts/src/index.ts";
+import { parseCreateMemberInput, parseCreateMissionInput, parseCreateRoleInput, parseCreateTaskInput, parseRegistrationInput } from "../../../packages/contracts/src/index.ts";
 
-type Options = { db: ControlPlaneDatabase; tasks: TaskService; workers: WorkerService; coordinator: WorkerCoordinator; artifacts: ArtifactStorage; settings: SettingsService; health: HealthMonitor; events: EventHub; callback?: HermesCallbackDispatcher; modelTests?: ModelTestService; modelPreferences?: ModelPreferenceService; onboarding?: OnboardingService; assetRoot?: string; isReady?: () => boolean };
+type Options = { db: ControlPlaneDatabase; tasks: TaskService; workers: WorkerService; coordinator: WorkerCoordinator; missionCoordinator?: MissionCoordinator; artifacts: ArtifactStorage; settings: SettingsService; health: HealthMonitor; events: EventHub; office?: OfficeService; missions?: MissionService; plans?: PlanService; callback?: HermesCallbackDispatcher; modelTests?: ModelTestService; modelPreferences?: ModelPreferenceService; onboarding?: OnboardingService; assetRoot?: string; isReady?: () => boolean };
 type Row = Record<string, any>;
 const JSON_LIMIT = 5 * 1024 * 1024;
 
@@ -45,6 +49,13 @@ function stepUpActor(request: IncomingMessage): string {
   }
   return actor(request);
 }
+function internalPeerAllowed(request: IncomingMessage): boolean {
+  if (request.headers.origin) return false;
+  const remote = request.socket.remoteAddress?.replace(/^::ffff:/, "") ?? "";
+  const configured = (process.env.PAI_OFFICE_TRUSTED_PEERS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  if (configured.length > 0) return configured.includes(remote);
+  return process.env.NODE_ENV !== "production" && ["127.0.0.1", "::1"].includes(remote);
+}
 
 export function createControlPlaneServer(options: Options) {
   const root = options.assetRoot ?? process.env.PAI_CONTROL_WEB_ROOT ?? "./dist/control-web";
@@ -54,6 +65,58 @@ export function createControlPlaneServer(options: Options) {
     try {
       if (parts[2] === "events" && method === "GET") {
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" }); response.write(`event: ready\ndata: ${JSON.stringify({ status: "connected" })}\n\n`); const unsubscribe = options.events.subscribe((event) => { if (!response.writableEnded) response.write(`data: ${JSON.stringify(event)}\n\n`); }); request.on("close", unsubscribe); return true;
+      }
+      if (parts[2] === "office" && parts[3] === "recovery") {
+        if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY");
+        if (method === "GET" && parts.length === 4) return writeJson(response, 200, options.missionCoordinator.recoveryStatus()), true;
+        if (method === "POST" && parts.length === 4) {
+          const input = await bodyJson(request); const action = String(input.action ?? "").toUpperCase();
+          if (action === "ENTER") return writeJson(response, 202, options.missionCoordinator.enterRecovery()), true;
+          if (action === "CLEAR") return writeJson(response, 200, options.missionCoordinator.leaveRecovery()), true;
+          throw new Error("INVALID_RECOVERY_ACTION");
+        }
+      }
+      if (parts[2] === "acceptance" && method === "GET" && parts.length === 3) {
+        const office = options.office?.get("office-1") ?? null;
+        return writeJson(response, 200, { service: "personal-ai-control-plane", ready: Boolean(options.isReady?.() ?? true), office, coordinator: options.missionCoordinator?.health() ?? null, observedAt: new Date().toISOString() }), true;
+      }
+      if (parts[2] === "role-definitions") {
+        if (!options.office) throw new Error("OFFICE_NOT_READY");
+        if (method === "POST" && parts.length === 3) return writeJson(response, 201, options.office.createRole(parseCreateRoleInput(await bodyJson(request)))), true;
+      }
+      if (parts[2] === "offices") {
+        if (!options.office || !options.missions) throw new Error("OFFICE_NOT_READY");
+        if (method === "GET" && parts.length === 3) return writeJson(response, 200, { items: options.office.list() }), true;
+        const officeId = parts[3];
+        if (method === "GET" && parts.length === 4) { const office = options.office.get(officeId); if (!office) throw new Error("OFFICE_NOT_FOUND"); return writeJson(response, 200, office), true; }
+        if (method === "POST" && parts[4] === "members" && parts.length === 5) return writeJson(response, 201, options.office.createMember(officeId, parseCreateMemberInput(await bodyJson(request)))), true;
+      }
+      if (parts[2] === "missions") {
+        if (!options.missions) throw new Error("OFFICE_NOT_READY");
+        if (method === "POST" && parts.length === 3) { const key = request.headers["idempotency-key"]?.toString(); const created = options.missions.create(parseCreateMissionInput(await bodyJson(request)), key ?? ""); return writeJson(response, 202, created.response), true; }
+        if (method === "GET" && parts.length === 3) return writeJson(response, 200, { items: options.missions.list({ officeId: q.get("office_id") ?? undefined, phase: q.get("phase") ?? undefined, limit: q.has("limit") ? Number(q.get("limit")) : undefined }), observedAt: new Date().toISOString() }), true;
+        const missionId = parts[3]; if (!missionId) throw new Error("MISSION_NOT_FOUND");
+        if (method === "GET" && parts.length === 4) { const mission = options.missions.get(missionId, q.get("mission_run_id") ?? undefined); if (!mission) throw new Error("MISSION_NOT_FOUND"); return writeJson(response, 200, mission), true; }
+        if (method === "GET" && parts[4] === "events") return writeJson(response, 200, options.missions.eventsPage(missionId, Number(q.get("after_seq") ?? 0), Number(q.get("limit") ?? 100))), true;
+        if (method === "GET" && parts[4] === "results") return writeJson(response, 200, options.missions.results(missionId, q.get("mission_run_id") ?? undefined)), true;
+        if (method === "POST" && parts[4] === "control" && parts.length === 5) {
+          const input = await bodyJson(request); const action = String(input.action ?? "").toUpperCase();
+          if (!(action === "PAUSE" || action === "RESUME" || action === "CANCEL")) throw new Error("INVALID_MISSION_CONTROL");
+          const result = options.missions.control(missionId, action, request.headers["idempotency-key"]?.toString() ?? "", input.expected_control_revision === undefined ? undefined : Number(input.expected_control_revision));
+          if (action === "CANCEL" && options.missionCoordinator) options.missionCoordinator.cancelRun(String(result.missionRunId));
+          return writeJson(response, 202, result), true;
+        }
+      }
+      if (parts[2] === "internal" && parts[3] === "office") {
+        if (!internalPeerAllowed(request)) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
+        if (!options.missions || !options.plans) throw new Error("OFFICE_NOT_READY");
+        if (method === "GET" && parts[4] === "commands" && parts[5] && parts[6] === "context") { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); const context = options.missionCoordinator.context(parts[5]); if (!context) throw new Error("COMMAND_NOT_FOUND"); return writeJson(response, 200, context), true; }
+        if (method === "GET" && parts[4] === "commands" && parts[5] && parts.length === 6) { const command = options.missions.command(parts[5]); if (!command) throw new Error("COMMAND_NOT_FOUND"); return writeJson(response, 200, command), true; }
+        if (method === "POST" && parts[4] === "commands" && parts[5] && parts[6] === "admissions") { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); return writeJson(response, 202, options.missionCoordinator.admitCommand(parts[5], await bodyJson(request))), true; }
+        if (method === "POST" && parts[4] === "commands" && parts[5] && parts[6] === "progress") { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); return writeJson(response, 200, options.missionCoordinator.progress(parts[5], await bodyJson(request))), true; }
+        if (method === "POST" && parts[4] === "commands" && parts[5] && parts[6] === "stop-receipts") { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); return writeJson(response, 200, options.missionCoordinator.stopReceipt(parts[5], await bodyJson(request))), true; }
+        if (method === "POST" && parts[4] === "command-results" && parts.length === 5) { const input = await bodyJson(request); const commandId = typeof input.command_id === "string" ? input.command_id : ""; if (!commandId) throw new Error("INVALID_COMMAND"); if (options.missionCoordinator) return writeJson(response, 200, options.missionCoordinator.applyCommandResult(commandId, input)), true; const result = input.result && typeof input.result === "object" && !Array.isArray(input.result) ? (input.result as Record<string, unknown>) : input; const proposal = result.plan ?? input.plan; return writeJson(response, 200, options.plans.submitPlan(commandId, proposal)), true; }
+        if (method === "POST" && parts[4] === "delivery-receipts" && parts.length === 5) { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); return writeJson(response, 200, options.missionCoordinator.deliveryReceipt(await bodyJson(request))), true; }
       }
       if (parts[2] === "tasks") {
         if (method === "POST" && parts.length === 3) { const input = await bodyJson(request); const key = request.headers["idempotency-key"]?.toString(); const requestHash = safeHash(input); if (key) { const prior = options.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = 'tasks-create' AND operation_key = ?", key); if (prior) { if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT"); return writeJson(response, Number(prior.status_code), json(prior.response_json)), true; } } const defaults = options.settings.taskDefaults(); const parsed = parseCreateTaskInput(input, defaults); parsed.settingsVersion = defaults.settingsVersion; const created = options.tasks.create(parsed); const result = { task_id: created.id, status: created.status, created_at: created.createdAt, run_id: created.currentRunId }; if (key) options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES ('tasks-create', ?, ?, 202, ?, ?)", key, requestHash, JSON.stringify(result), Date.now()); return writeJson(response, 202, result), true; }
@@ -149,7 +212,11 @@ export function createControlPlaneServer(options: Options) {
       if (parts[2] === "worker" && parts[3] === "artifacts" && method === "GET") { const worker = authWorker(request, options.workers); const artifactId = parts[4]; const row = options.db.one<Row>("SELECT a.* FROM artifacts a JOIN task_artifacts ta ON ta.artifact_id = a.id JOIN task_attempts at ON at.task_id = ta.task_id WHERE a.id = ? AND at.worker_id = ?", artifactId, worker.id); if (!row || !options.artifacts.exists(row.storage_path)) throw new Error("ARTIFACT_NOT_FOUND"); response.writeHead(200, { "content-type": row.media_type ?? "application/octet-stream", "content-length": row.size_bytes, "content-disposition": `attachment; filename="${basename(row.filename)}"` }); options.artifacts.stream(row.storage_path).pipe(response); return true; }
       return writeJson(response, 404, errorBody("NOT_FOUND", "API route not found")), true;
     } catch (error) {
-      const code = error instanceof Error ? error.message : "INTERNAL_ERROR"; const status = code === "TASK_NOT_FOUND" || code === "WORKER_NOT_FOUND" || code === "REGISTRATION_NOT_FOUND" || code === "ARTIFACT_NOT_FOUND" || code === "CAPABILITY_NOT_FOUND" || code === "PREFERENCE_NOT_FOUND" || code === "ONBOARDING_NOT_FOUND" || code === "MODEL_TEST_NOT_FOUND" || code === "DELIVERY_NOT_FOUND" ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" || code === "STEP_UP_REQUIRED" ? 403 : ["INVALID_TASK_STATE", "INVALID_REGISTRATION_STATE", "WORKER_BUSY", "REGISTRATION_ALREADY_FINALIZED", "IDEMPOTENCY_CONFLICT", "TASK_CHANGED", "CURSOR_STALE", "SETTING_OVERRIDDEN", "WORKER_PREFERENCES_CHANGED", "SETTINGS_CHANGED", "PREFERENCE_CHANGED", "INPUT_ARTIFACT_EXPIRED", "RECEIPT_CONFLICT", "TEMPLATE_CHANGED", "WORKSPACE_MISSING", "ARTIFACT_CONTENT_CONFLICT", "RESULT_ARTIFACT_NOT_READY", "ARTIFACT_MISSING"].includes(code) ? 409 : ["TASK_ARCHIVED", "ARTIFACT_EXPIRED"].includes(code) ? 410 : code === "PREVIEW_UNSUPPORTED" ? 415 : code === "REQUEST_TOO_LARGE" ? 413 : code === "TARGET_UNKNOWN" || code === "TEST_PARAMETER_UNSUPPORTED" ? 422 : code.startsWith("INVALID_") || code.startsWith("UNKNOWN_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code === "MISSING_IDEMPOTENCY_KEY" || code === "MISSING_IF_MATCH" || code.includes("must be") || code === "WORKSPACE_CONFLICT" ? 400 : 500; return writeJson(response, status, errorBody(code, code, process.env.NODE_ENV === "production" ? undefined : { requestId: requestId(request) })), true;
+      const rawCode = error instanceof Error ? error.message : "INTERNAL_ERROR";
+      const code = rawCode.startsWith("UNKNOWN_FIELD:") ? "UNKNOWN_FIELD" : rawCode.startsWith("INVALID_FIELD:") ? "INVALID_FIELD" : rawCode;
+      const details = error && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
+      const status = code === "TASK_NOT_FOUND" || code === "WORKER_NOT_FOUND" || code === "REGISTRATION_NOT_FOUND" || code === "ARTIFACT_NOT_FOUND" || code === "CAPABILITY_NOT_FOUND" || code === "PREFERENCE_NOT_FOUND" || code === "ONBOARDING_NOT_FOUND" || code === "MODEL_TEST_NOT_FOUND" || code === "DELIVERY_NOT_FOUND" || code === "OFFICE_NOT_FOUND" || code === "ROLE_NOT_FOUND" || code === "MISSION_NOT_FOUND" || code === "COMMAND_NOT_FOUND" ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" || code === "STEP_UP_REQUIRED" || code === "INTERNAL_ROUTE_FORBIDDEN" ? 403 : ["INVALID_TASK_STATE", "INVALID_REGISTRATION_STATE", "WORKER_BUSY", "REGISTRATION_ALREADY_FINALIZED", "IDEMPOTENCY_CONFLICT", "TASK_CHANGED", "CURSOR_STALE", "SETTING_OVERRIDDEN", "WORKER_PREFERENCES_CHANGED", "SETTINGS_CHANGED", "PREFERENCE_CHANGED", "INPUT_ARTIFACT_EXPIRED", "RECEIPT_CONFLICT", "TEMPLATE_CHANGED", "WORKSPACE_MISSING", "ARTIFACT_CONTENT_CONFLICT", "RESULT_ARTIFACT_NOT_READY", "ARTIFACT_MISSING", "REVISION_CONFLICT", "PLAN_ALREADY_COMMITTED", "RESULT_CONFLICT", "SEAT_ALREADY_ASSIGNED", "ADMISSION_DEFERRED", "STALE_EXECUTION", "LIMIT_WAIT_OWNER", "FINALIZATION_INCOMPLETE", "RECOVERY_RECONCILIATION_REQUIRED", "RECOVERY_MODE"].includes(code) ? 409 : ["TASK_ARCHIVED", "ARTIFACT_EXPIRED", "OFFICE_DISABLED"].includes(code) ? code === "OFFICE_DISABLED" ? 503 : 410 : code === "PREVIEW_UNSUPPORTED" ? 415 : code === "REQUEST_TOO_LARGE" ? 413 : code === "TARGET_UNKNOWN" || code === "TEST_PARAMETER_UNSUPPORTED" ? 422 : code.startsWith("INVALID_") || code.startsWith("UNKNOWN_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code === "MISSING_IDEMPOTENCY_KEY" || code.includes("must be") || code === "WORKSPACE_CONFLICT" || code === "INVALID_COMMAND" ? 400 : 500;
+      return writeJson(response, status, { ...errorBody(code, code, details), requestId: requestId(request) }), true;
     }
   };
 

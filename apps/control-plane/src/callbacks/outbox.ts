@@ -12,9 +12,10 @@ export class HermesCallbackDispatcher {
   constructor(db: ControlPlaneDatabase, baseUrl = process.env.PAI_HERMES_URL, path = process.env.PAI_HERMES_TASK_EVENT_PATH ?? "/api/internal/control-plane/task-events") { this.db = db; this.baseUrl = baseUrl?.replace(/\/$/, ""); this.path = path; }
 
   async dispatchOnce(limit = 20, now = Date.now()): Promise<number> {
+    const recovered = this.db.connection.prepare("UPDATE callback_outbox SET state = 'RETRY_WAIT', available_at = ?, claimed_until = NULL, claim_token = NULL, last_error = 'CALLBACK_CLAIM_EXPIRED' WHERE delivered_at IS NULL AND state = 'IN_FLIGHT' AND claimed_until IS NOT NULL AND claimed_until < ?").run(now, now);
     if (!this.baseUrl) { const result = this.db.connection.prepare("UPDATE callback_outbox SET state = 'ATTENTION', last_error = 'HERMES_NOT_CONFIGURED' WHERE delivered_at IS NULL AND state IN ('PENDING', 'RETRY_WAIT')").run(); return Number(result.changes); }
     const rows = this.db.all<Row>("SELECT * FROM callback_outbox WHERE delivered_at IS NULL AND state IN ('PENDING', 'RETRY_WAIT') AND available_at <= ? AND (claimed_until IS NULL OR claimed_until < ?) ORDER BY available_at, id LIMIT ?", now, now, limit);
-    let count = 0;
+    let count = Number(recovered.changes);
     for (const row of rows) {
       const claim = randomBytes(12).toString("hex");
       const claimed = this.db.connection.prepare("UPDATE callback_outbox SET claimed_until = ?, claim_token = ?, state = 'IN_FLIGHT', attempt_count = attempt_count + 1, first_attempt_at = COALESCE(first_attempt_at, ?), last_attempt_at = ? WHERE id = ? AND delivered_at IS NULL AND (claimed_until IS NULL OR claimed_until < ?)").run(now + 60_000, claim, now, now, row.id, now);

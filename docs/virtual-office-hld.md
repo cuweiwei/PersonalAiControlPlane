@@ -2,7 +2,7 @@
 
 文件日期：2026-09-06
 
-文件狀態：設計提案；本次交付為 HLD，尚未實作、部署或驗收。
+文件狀態：設計基準；截至 2026-09-07 已完成本機執行切片（`implemented_local`），包含 Hermes wake-up contract、Mission Coordinator、Worker mission path、Office UI 與 recovery/acceptance probe；尚未取得 production/provider/live evidence。
 
 建議定位：Personal AI Control Plane 內的 Virtual Office 功能領域。
 
@@ -39,7 +39,7 @@
 | Worker 本機 assignment/result 保存、result ACK、attempt fencing | 沿用結果重送與過期結果隔離，不能據此宣稱任意程序可接續 |
 | callback outbox、交付重試、Hermes receipt API | 已有傳輸與回覆狀態介面；需補足跨重啟恢復與 Mission 事件 |
 | Hermes callback receiver | 本機程式接受事件、去重並寫入 JSONL；本次搜尋未找到消費此 inbox 並自動續接工作的 consumer |
-| Mission、角色、計畫版本、步驟依賴與執行 checkpoint | 尚需新增，現有 `group_id`／`parent_task_id` 不等於工作流程引擎 |
+| Mission、角色、計畫版本、步驟依賴與執行 checkpoint | 已以 additive migrations 與 strict contracts 建立；現有 `group_id`／`parent_task_id` 仍不是工作流程引擎 |
 
 與既有 [功能與 UX HLD](personal-ai-control-plane-functional-ux-hld.md)、[功能與 UX Detailed Design](personal-ai-control-plane-functional-ux-detailed-design.md) 共用 Task Run、成果、來源、交付、Worker 接案狀態等概念；較早的狀態文件可能落後於目前程式，實作前仍需核對。
 
@@ -50,7 +50,7 @@
 - Hermes receiver 回 `202 accepted` 只代表事件落地，尚不足以證明 Hermes 被喚醒、提交下一步或完成回覆。
 - 現有失敗處理可重排執行；新增會改檔或有外部副作用的 Mission 時，必須加入可重試性分類，不能把失聯等同可安全重做。
 
-這些是本設計的實作前置項目，本次不修改執行程式。
+上述缺口已在本機切片中接上：Coordinator 負責確定性 DAG 推進，Hermes adapter 負責 durable inbox/有界 driver，Worker 負責 mission protocol 與 stop/workspace evidence；真實 provider turn、跨服務重啟與 production promotion 仍須另外取得 evidence。
 
 ## 3. 產品目標與範圍
 
@@ -489,7 +489,7 @@ Office snapshot 從 CP 已保存的狀態計算，不同步等待每台 Worker�
 
 ## 15. 實作依賴與交付邊界
 
-以下為實作工作包與先後依賴，不是本次已開始實作：
+以下為實作工作包與先後依賴；目前已開始第 1 包，其他工作包仍待依序完成：
 
 | 工作包 | 交付內容 | 依賴 |
 | --- | --- | --- |

@@ -21,6 +21,15 @@ CREATE TABLE IF NOT EXISTS results (
   created_at INTEGER NOT NULL,
   delivered_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS process_registry (
+  attempt_id TEXT PRIMARY KEY,
+  pid INTEGER,
+  process_identity TEXT,
+  started_at INTEGER NOT NULL,
+  workspace_resource_key TEXT,
+  state TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 export class WorkerLocalDatabase {
