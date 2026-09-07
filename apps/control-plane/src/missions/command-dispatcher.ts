@@ -65,6 +65,21 @@ export class MissionCommandDispatcher {
   status(): Record<string, unknown> {
     const row = this.db.one<Row>("SELECT COUNT(*) AS pending, MIN(next_send_at) AS oldest FROM mission_commands WHERE transport_state IN ('PENDING', 'RETRY_WAIT', 'IN_FLIGHT')");
     const attention = this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_commands WHERE transport_state = 'ATTENTION' OR processing_state IN ('FAILED', 'STALE')");
-    return { configured: Boolean(this.baseUrl), pending: Number(row?.pending ?? 0), attention: Number(attention?.count ?? 0), oldestAt: row?.oldest ?? null, baseUrl: this.baseUrl ? "configured" : null };
+    const items = this.db.all<Row>("SELECT c.id, c.mission_run_id, r.mission_id, c.kind, c.logical_key, c.transport_state, c.processing_state, c.delivery_attempts, c.brain_attempts, c.current_brain_attempt_id, c.last_error, c.next_send_at, c.applied_at FROM mission_commands c LEFT JOIN mission_runs r ON r.id = c.mission_run_id WHERE c.transport_state IN ('PENDING', 'RETRY_WAIT', 'IN_FLIGHT', 'ATTENTION') OR c.processing_state IN ('ADMITTED', 'RUNNING', 'FAILED', 'STALE') ORDER BY c.next_send_at, c.id LIMIT 50").map((item) => ({
+      id: item.id,
+      missionId: item.mission_id ?? null,
+      missionRunId: item.mission_run_id,
+      kind: item.kind,
+      logicalKey: item.logical_key,
+      transportState: item.transport_state,
+      processingState: item.processing_state,
+      deliveryAttempts: Number(item.delivery_attempts ?? 0),
+      brainAttempts: Number(item.brain_attempts ?? 0),
+      currentBrainAttemptId: item.current_brain_attempt_id ?? null,
+      lastError: item.last_error ?? null,
+      nextSendAt: item.next_send_at ? new Date(Number(item.next_send_at)).toISOString() : null,
+      appliedAt: item.applied_at ? new Date(Number(item.applied_at)).toISOString() : null,
+    }));
+    return { configured: Boolean(this.baseUrl), pending: Number(row?.pending ?? 0), attention: Number(attention?.count ?? 0), oldestAt: row?.oldest ?? null, baseUrl: this.baseUrl ? "configured" : null, attentionItems: items.filter((item) => item.transportState === "ATTENTION" || ["FAILED", "STALE"].includes(String(item.processingState))), activeItems: items };
   }
 }

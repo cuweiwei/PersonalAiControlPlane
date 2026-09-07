@@ -90,6 +90,9 @@ test("Hermes command dispatch without a configured adapter enters attention inst
     const commandId = String(mission.response.planCommandId);
     assert.equal((await fixture.coordinator.dispatchOnce()).valueOf() >= 1, true);
     assert.equal(fixture.db.one<{ transport_state: string }>("SELECT transport_state FROM mission_commands WHERE id = ?", commandId)?.transport_state, "ATTENTION");
+    const health = fixture.coordinator.health() as any;
+    assert.equal(health.attentionItems[0].id, commandId);
+    assert.equal(health.attentionItems[0].lastError, "HERMES_NOT_CONFIGURED");
     assert.equal(fixture.office.member(String(manager.id))?.displayName, "Hermes");
   } finally {
     fixture.coordinator.close();
