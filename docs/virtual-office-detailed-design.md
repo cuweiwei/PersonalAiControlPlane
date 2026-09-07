@@ -549,7 +549,7 @@ Driver 在結果持久化前崩潰：REPLAY_SAFE 可在確認舊程序停止後�
 
 Admission 被 pause/資源不足暫擋時回 `409 ADMISSION_DEFERRED` 與 retry_after_seconds；不消耗 turn。已取消/過期/舊 generation 回 `409 STALE_EXECUTION`，Hermes 停止處理該 command。所有 internal mutation 也須 idempotency key；progress 可用 `(brain_attempt_id,progress_seq)` 作天然去重。
 
-`/internal` 不是身份證明。沿用現有私人服務網路，CP internal route guard 只接受明確配置的 Hermes 私有 peer 位址，依真實 socket peer 判斷，不能相信 forwarded header 或 body 的 actor。Hermes command endpoint 同理只接受 CP 私有 peer；browser ingress 阻擋這些 route，拒絕帶瀏覽器 Origin 的 internal mutation。Peer 來源由固定服務設定解析並限制於核准網路，不由請求傳入任意主機名稱。
+`/internal` 不是身份證明。沿用現有私人服務網路，CP internal route guard 只接受固定部署設定中的 Hermes peer（可為明確 IP 或固定 Docker service alias，runtime 解析後仍逐一比對真實 socket peer），不能相信 forwarded header 或 body 的 actor。Hermes command endpoint 同理只接受 CP 私有 peer；browser ingress 阻擋這些 route，拒絕帶瀏覽器 Origin 的 internal mutation。未解析的 peer 或 production 空 allowlist 一律拒絕；peer 來源由固定服務設定決定，不由請求傳入任意主機名稱。
 
 這是既有單 owner/受信任服務網路模型，不新增每角色或 service token，也不宣稱能抵抗整個私人網路已被接管。Capability/profile reference 是功能契約，不是秘密憑證。發佈驗收需同時走 ingress 與直接 listener 測試，確認 route guard 沒有旁路。
 

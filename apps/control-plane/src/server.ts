@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { basename, relative, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { ControlPlaneDatabase } from "./db/database.ts";
@@ -49,11 +51,26 @@ function stepUpActor(request: IncomingMessage): string {
   }
   return actor(request);
 }
-function internalPeerAllowed(request: IncomingMessage): boolean {
+function normalizedAddress(value: string): string {
+  const normalized = value.replace(/^::ffff:/, "");
+  return isIP(normalized) === 0 ? normalized : normalized.toLowerCase();
+}
+
+async function internalPeerAllowed(request: IncomingMessage): Promise<boolean> {
   if (request.headers.origin) return false;
-  const remote = request.socket.remoteAddress?.replace(/^::ffff:/, "") ?? "";
+  const remote = normalizedAddress(request.socket.remoteAddress ?? "");
   const configured = (process.env.PAI_OFFICE_TRUSTED_PEERS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  if (configured.length > 0) return configured.includes(remote);
+  if (configured.length > 0) {
+    const allowed = new Set(configured.map(normalizedAddress));
+    for (const peer of configured.filter((value) => isIP(value) === 0)) {
+      try {
+        for (const address of await lookup(peer, { all: true, verbatim: true })) allowed.add(normalizedAddress(address.address));
+      } catch {
+        // An unresolved fixed peer remains untrusted.
+      }
+    }
+    return allowed.has(remote);
+  }
   return process.env.NODE_ENV !== "production" && ["127.0.0.1", "::1"].includes(remote);
 }
 
@@ -108,7 +125,7 @@ export function createControlPlaneServer(options: Options) {
         }
       }
       if (parts[2] === "internal" && parts[3] === "office") {
-        if (!internalPeerAllowed(request)) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
+        if (!(await internalPeerAllowed(request))) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
         if (!options.missions || !options.plans) throw new Error("OFFICE_NOT_READY");
         if (method === "GET" && parts[4] === "commands" && parts[5] && parts[6] === "context") { if (!options.missionCoordinator) throw new Error("OFFICE_NOT_READY"); const context = options.missionCoordinator.context(parts[5]); if (!context) throw new Error("COMMAND_NOT_FOUND"); return writeJson(response, 200, context), true; }
         if (method === "GET" && parts[4] === "commands" && parts[5] && parts.length === 6) { const command = options.missions.command(parts[5]); if (!command) throw new Error("COMMAND_NOT_FOUND"); return writeJson(response, 200, command), true; }
