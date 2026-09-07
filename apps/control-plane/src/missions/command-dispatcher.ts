@@ -64,6 +64,7 @@ export class MissionCommandDispatcher {
 
   status(): Record<string, unknown> {
     const row = this.db.one<Row>("SELECT COUNT(*) AS pending, MIN(next_send_at) AS oldest FROM mission_commands WHERE transport_state IN ('PENDING', 'RETRY_WAIT', 'IN_FLIGHT')");
-    return { configured: Boolean(this.baseUrl), pending: Number(row?.pending ?? 0), oldestAt: row?.oldest ?? null, baseUrl: this.baseUrl ? "configured" : null };
+    const attention = this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_commands WHERE transport_state = 'ATTENTION' OR processing_state IN ('FAILED', 'STALE')");
+    return { configured: Boolean(this.baseUrl), pending: Number(row?.pending ?? 0), attention: Number(attention?.count ?? 0), oldestAt: row?.oldest ?? null, baseUrl: this.baseUrl ? "configured" : null };
   }
 }
