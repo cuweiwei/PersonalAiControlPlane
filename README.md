@@ -6,6 +6,8 @@ NAS 上的 execution control plane：Hermes 負責思考與規劃，ContextHub �
 
 - [Requirements](docs/personal-ai-control-plane-requirements.md)
 - [HLD](docs/personal-ai-control-plane-hld.md)
+- [虛擬辦公室 HLD（設計提案）](docs/virtual-office-hld.md)
+- [虛擬辦公室 Detailed Design（待實作規格）](docs/virtual-office-detailed-design.md)
 - [Detailed Design](docs/personal-ai-control-plane-detailed-design.md)
 - [使用說明](docs/personal-ai-control-plane-user-guide.md)
 - [Implementation Status](docs/implementation-status.md)
