@@ -105,6 +105,10 @@ export class MissionCoordinator {
     if (requestHash !== String(command.request_hash)) throw new Error("RESULT_CONFLICT");
     if (this.recoveryStatus().recoveryMode) throw new Error("RECOVERY_MODE");
     if (command.processing_state === "APPLIED") return { commandId, state: "APPLIED", brainAttemptId: command.current_brain_attempt_id, replayed: true };
+    if (command.current_brain_attempt_id) {
+      const currentAttempt = this.db.one<Row>("SELECT state FROM mission_command_attempts WHERE id = ? AND command_id = ?", command.current_brain_attempt_id, commandId);
+      if (currentAttempt?.state === "UNKNOWN") return { commandId, state: "UNKNOWN", brainAttemptId: command.current_brain_attempt_id, replayed: true, recoveryRequired: true };
+    }
     if (command.control !== "ACTIVE" || ["CANCELLED", "FAILED"].includes(String(command.phase))) throw new Error("STALE_EXECUTION");
     const admissionKey = String(input.admission_key ?? `command:${commandId}`);
     const admissionHash = safeHash({ commandId, requestHash, admissionKey });
