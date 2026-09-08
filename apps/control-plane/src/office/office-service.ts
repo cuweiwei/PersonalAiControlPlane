@@ -3,6 +3,7 @@ import { EventHub } from "../events/event-hub.ts";
 import { SettingsService } from "../settings/settings-service.ts";
 import { safeHash } from "../tasks/task-service.ts";
 import { uuidv7, type MemberCreateInput, type RoleCreateInput } from "../../../../packages/contracts/src/index.ts";
+import { projectOfficeScene } from "./scene-projection.ts";
 
 type Row = Record<string, any>;
 function parseJson(value: unknown, fallback: unknown = {}): any { try { return value === null || value === undefined ? fallback : JSON.parse(String(value)); } catch { return fallback; } }
@@ -25,7 +26,8 @@ export class OfficeService {
     const hermesConfigured = Boolean(process.env.PAI_HERMES_OFFICE_URL);
     const activeMissions = Number(this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_runs r JOIN missions m ON m.id = r.mission_id WHERE m.office_id = ? AND r.phase NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", officeId)?.count ?? 0);
     const waitingMissions = Number(this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_runs r JOIN missions m ON m.id = r.mission_id WHERE m.office_id = ? AND r.phase NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') AND r.wait_summary_json LIKE '%WAIT%'", officeId)?.count ?? 0);
-    return { ...result, members, metrics: { activeMissions, waitingMissions, memberCount: members.length }, workflowHealth: { state: !enabled ? "DISABLED" : hermesConfigured ? "READY" : "WAITING_DEPENDENCY", schemaReady: true, officeEnabled: enabled, hermesAdapterConfigured: hermesConfigured } };
+    const scene = projectOfficeScene(this.db, officeId, members, enabled, hermesConfigured);
+    return { ...result, members, scene, metrics: { activeMissions, waitingMissions, memberCount: members.length }, workflowHealth: { state: !enabled ? "DISABLED" : hermesConfigured ? "READY" : "WAITING_DEPENDENCY", schemaReady: true, officeEnabled: enabled, hermesAdapterConfigured: hermesConfigured } };
   }
 
   createRole(input: RoleCreateInput, now = Date.now()): Record<string, unknown> {

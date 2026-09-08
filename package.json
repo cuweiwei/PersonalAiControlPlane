@@ -19,12 +19,14 @@
   "dependencies": {
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "three": "0.185.1",
     "ws": "8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.15.34",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "@types/three": "0.185.4",
     "@types/ws": "^8.18.1",
     "typescript": "7.0.2",
     "vite": "8.2.2"

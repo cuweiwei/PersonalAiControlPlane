@@ -27,6 +27,8 @@ test("Virtual Office HTTP routes expose the seeded office and idempotent intake"
   const jsonRequest = async (path: string, init: RequestInit = {}) => { const response = await fetch(`${origin}${path}`, { ...init, headers: { "content-type": "application/json", ...(init.headers ?? {}) } }); return { response, body: await response.json() as Record<string, any> }; };
   try {
     const offices = await jsonRequest("/api/v2/offices"); assert.equal(offices.response.status, 200); assert.equal(offices.body.items[0].id, "office-1");
+    const scene = await jsonRequest("/api/v2/offices/office-1");
+    assert.equal(scene.response.status, 200); assert.deepEqual(scene.body.scene.members, []); assert.equal(scene.body.scene.board.todo, 0); assert.equal(Number.isFinite(Date.parse(scene.body.scene.observedAt)), true);
     const request = { office_id: "office-1", title: "HTTP Mission", goal: "驗證交辦入口", inputs: [], scope: { workspace_ids: [], capabilities: [], external_effects: [] } };
     const first = await jsonRequest("/api/v2/missions", { method: "POST", headers: { "idempotency-key": "http-mission-key" }, body: JSON.stringify(request) }); const second = await jsonRequest("/api/v2/missions", { method: "POST", headers: { "idempotency-key": "http-mission-key" }, body: JSON.stringify(request) });
     assert.equal(first.response.status, 202); assert.equal(second.response.status, 202); assert.equal(second.body.missionId, first.body.missionId);
