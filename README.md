@@ -4,6 +4,8 @@ NAS 上的 execution control plane：Hermes 負責思考與規劃，ContextHub �
 
 設計文件：
 
+- [Hermes 中控大腦第二版 HLD](docs/hermes-control-brain-v2-hld.md) — Telegram／Hermes 入口、自主決策與全中控業務工具（核心已本機實作，待 live 驗收）
+- [Hermes 中控大腦第二版 Detailed Design](docs/hermes-control-brain-v2-detailed-design.md) — 協定、資料、狀態機、排程、交付與驗收規格
 - [Requirements](docs/personal-ai-control-plane-requirements.md)
 - [HLD](docs/personal-ai-control-plane-hld.md)
 - [虛擬辦公室 HLD（設計提案）](docs/virtual-office-hld.md)
@@ -59,4 +61,4 @@ Worker 以 outbound WebSocket 連線，預設在 macOS 使用 Keychain、Windows
 
 ## Architecture boundary
 
-v2 使用一個 Control Plane process/container、一個 fresh `controlplane.db` 和一個 `/data` artifact root。沒有 v1 API compatibility 或 database migration；cutover 時可停止舊服務，舊資料若需保留則由 operator 獨立封存後再啟動新版本。Production image 必須經 CI immutable publish 與 NAS deployment gateway。
+Control Plane 使用一個 process/container、一個 `controlplane.db` 和一個 `/data` artifact root。Hermes brain v2 以 additive migration 保留既有 v1 Task／Mission run，只有設定啟用且 request 指定 `brain_protocol_version=2` 才建立 supervisor decision lane。Production image 必須經 CI immutable publish 與 NAS deployment gateway。

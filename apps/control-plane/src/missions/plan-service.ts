@@ -23,23 +23,27 @@ export class PlanService {
     const plan = this.parse(value);
     const command = this.db.one<Row>("SELECT c.*, r.mission_id, m.office_id, r.active_plan_revision, r.phase, r.control, m.objective_revision FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", commandId);
     if (!command) throw new Error("COMMAND_NOT_FOUND");
-    if (command.kind !== "plan.requested") throw new Error("UNSUPPORTED_COMMAND");
+    if (command.kind !== "plan.requested" && command.kind !== "mission.decide") throw new Error("UNSUPPORTED_COMMAND");
     if (command.processing_state === "APPLIED") {
       if (command.result_hash !== safeHash(plan)) throw new Error("RESULT_CONFLICT");
       return { commandId, missionId: command.mission_id, missionRunId: command.mission_run_id, planRevision: Number(command.active_plan_revision), phase: command.phase, processingState: "APPLIED", replayed: true };
     }
-    this.validate(plan, String(command.mission_id), String(command.office_id), Number(command.objective_revision), command.active_plan_revision === null ? null : Number(command.active_plan_revision));
+    const isReplan = command.kind === "mission.decide" && command.active_plan_revision !== null && command.active_plan_revision !== undefined;
+    this.validate(plan, String(command.mission_id), String(command.office_id), Number(command.objective_revision), command.active_plan_revision === null ? null : Number(command.active_plan_revision), isReplan);
     const planHash = safeHash(plan);
     const planId = uuidv7(now);
+    let committedRevision = 0;
     let replayedInTransaction = false;
     this.db.transaction(() => {
       const latest = this.db.one<Row>("SELECT c.*, r.mission_id, m.office_id, r.active_plan_revision, r.phase, r.control, m.objective_revision FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", commandId);
       if (!latest) throw new Error("COMMAND_NOT_FOUND");
       if (latest.processing_state === "APPLIED") { if (latest.result_hash !== planHash) throw new Error("RESULT_CONFLICT"); replayedInTransaction = true; return; }
-      if (latest.phase !== "PLANNING" || latest.control !== "ACTIVE") throw new Error("REVISION_CONFLICT");
+      if (!(latest.phase === "PLANNING" || (isReplan && latest.phase === "EXECUTING")) || latest.control !== "ACTIVE") throw new Error("REVISION_CONFLICT");
       if (Number(latest.objective_revision) !== plan.expectedObjectiveRevision) throw new Error("REVISION_CONFLICT");
-      if (plan.basePlanRevision !== null || latest.active_plan_revision !== null) throw new Error("PLAN_ALREADY_COMMITTED");
-      const revision = 1;
+      if (isReplan ? Number(plan.basePlanRevision) !== Number(latest.active_plan_revision) : plan.basePlanRevision !== null || latest.active_plan_revision !== null) throw new Error("PLAN_ALREADY_COMMITTED");
+      const revision = latest.active_plan_revision === null ? 1 : Number(latest.active_plan_revision) + 1;
+      committedRevision = revision;
+      if (latest.active_plan_revision !== null) this.db.run("UPDATE mission_plans SET status = 'SUPERSEDED' WHERE mission_run_id = ? AND revision = ? AND status = 'ACTIVE'", latest.mission_run_id, latest.active_plan_revision);
       this.db.run("INSERT INTO mission_plans(id, mission_run_id, revision, base_revision, objective_revision, status, proposal_json, proposal_hash, command_id, created_at, activated_at) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)", planId, latest.mission_run_id, revision, plan.basePlanRevision, plan.expectedObjectiveRevision, JSON.stringify(plan), planHash, commandId, now, now);
       const stepIds = new Map<string, string>();
       for (const [index, step] of plan.steps.entries()) {
@@ -55,18 +59,20 @@ export class PlanService {
       this.missions.appendEvent(String(latest.office_id), String(latest.mission_id), String(latest.mission_run_id), "plan.committed", { commandId, planId, planRevision: revision, stepCount: plan.steps.length }, now);
     });
     if (replayedInTransaction) return { commandId, missionId: command.mission_id, missionRunId: command.mission_run_id, planRevision: Number(command.active_plan_revision), phase: command.phase, processingState: "APPLIED", replayed: true };
-    this.events.publish({ type: "mission.updated", missionId: command.mission_id, missionRunId: command.mission_run_id, phase: "EXECUTING", planRevision: 1 });
-    return { commandId, missionId: command.mission_id, missionRunId: command.mission_run_id, planId, planRevision: 1, phase: "EXECUTING", processingState: "APPLIED", replayed: false };
+    this.events.publish({ type: "mission.updated", missionId: command.mission_id, missionRunId: command.mission_run_id, phase: "EXECUTING", planRevision: committedRevision });
+    return { commandId, missionId: command.mission_id, missionRunId: command.mission_run_id, planId, planRevision: committedRevision, phase: "EXECUTING", processingState: "APPLIED", replayed: false };
   }
 
   private parse(value: unknown): PlanProposal {
     try { return parsePlanProposal(value); } catch (error) { if (error instanceof PlanValidationError) throw error; throw new PlanValidationError([{ path: "plan", code: "SCHEMA_INVALID", message: error instanceof Error ? error.message : "invalid plan" }]); }
   }
 
-  private validate(plan: PlanProposal, missionId: string, officeId: string, objectiveRevision: number, activePlanRevision: number | null): void {
+  private validate(plan: PlanProposal, missionId: string, officeId: string, objectiveRevision: number, activePlanRevision: number | null, allowReplan = false): void {
     const issues: PlanValidationIssue[] = [];
     if (plan.expectedObjectiveRevision !== objectiveRevision) issues.push({ path: "expected_objective_revision", code: "REVISION_CONFLICT", message: "Plan objective revision is stale" });
-    if (activePlanRevision !== null || plan.basePlanRevision !== null) issues.push({ path: "base_plan_revision", code: "PLAN_ALREADY_COMMITTED", message: "This initial plan command cannot replace an active plan" });
+    if (allowReplan) {
+      if (activePlanRevision === null || plan.basePlanRevision !== activePlanRevision) issues.push({ path: "base_plan_revision", code: "REVISION_CONFLICT", message: "A replan must identify the currently active plan revision" });
+    } else if (activePlanRevision !== null || plan.basePlanRevision !== null) issues.push({ path: "base_plan_revision", code: "PLAN_ALREADY_COMMITTED", message: "This initial plan command cannot replace an active plan" });
     const byKey = new Map<string, PlanStepProposal>();
     for (const [index, step] of plan.steps.entries()) {
       if (byKey.has(step.key)) issues.push({ path: `steps[${index}].key`, code: "DUPLICATE_STEP_KEY", message: `Step key ${step.key} is duplicated` }); else byKey.set(step.key, step);

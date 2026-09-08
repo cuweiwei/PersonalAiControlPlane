@@ -56,6 +56,9 @@ const definitions: SettingDefinition[] = [
   { key: "office_mission_artifact_limit_bytes", label: "Mission 成果總量上限", description: "單一 Mission 的成果總量上限。", type: "integer", unit: "bytes", defaultValue: 1073741824, min: 1, max: 4294967296, nullable: false, envKey: "PAI_OFFICE_MISSION_ARTIFACT_LIMIT_BYTES", applyScope: "OFFICE_ARTIFACT" },
   { key: "office_completed_retention_days", label: "Mission 完成保留", description: "完成 Mission 的最低保留天數。", type: "integer", unit: "天", defaultValue: 90, min: 90, max: 3650, nullable: false, envKey: "PAI_OFFICE_COMPLETED_RETENTION_DAYS", applyScope: "RETENTION" },
   { key: "office_log_retention_days", label: "Mission log 保留", description: "Mission 事件與 log 的最低保留天數。", type: "integer", unit: "天", defaultValue: 30, min: 1, max: 3650, nullable: false, envKey: "PAI_OFFICE_LOG_RETENTION_DAYS", applyScope: "RETENTION" },
+  { key: "hermes_brain_v2_enabled", label: "Hermes 大腦第二版", description: "允許新 Mission 使用 Hermes 自主決策協定。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: "PAI_HERMES_BRAIN_V2_ENABLED", applyScope: "OFFICE_INTAKE" },
+  { key: "hermes_brain_max_tool_calls", label: "Hermes 工具呼叫上限", description: "單一 Mission 的 Hermes 工具邏輯呼叫上限。", type: "integer", unit: "次", defaultValue: 100, min: 1, max: 1000, nullable: false, envKey: "PAI_HERMES_BRAIN_MAX_TOOL_CALLS", applyScope: "OFFICE_INTAKE" },
+  { key: "hermes_brain_capability_ttl_seconds", label: "能力快照有效時間", description: "Hermes 使用的 Worker／工具能力快照有效時間。", type: "integer", unit: "秒", defaultValue: 30, min: 5, max: 3600, nullable: false, envKey: "PAI_HERMES_BRAIN_CAPABILITY_TTL_SECONDS", applyScope: "OFFICE_INTAKE" },
 ];
 
 const byKey = new Map(definitions.map((definition) => [definition.key, definition]));

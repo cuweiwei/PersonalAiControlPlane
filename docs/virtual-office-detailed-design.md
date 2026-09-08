@@ -1,5 +1,7 @@
 # Personal AI Control Plane — 虛擬辦公室 Detailed Design
 
+2026-09-09 後續設計：[Hermes 中控大腦第二版 Detailed Design](hermes-control-brain-v2-detailed-design.md) 擴充本文的 Mission／交易／Worker 基礎，取代新工作一律先規劃的入口與部分失敗處理，加入對話、排程、決策及交付協定。新舊 run 按版本分流；第二版核心已本機實作，待雙 repository CI／live 驗收。
+
 日期：2026-09-07
 
 狀態：實作基準；截至 2026-09-07，Contracts/DB/Office/Mission intake、Plan validation/activation、Coordinator 派工、Hermes adapter、Worker mission features、UI 與 fail-closed recovery/acceptance probe 均有 `implemented_local` 證據。本文件不把本機實作誤代表完整 production/provider acceptance。

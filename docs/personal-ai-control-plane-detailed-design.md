@@ -1,5 +1,7 @@
 # Personal AI Control Plane v2 — Detailed Design
 
+後續設計：[Hermes 中控大腦第二版 Detailed Design](hermes-control-brain-v2-detailed-design.md)（2026-09-09，核心已本機實作，待雙 repository CI／live 驗收）定義建立於現有 Task／Worker／Mission 上的新協定。本文未被明確取代的執行規則仍適用；新功能採 additive migration 與 run 版本隔離。
+
 狀態：v2 實作基準（2026-09-02）
 
 上位設計：[v2 HLD](personal-ai-control-plane-hld.md)。本文件對應 `/Users/tim_hong/Downloads/v2_Detailed_design.md`，並記錄已落地的 repository contract。

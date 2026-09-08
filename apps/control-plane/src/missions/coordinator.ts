@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ControlPlaneDatabase } from "../db/database.ts";
 import { EventHub } from "../events/event-hub.ts";
 import { TaskService, safeHash } from "../tasks/task-service.ts";
-import { uuidv7, type CreateTaskInput, type JsonValue } from "../../../../packages/contracts/src/index.ts";
+import { parseBrainDecision, uuidv7, type CreateTaskInput, type JsonValue } from "../../../../packages/contracts/src/index.ts";
 import { MissionService } from "./mission-service.ts";
 import { PlanService } from "./plan-service.ts";
 import { MissionCommandDispatcher } from "./command-dispatcher.ts";
@@ -89,13 +89,15 @@ export class MissionCoordinator {
   }
 
   context(commandId: string): Record<string, unknown> | undefined {
-    const row = this.db.one<Row>("SELECT c.*, r.mission_id, r.authority_epoch, r.active_plan_revision, r.objective_snapshot_json, r.scope_snapshot_json, r.limits_snapshot_json, m.goal, m.title FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", commandId);
+    const row = this.db.one<Row>("SELECT c.*, r.mission_id, r.authority_epoch, r.control, r.control_revision, r.active_plan_revision, r.objective_snapshot_json, r.scope_snapshot_json, r.limits_snapshot_json, r.brain_protocol_version, r.brain_state, r.context_revision, r.decision_generation, r.decision_pending, m.objective_revision, m.goal, m.title, m.acceptance_json, m.source_intent_key, m.conversation_ref FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", commandId);
     if (!row) return undefined;
     const inputs = this.db.all<Row>("SELECT id, input_seq, kind, text_json, content_hash FROM mission_inputs WHERE mission_id = ? ORDER BY input_seq", row.mission_id).map((input) => ({ id: input.id, sequence: Number(input.input_seq), kind: input.kind, text: parseJson(input.text_json).text ?? null, contentHash: input.content_hash }));
     const members = this.db.all<Row>("SELECT m.id, m.display_name, m.seat_key, m.binding_json, m.max_concurrency, r.role_id, r.version AS role_version, r.name AS role_name, r.responsibilities, r.contract_json FROM office_members m JOIN role_definitions r ON r.role_id = m.role_id AND r.version = m.role_version JOIN missions ms ON ms.office_id = m.office_id WHERE ms.id = ? AND m.archived_at IS NULL ORDER BY m.seat_key, m.id", row.mission_id).map((member) => ({ id: member.id, displayName: member.display_name, seatKey: member.seat_key, maxConcurrency: Number(member.max_concurrency), role: { id: member.role_id, version: Number(member.role_version), name: member.role_name, responsibilities: member.responsibilities, contract: parseJson(member.contract_json) }, binding: parseJson(member.binding_json) }));
     const plan = row.active_plan_revision === null || row.active_plan_revision === undefined ? null : this.db.one<Row>("SELECT proposal_json, revision, status FROM mission_plans WHERE mission_run_id = ? AND revision = ?", row.mission_run_id, row.active_plan_revision);
     const steps = plan ? this.db.all<Row>("SELECT step_key, kind, state, wait_reason, output_manifest_json, failure_json FROM mission_steps WHERE plan_id = (SELECT id FROM mission_plans WHERE mission_run_id = ? AND revision = ?) ORDER BY rowid", row.mission_run_id, row.active_plan_revision).map((step) => ({ key: step.step_key, kind: step.kind, state: step.state, waitReason: step.wait_reason, outputManifest: parseJson(step.output_manifest_json, null), failure: parseJson(step.failure_json, null) })) : [];
-    return { commandId: row.id, missionId: row.mission_id, missionRunId: row.mission_run_id, authorityEpoch: row.authority_epoch, kind: row.kind, goal: row.goal, title: row.title, objective: parseJson(row.objective_snapshot_json), inputs, scope: parseJson(row.scope_snapshot_json), limits: parseJson(row.limits_snapshot_json), officeMembers: members, activePlanRevision: row.active_plan_revision ?? null, activePlan: plan ? { revision: Number(plan.revision), status: plan.status, proposal: parseJson(plan.proposal_json) } : null, steps, envelope: parseJson(row.envelope_json) };
+    const acceptance = parseJson(row.acceptance_json, []);
+    const capabilityRows = this.db.all<Row>("SELECT worker_id, capability, runtime, status, updated_at FROM worker_capabilities WHERE status IN ('READY', 'AVAILABLE') ORDER BY worker_id, capability LIMIT 200");
+    return { commandId: row.id, missionId: row.mission_id, missionRunId: row.mission_run_id, authorityEpoch: row.authority_epoch, kind: row.kind, brainProtocolVersion: Number(row.brain_protocol_version ?? 1), brainState: row.brain_state ?? "IDLE", control: row.control ?? "ACTIVE", controlRevision: Number(row.control_revision ?? 1), objectiveRevision: Number(row.objective_revision ?? 1), contextRevision: Number(row.context_revision ?? 1), decisionGeneration: Number(row.decision_generation ?? 0), decisionPending: Boolean(row.decision_pending), sourceIntentKey: row.source_intent_key ?? null, conversationRef: row.conversation_ref ?? null, goal: row.goal, title: row.title, objective: parseJson(row.objective_snapshot_json), acceptance, inputs, scope: parseJson(row.scope_snapshot_json), limits: parseJson(row.limits_snapshot_json), capabilities: capabilityRows.map((item) => ({ workerId: item.worker_id, capability: item.capability, runtime: item.runtime, status: item.status, observedAt: item.updated_at ? new Date(Number(item.updated_at)).toISOString() : null })), officeMembers: members, activePlanRevision: row.active_plan_revision ?? null, activePlan: plan ? { revision: Number(plan.revision), status: plan.status, proposal: parseJson(plan.proposal_json) } : null, steps, waits: this.db.all<Row>("SELECT id, reason, subscription_json, deadline_at, state FROM mission_waits WHERE mission_run_id = ? AND state = 'PENDING'", row.mission_run_id).map((item) => ({ id: item.id, reason: item.reason, subscription: parseJson(item.subscription_json), deadlineAt: item.deadline_at ? new Date(Number(item.deadline_at)).toISOString() : null, state: item.state })), tools: this.db.all<Row>("SELECT id, tool_id, operation_key, effect_class, state, result_hash FROM mission_tool_operations WHERE mission_run_id = ? ORDER BY created_at DESC LIMIT 50", row.mission_run_id), envelope: parseJson(row.envelope_json) };
   }
 
   admitCommand(commandId: string, input: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
@@ -202,9 +204,41 @@ export class MissionCoordinator {
   }
 
   applyCommandResult(commandId: string, input: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
-    const command = this.db.one<Row>("SELECT c.*, r.mission_id, r.authority_epoch, r.phase, r.control, r.active_plan_revision, r.objective_snapshot_json FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id WHERE c.id = ?", commandId);
+    const command = this.db.one<Row>("SELECT c.*, r.mission_id, r.authority_epoch, r.phase, r.control, r.control_revision, r.context_revision, r.decision_generation, r.current_decision_command_id, r.active_plan_revision, r.objective_snapshot_json, m.objective_revision FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", commandId);
     if (!command) throw new Error("COMMAND_NOT_FOUND");
     if (String(input.authority_epoch ?? "") !== String(command.authority_epoch)) throw new Error("STALE_EXECUTION");
+    if (command.kind === "mission.decide") {
+      const raw = input.result && typeof input.result === "object" && !Array.isArray(input.result) ? input.result as Record<string, unknown> : input;
+      const decision = parseBrainDecision(raw);
+      if (decision.commandId !== commandId || decision.authorityEpoch !== String(command.authority_epoch)) throw new Error("STALE_EXECUTION");
+      if (command.processing_state === "APPLIED") {
+        const prior = parseJson(command.result_json, {});
+        if (prior.action && prior.action !== decision.action) throw new Error("RESULT_CONFLICT");
+        if (decision.action === "COMPLETE" && safeHash({ final_manifest: prior.final_manifest, acceptance_checks: prior.acceptance_checks, action: prior.action, rationale_summary: prior.rationale_summary }) !== safeHash({ final_manifest: (decision.payload as Record<string, unknown>).final_manifest ?? (decision.payload as Record<string, unknown>).finalManifest, acceptance_checks: (decision.payload as Record<string, unknown>).acceptance_checks ?? [], action: decision.action, rationale_summary: decision.rationaleSummary })) throw new Error("RESULT_CONFLICT");
+        if (decision.action === "DELEGATE" || decision.action === "REPLAN") {
+          const proposal = (decision.payload as Record<string, unknown>).plan_fragment ?? (decision.payload as Record<string, unknown>).plan ?? (decision.payload as Record<string, unknown>).plan_proposal;
+          const priorPlan = this.db.one<Row>("SELECT proposal_hash FROM mission_plans WHERE command_id = ?", commandId);
+          if (!proposal || prior.plan_revision === undefined || !priorPlan || String(priorPlan.proposal_hash) !== safeHash(proposal)) throw new Error("RESULT_CONFLICT");
+        }
+        return { commandId, missionId: command.mission_id, missionRunId: command.mission_run_id, state: "APPLIED", applicationState: "APPLIED", action: decision.action, replayed: true };
+      }
+      if (decision.brainAttemptId !== String(command.current_brain_attempt_id ?? "")) throw new Error("STALE_EXECUTION");
+      if (decision.expectedObjectiveRevision !== Number(command.objective_revision ?? 1) || decision.expectedControlRevision !== Number(command.control_revision ?? 1) || decision.expectedContextRevision !== Number(command.context_revision ?? 1) || decision.decisionGeneration !== Number(command.decision_generation ?? 1)) throw new Error("STALE_DECISION");
+      if (command.current_decision_command_id && String(command.current_decision_command_id) !== commandId) throw new Error("STALE_DECISION");
+      if (decision.action === "DELEGATE" || decision.action === "REPLAN") {
+        const payload = decision.payload as Record<string, unknown>;
+        const proposal = payload.plan_fragment ?? payload.plan ?? payload.plan_proposal;
+        if (!proposal) throw new Error("PLAN_REQUIRED");
+        const result = this.plans.submitPlan(commandId, proposal, now);
+        this.finishBrainAttempt(commandId, decision.brainAttemptId, raw, now);
+        return { ...result, action: decision.action };
+      }
+      if (decision.action === "COMPLETE") return this.applyDirectCompletion(command, decision, now);
+      if (decision.action === "WAIT" || decision.action === "ASK_OWNER") return this.applyDecisionWait(command, decision, now);
+      if (decision.action === "SELF_TOOL") return this.applySelfToolDecision(command, decision, now);
+      if (decision.action === "STOP") return this.applyDecisionStop(command, decision, now);
+      throw new Error("UNSUPPORTED_DECISION");
+    }
     if (command.kind === "plan.requested") {
       const result = this.plans.submitPlan(commandId, input.result ?? input.plan ?? input, now);
       const attemptId = String(input.brain_attempt_id ?? command.current_brain_attempt_id ?? "");
@@ -236,13 +270,16 @@ export class MissionCoordinator {
         this.db.run("UPDATE mission_runs SET phase = 'COMPLETED', finished_at = ?, cleanup_state = 'CLEAR', projection_revision = projection_revision + 1, wait_summary_json = ? WHERE id = ?", now, JSON.stringify({ acceptedSteps: accepted, requiredSteps: required }), latest.mission_run_id);
         this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = ?, last_error = NULL WHERE id = ?", resultHash, JSON.stringify(resultValue), now, commandId);
         this.db.run("UPDATE missions SET updated_at = ? WHERE id = ?", now, latest.mission_id);
-        const mission = this.db.one<Row>("SELECT delivery_target_json, office_id FROM missions WHERE id = ?", latest.mission_id);
+        const mission = this.db.one<Row>("SELECT delivery_target_json, conversation_ref, office_id FROM missions WHERE id = ?", latest.mission_id);
         if (parseJson(mission?.delivery_target_json, {}).mode === "HERMES_CHANNEL") {
-          const target = parseJson(mission?.delivery_target_json, {}).targetRef ?? {};
+          const deliveryConfig = parseJson(mission?.delivery_target_json, {});
+          const target = deliveryConfig.targetRef ?? {};
           const targetKey = safeHash(target);
           const deliveryId = uuidv7(now + 1); const deliveryCommandId = uuidv7(now + 2);
-          this.db.run("INSERT OR IGNORE INTO mission_deliveries(id, mission_run_id, final_manifest_hash, target_key, target_ref_json, state, command_id, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)", deliveryId, latest.mission_run_id, resultHash, targetKey, JSON.stringify(target), deliveryCommandId, now);
-          const deliveryEnvelope = { protocol_version: 1, command_id: deliveryCommandId, kind: "mission.deliver", authority_epoch: latest.authority_epoch, mission_id: latest.mission_id, mission_run_id: latest.mission_run_id, final_manifest: manifest, target_ref: target, result_hash: resultHash };
+          const conversationRef = String(mission?.conversation_ref ?? target.conversation_ref ?? target.conversationRef ?? "") || null;
+          const deliveryKey = safeHash({ missionRunId: latest.mission_run_id, resultHash, conversationRef, deliveryRevision: 1 });
+          this.db.run("INSERT OR IGNORE INTO mission_deliveries(id, mission_run_id, final_manifest_hash, target_key, target_ref_json, state, command_id, delivery_key, conversation_ref, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)", deliveryId, latest.mission_run_id, resultHash, targetKey, JSON.stringify(target), deliveryCommandId, deliveryKey, conversationRef, now);
+          const deliveryEnvelope = { protocol_version: 1, command_id: deliveryCommandId, kind: "mission.deliver", authority_epoch: latest.authority_epoch, mission_id: latest.mission_id, mission_run_id: latest.mission_run_id, delivery_id: deliveryId, final_manifest: manifest, target_ref: target, conversation_ref: conversationRef, result_hash: resultHash, delivery_key: deliveryKey, delivery_revision: 1 };
           this.db.run("INSERT OR IGNORE INTO mission_commands(id, mission_run_id, kind, logical_key, envelope_json, request_hash, transport_state, processing_state, next_send_at) VALUES (?, ?, 'mission.deliver', ?, ?, ?, 'PENDING', 'NOT_STARTED', ?)", deliveryCommandId, latest.mission_run_id, `delivery:${targetKey}:${resultHash}`, JSON.stringify(deliveryEnvelope), safeHash(deliveryEnvelope), now);
         }
         this.missions.appendEvent(String(mission?.office_id), latest.mission_id, latest.mission_run_id, "mission.completed", { commandId, resultHash, manifest }, now);
@@ -263,15 +300,112 @@ export class MissionCoordinator {
     return output;
   }
 
+  private finishBrainAttempt(commandId: string, attemptId: string, result: Record<string, unknown>, now: number): void {
+    this.db.transaction(() => {
+      this.db.run("UPDATE mission_command_attempts SET state = 'RESULT_READY', result_hash = ?, finished_at = ? WHERE id = ? AND command_id = ? AND state IN ('ADMITTED', 'RUNNING', 'RESULT_READY')", safeHash(result), now, attemptId, commandId);
+      this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, attemptId);
+      this.db.run("UPDATE mission_runs SET brain_state = 'IDLE', decision_pending = 0 WHERE current_decision_command_id = ?", commandId);
+    });
+  }
+
+  private applyDirectCompletion(command: Row, decision: ReturnType<typeof parseBrainDecision>, now: number): Record<string, unknown> {
+    const payload = decision.payload as Record<string, any>; const manifest = payload.final_manifest ?? payload.finalManifest;
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("FINAL_MANIFEST_REQUIRED");
+    const checks = Array.isArray(payload.acceptance_checks) ? payload.acceptance_checks : [];
+    const required = parseJson(this.db.one<Row>("SELECT acceptance_json FROM missions WHERE id = ?", command.mission_id)?.acceptance_json, []) as any[];
+    const activeOperations = Number(this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_tool_operations WHERE mission_run_id = ? AND state IN ('ADMITTED', 'PREPARED', 'STARTED', 'UNKNOWN')", command.mission_run_id)?.count ?? 0);
+    if (activeOperations > 0) throw new Error("SIDE_EFFECT_IN_PROGRESS");
+    for (const criterion of required.filter((item) => item?.required !== false)) {
+      const check = checks.find((item: any) => item?.criterion_id === criterion.id && item?.verdict === "PASS");
+      if (!check) throw new Error("ACCEPTANCE_INCOMPLETE");
+    }
+    const resultValue = { final_manifest: manifest, acceptance_checks: checks, action: decision.action, rationale_summary: decision.rationaleSummary };
+    const resultHash = safeHash(resultValue); let output!: Record<string, unknown>;
+    this.db.transaction(() => {
+      const latest = this.db.one<Row>("SELECT c.*, r.mission_id, r.authority_epoch, r.control, r.phase, r.context_revision, m.objective_revision FROM mission_commands c JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.id = r.mission_id WHERE c.id = ?", command.id);
+      if (!latest || latest.processing_state === "APPLIED") { output = { commandId: command.id, state: "APPLIED", applicationState: "APPLIED", replayed: true }; return; }
+      if (latest.control !== "ACTIVE" || ["CANCELLED", "FAILED"].includes(String(latest.phase))) throw new Error("STALE_EXECUTION");
+      this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = ?, last_error = NULL WHERE id = ?", resultHash, JSON.stringify(resultValue), now, command.id);
+      this.db.run("UPDATE mission_runs SET phase = 'COMPLETED', finished_at = ?, brain_state = 'IDLE', decision_pending = 0, wait_summary_json = ?, projection_revision = projection_revision + 1 WHERE id = ?", now, JSON.stringify({ mode: "HERMES_ONLY", accepted: true }), latest.mission_run_id);
+      this.db.run("UPDATE missions SET updated_at = ? WHERE id = ?", now, latest.mission_id);
+      const mission = this.db.one<Row>("SELECT delivery_target_json, conversation_ref, office_id FROM missions WHERE id = ?", latest.mission_id);
+      const delivery = parseJson(mission?.delivery_target_json, {});
+      if (delivery.mode === "HERMES_CHANNEL") {
+        const target = delivery.targetRef ?? {};
+        const conversationRef = String(mission?.conversation_ref ?? target.conversation_ref ?? target.conversationRef ?? "") || null;
+        const deliveryKey = safeHash({ missionRunId: latest.mission_run_id, resultHash, conversationRef, deliveryRevision: 1 });
+        const deliveryId = uuidv7(now + 1); const deliveryCommandId = uuidv7(now + 2);
+        this.db.run("INSERT OR IGNORE INTO mission_deliveries(id, mission_run_id, final_manifest_hash, target_key, target_ref_json, state, command_id, delivery_key, conversation_ref, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)", deliveryId, latest.mission_run_id, resultHash, safeHash(target), JSON.stringify(target), deliveryCommandId, deliveryKey, conversationRef, now);
+        const deliveryEnvelope = { protocol_version: 1, command_id: deliveryCommandId, kind: "mission.deliver", authority_epoch: latest.authority_epoch, mission_id: latest.mission_id, mission_run_id: latest.mission_run_id, delivery_id: deliveryId, final_manifest: manifest, target_ref: target, conversation_ref: conversationRef, result_hash: resultHash, delivery_key: deliveryKey, delivery_revision: 1 };
+        this.db.run("INSERT OR IGNORE INTO mission_commands(id, mission_run_id, kind, logical_key, envelope_json, request_hash, transport_state, processing_state, next_send_at) VALUES (?, ?, 'mission.deliver', ?, ?, ?, 'PENDING', 'NOT_STARTED', ?)", deliveryCommandId, latest.mission_run_id, `delivery:${deliveryKey}`, JSON.stringify(deliveryEnvelope), safeHash(deliveryEnvelope), now);
+      }
+      for (const check of checks) this.db.run("INSERT OR IGNORE INTO mission_acceptance_checks(id, mission_run_id, criterion_id, objective_revision, subject_hash, verdict, evidence_json, reviewer_ref, producer_command_id, check_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", uuidv7(now), latest.mission_run_id, String(check.criterion_id ?? "unknown"), Number(latest.objective_revision ?? command.objective_revision ?? 1), String(check.subject_hash ?? safeHash(manifest)), String(check.verdict ?? "UNKNOWN"), JSON.stringify(check.evidence_refs ?? check), String(check.verification_kind ?? "HERMES_REVIEW"), command.id, `${String(check.criterion_id ?? "unknown")}:${String(check.subject_hash ?? safeHash(manifest))}`, now);
+      this.db.run("UPDATE mission_command_attempts SET state = 'RESULT_READY', result_hash = ?, finished_at = ? WHERE id = ? AND command_id = ? AND state IN ('ADMITTED', 'RUNNING', 'RESULT_READY')", resultHash, now, decision.brainAttemptId, command.id);
+      this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, decision.brainAttemptId);
+      const officeId = this.db.one<Row>("SELECT office_id FROM missions WHERE id = ?", latest.mission_id)?.office_id;
+      if (officeId) this.missions.appendEvent(String(officeId), latest.mission_id, latest.mission_run_id, "mission.completed", { commandId: command.id, resultHash, mode: "HERMES_ONLY" }, now);
+      output = { commandId: command.id, missionId: latest.mission_id, missionRunId: latest.mission_run_id, state: "COMPLETED", applicationState: "APPLIED", resultHash, action: decision.action, replayed: false };
+    });
+    this.events.publish({ type: "mission.updated", missionId: command.mission_id, missionRunId: command.mission_run_id, commandId: command.id, state: output.state });
+    return output;
+  }
+
+  private applyDecisionWait(command: Row, decision: ReturnType<typeof parseBrainDecision>, now: number): Record<string, unknown> {
+    const payload = decision.payload as Record<string, any>; const reason = String(payload.reason ?? (decision.action === "ASK_OWNER" ? "WAITING_OWNER" : "WAITING_RESOURCE")); const deadline = payload.deadline_at ? Date.parse(String(payload.deadline_at)) : null;
+    if (payload.deadline_at !== undefined && !Number.isFinite(deadline)) throw new Error("INVALID_FIELD:deadline_at");
+    this.db.transaction(() => {
+      this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = ? WHERE id = ?", safeHash(decision), JSON.stringify(decision), now, command.id);
+      this.db.run("UPDATE mission_runs SET brain_state = ?, decision_pending = 0, wait_summary_json = ?, next_wake_at = ?, projection_revision = projection_revision + 1 WHERE id = ?", decision.action === "ASK_OWNER" ? "WAITING_OWNER" : "WAITING_RESOURCE", JSON.stringify({ reason }), deadline, command.mission_run_id);
+      this.db.run("INSERT OR REPLACE INTO mission_waits(id, mission_run_id, decision_command_id, reason, subscription_json, deadline_at, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)", uuidv7(now), command.mission_run_id, command.id, reason, JSON.stringify(payload.event_filter ?? payload.required_fields ?? {}), deadline, now, now);
+      this.db.run("UPDATE mission_command_attempts SET state = 'RESULT_READY', result_hash = ?, finished_at = ? WHERE id = ? AND command_id = ?", safeHash(decision), now, decision.brainAttemptId, command.id);
+      this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, decision.brainAttemptId);
+      const mission = this.db.one<Row>("SELECT id AS mission_id, office_id FROM missions WHERE id = (SELECT mission_id FROM mission_runs WHERE id = ?)", command.mission_run_id);
+      if (mission) this.missions.appendEvent(String(mission.office_id), String(mission.mission_id), command.mission_run_id, "mission.waiting", { commandId: command.id, action: decision.action, reason, deadlineAt: deadline ? new Date(deadline).toISOString() : null }, now);
+    });
+    return { commandId: command.id, missionRunId: command.mission_run_id, state: decision.action === "ASK_OWNER" ? "WAITING_OWNER" : "WAITING_RESOURCE", action: decision.action, replayed: false };
+  }
+
+  private applySelfToolDecision(command: Row, decision: ReturnType<typeof parseBrainDecision>, now: number): Record<string, unknown> {
+    const payload = decision.payload as Record<string, any>; const toolId = String(payload.tool_id ?? ""); if (!toolId) throw new Error("TOOL_REQUIRED");
+    const operationKey = `mission:${command.mission_id}:command:${command.id}:tool:${toolId}`; const operationId = uuidv7(now);
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO mission_tool_operations(id, mission_run_id, command_id, tool_id, operation_key, request_hash, effect_class, state, result_json, scope_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'ADMITTED', ?, 1, ?, ?)", operationId, command.mission_run_id, command.id, toolId, operationKey, safeHash(payload.arguments ?? {}), String(payload.effect_class ?? "READ_ONLY"), JSON.stringify({ arguments: payload.arguments ?? {} }), now, now);
+      this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = ? WHERE id = ?", safeHash(decision), JSON.stringify(decision), now, command.id);
+      this.db.run("UPDATE mission_runs SET brain_state = 'WAITING_RESULT', decision_pending = 0 WHERE id = ?", command.mission_run_id);
+      this.db.run("UPDATE mission_command_attempts SET state = 'RESULT_READY', result_hash = ?, finished_at = ? WHERE id = ? AND command_id = ?", safeHash(decision), now, decision.brainAttemptId, command.id);
+      this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, decision.brainAttemptId);
+      const mission = this.db.one<Row>("SELECT id AS mission_id, office_id FROM missions WHERE id = (SELECT mission_id FROM mission_runs WHERE id = ?)", command.mission_run_id);
+      if (mission) this.missions.appendEvent(String(mission.office_id), String(mission.mission_id), command.mission_run_id, "mission.tool.admitted", { commandId: command.id, operationId, toolId, effectClass: String(payload.effect_class ?? "READ_ONLY") }, now);
+    });
+    return { commandId: command.id, missionRunId: command.mission_run_id, operationId, toolId, state: "ADMITTED", action: decision.action, replayed: false };
+  }
+
+  private applyDecisionStop(command: Row, decision: ReturnType<typeof parseBrainDecision>, now: number): Record<string, unknown> {
+    this.db.transaction(() => {
+      this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = ? WHERE id = ?", safeHash(decision), JSON.stringify(decision), now, command.id);
+      this.db.run("UPDATE mission_runs SET phase = 'FAILED', finished_at = ?, stop_reason = ?, brain_state = 'IDLE', decision_pending = 0, projection_revision = projection_revision + 1 WHERE id = ?", now, String((decision.payload as Record<string, any>).reason ?? "HERMES_STOP"), command.mission_run_id);
+      this.db.run("UPDATE missions SET updated_at = ? WHERE id = (SELECT mission_id FROM mission_runs WHERE id = ?)", now, command.mission_run_id);
+      this.db.run("UPDATE mission_command_attempts SET state = 'RESULT_READY', result_hash = ?, finished_at = ? WHERE id = ? AND command_id = ?", safeHash(decision), now, decision.brainAttemptId, command.id);
+      this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, decision.brainAttemptId);
+      const mission = this.db.one<Row>("SELECT id AS mission_id, office_id FROM missions WHERE id = (SELECT mission_id FROM mission_runs WHERE id = ?)", command.mission_run_id);
+      if (mission) this.missions.appendEvent(String(mission.office_id), String(mission.mission_id), command.mission_run_id, "mission.failed", { commandId: command.id, reason: String((decision.payload as Record<string, any>).reason ?? "HERMES_STOP"), action: decision.action }, now);
+    });
+    return { commandId: command.id, missionRunId: command.mission_run_id, state: "FAILED", action: decision.action, replayed: false };
+  }
+
   deliveryReceipt(input: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
     const deliveryId = String(input.delivery_id ?? ""); if (!deliveryId) throw new Error("DELIVERY_NOT_FOUND");
     const result = this.db.transaction(() => {
       const row = this.db.one<Row>("SELECT * FROM mission_deliveries WHERE id = ?", deliveryId); if (!row) throw new Error("DELIVERY_NOT_FOUND");
       const revision = Number(input.receipt_revision ?? 0); if (revision < Number(row.receipt_revision ?? 0)) return { deliveryId, state: row.state, replayed: true };
       if (revision === Number(row.receipt_revision ?? 0) && row.receipt_json && safeHash(parseJson(row.receipt_json)) !== safeHash(input)) throw new Error("RECEIPT_CONFLICT");
-      const state = ["DELIVERED", "FAILED", "UNCERTAIN", "ATTENTION"].includes(String(input.state)) ? String(input.state) : "UNCERTAIN";
-      this.db.run("UPDATE mission_deliveries SET state = ?, receipt_revision = ?, receipt_json = ?, delivered_at = CASE WHEN ? = 'DELIVERED' THEN ? ELSE delivered_at END, last_error = ? WHERE id = ?", state, revision, JSON.stringify(input), state, now, input.last_error ?? null, deliveryId);
-      return { deliveryId, state, receiptRevision: revision, replayed: false };
+      if (input.delivery_key && row.delivery_key && String(input.delivery_key) !== String(row.delivery_key)) throw new Error("RECEIPT_CONFLICT");
+      const state = ["DELIVERED", "FAILED", "UNCERTAIN", "ATTENTION", "SUPPRESSED_BY_POLICY"].includes(String(input.state)) ? String(input.state) : "UNCERTAIN";
+      this.db.run("UPDATE mission_deliveries SET state = ?, receipt_revision = ?, receipt_json = ?, conversation_ref = COALESCE(conversation_ref, ?), uncertainty_reason = ?, delivered_at = CASE WHEN ? = 'DELIVERED' THEN ? ELSE delivered_at END, last_error = ? WHERE id = ?", state, revision, JSON.stringify(input), input.conversation_ref ?? input.conversationRef ?? null, state === "UNCERTAIN" ? (input.uncertainty_reason ?? input.last_error ?? null) : null, state, now, input.last_error ?? null, deliveryId);
+      if (row.command_id) {
+        this.db.run("UPDATE mission_commands SET processing_state = 'APPLIED', transport_state = 'ACCEPTED', result_hash = ?, result_json = ?, applied_at = COALESCE(applied_at, ?), last_error = ? WHERE id = ?", safeHash(input), JSON.stringify(input), now, input.last_error ?? (state === "DELIVERED" ? null : String(input.uncertainty_reason ?? state)), row.command_id);
+      }
+      return { deliveryId, commandId: row.command_id ?? null, state, receiptRevision: revision, replayed: false };
     });
     this.events.publish({ type: "mission.delivery.updated", deliveryId, state: result.state });
     return result;
@@ -296,13 +430,25 @@ export class MissionCoordinator {
       if (row.control !== "ACTIVE") { if (row.control === "CANCEL_REQUESTED") this.cancelMissionTasks(row, now); this.setRunWait(row, { reason: row.control === "PAUSE_REQUESTED" ? "MISSION_PAUSED" : "CANCEL_REQUESTED" }, now); return; }
       if (row.deadline_mode === "HARD" && row.deadline_at && Number(row.deadline_at) <= now) { this.failRun(row, "DEADLINE_EXCEEDED", now); return; }
       const limits = parseJson(row.limits_snapshot_json, {}); if (Number(limits.maxElapsedSeconds) > 0 && now - Number(row.started_at) > Number(limits.maxElapsedSeconds) * 1_000) { this.failRun(row, "MAX_ELAPSED_EXCEEDED", now); return; }
+      const brainV2 = Number(row.brain_protocol_version ?? 1) === 2;
+      if (brainV2 && (row.phase === "PLANNING" || row.active_plan_revision === null || row.active_plan_revision === undefined)) {
+        const queued = this.ensureDecision(row, now);
+        if (!queued && Number(row.decision_pending ?? 0) === 1) this.setRunWait(row, { reason: "WAITING_HERMES_DECISION", decisionGeneration: Number(row.decision_generation ?? 0) }, now);
+        return;
+      }
       if (row.phase === "PLANNING" || row.active_plan_revision === null || row.active_plan_revision === undefined) { this.setRunWait(row, { reason: "WAITING_HERMES_PLAN" }, now); return; }
       const plan = this.db.one<Row>("SELECT * FROM mission_plans WHERE mission_run_id = ? AND revision = ? AND status = 'ACTIVE'", runId, row.active_plan_revision); if (!plan) { this.setRunWait(row, { reason: "PLAN_MISSING" }, now); return; }
       const steps = this.db.all<Row>("SELECT * FROM mission_steps WHERE plan_id = ? ORDER BY rowid", plan.id);
       const required = steps.filter((step) => parseJson(step.contract_json).required !== false);
-      const failed = required.find((step) => step.state === "FAILED"); if (failed) { this.failRun(row, "STEP_FAILED", now); return; }
+      const failed = required.find((step) => step.state === "FAILED"); if (failed) {
+        if (brainV2) { this.requestDecision(row, now, { reason: "STEP_FAILED", stepKey: failed.step_key }); return; }
+        this.failRun(row, "STEP_FAILED", now); return;
+      }
       const live = steps.some((step) => activeExecution(step.state));
-      if (required.length > 0 && required.every((step) => step.state === "SUCCEEDED") && !live) { this.ensureFinalize(row, plan, now); return; }
+      if (required.length > 0 && required.every((step) => step.state === "SUCCEEDED") && !live) {
+        if (brainV2) { this.requestDecision(row, now, { reason: "PLAN_READY_FOR_REVIEW", planRevision: Number(plan.revision) }); return; }
+        this.ensureFinalize(row, plan, now); return;
+      }
       const activeCount = Number(this.db.one<Row>("SELECT COUNT(*) AS count FROM mission_step_executions e JOIN mission_steps s ON s.id = e.step_id JOIN mission_plans p ON p.id = s.plan_id WHERE p.mission_run_id = ? AND e.state IN ('CREATED', 'QUEUED', 'RUNNING', 'OUTPUT_READY', 'UNKNOWN')", runId)?.count ?? 0);
       if (activeCount >= Number(limits.maxActiveExecutions ?? 3)) { this.setRunWait(row, { reason: "MISSION_CAPACITY_BUSY", activeCount }, now); return; }
       const candidate = steps.find((step) => !step.current_execution_id && ["READY", "PENDING"].includes(String(step.state)) && this.dependenciesAccepted(step.id, plan.id));
@@ -317,6 +463,41 @@ export class MissionCoordinator {
       this.setRunWait(row, { reason: "EXECUTION_QUEUED", stepId: candidate.id }, now);
     });
     return changed;
+  }
+
+  private requestDecision(run: Row, now: number, summary: Record<string, unknown>): void {
+    if (Number(run.brain_protocol_version ?? 1) !== 2 || terminal(run.phase)) return;
+    this.db.run("UPDATE mission_runs SET decision_pending = 1, brain_state = 'DECISION_QUEUED', wait_summary_json = ?, next_wake_at = NULL, projection_revision = projection_revision + 1 WHERE id = ? AND phase NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", JSON.stringify(summary), run.id);
+    const current = this.db.one<Row>("SELECT * FROM mission_runs WHERE id = ?", run.id);
+    if (current) this.ensureDecision(current, now);
+  }
+
+  private ensureDecision(run: Row, now: number): boolean {
+    if (Number(run.brain_protocol_version ?? 1) !== 2 || Number(run.decision_pending ?? 0) !== 1) return false;
+    const current = run.current_decision_command_id ? this.db.one<Row>("SELECT processing_state FROM mission_commands WHERE id = ? AND mission_run_id = ?", run.current_decision_command_id, run.id) : undefined;
+    if (current && ["NOT_STARTED", "ADMITTED", "RUNNING"].includes(String(current.processing_state))) return false;
+    const mission = this.db.one<Row>("SELECT mission_id, objective_revision, office_id FROM mission_runs JOIN missions ON missions.id = mission_runs.mission_id WHERE mission_runs.id = ?", run.id);
+    if (!mission) return false;
+    const generation = Number(run.decision_generation ?? 0) + 1;
+    const commandId = uuidv7(now + generation);
+    const envelope = {
+      protocol_version: 1,
+      brain_protocol_version: 2,
+      command_id: commandId,
+      kind: "mission.decide",
+      authority_epoch: run.authority_epoch,
+      mission_id: mission.mission_id,
+      mission_run_id: run.id,
+      expected_objective_revision: Number(mission.objective_revision ?? 1),
+      expected_control_revision: Number(run.control_revision ?? 1),
+      expected_context_revision: Number(run.context_revision ?? 1),
+      decision_generation: generation,
+      context_ref: { kind: "MISSION_SNAPSHOT", mission_run_id: run.id, context_revision: Number(run.context_revision ?? 1) },
+    };
+    this.db.run("INSERT INTO mission_commands(id, mission_run_id, kind, logical_key, envelope_json, request_hash, transport_state, processing_state, next_send_at) VALUES (?, ?, 'mission.decide', ?, ?, ?, 'PENDING', 'NOT_STARTED', ?)", commandId, run.id, `decide:${run.id}:${generation}`, JSON.stringify(envelope), safeHash(envelope), now);
+    this.db.run("UPDATE mission_runs SET current_decision_command_id = ?, decision_generation = ?, brain_state = 'DECISION_QUEUED', decision_pending = 1, next_wake_at = NULL, projection_revision = projection_revision + 1 WHERE id = ? AND decision_pending = 1", commandId, generation, run.id);
+    this.missions.appendEvent(String(mission.office_id), String(mission.mission_id), String(run.id), "mission.decision.requested", { commandId, decisionGeneration: generation, contextRevision: Number(run.context_revision ?? 1) }, now);
+    return true;
   }
 
   private dependenciesAccepted(stepId: string, planId: string): boolean {

@@ -28,7 +28,7 @@ test("Virtual Office persists an idempotent Mission and atomically commits a val
   const missions = new MissionService(db, events, settings);
   const plans = new PlanService(db, events, missions);
   try {
-    assert.deepEqual(db.all<{ version: number }>("SELECT version FROM schema_migrations WHERE version >= 7 ORDER BY version").map((row) => row.version), [7, 8, 9, 10]);
+    assert.deepEqual(db.all<{ version: number }>("SELECT version FROM schema_migrations WHERE version >= 7 ORDER BY version").map((row) => row.version), [7, 8, 9, 10, 11, 12]);
     assert.equal(office.list().length, 1);
     assert.equal((office.get("office-1") as any).members.length, 0);
     assert.throws(() => missions.create({ officeId: "office-1", title: "Disabled", goal: "No", inputs: [], scope: { workspaceIds: [], capabilities: [], externalEffects: [] } }, "disabled-key"), /OFFICE_DISABLED/);

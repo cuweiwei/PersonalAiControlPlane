@@ -12,6 +12,9 @@ export type RetrySafety = typeof RETRY_SAFETY[number];
 export type MissionInput = { kind: "TEXT"; text: string };
 export type MissionCreateInput = {
   officeId: string;
+  brainProtocolVersion?: 1 | 2;
+  sourceIntentKey?: string | null;
+  conversationRef?: string | null;
   title: string;
   goal: string;
   inputs: MissionInput[];
@@ -20,6 +23,7 @@ export type MissionCreateInput = {
   deadline?: { at: string | null; mode: "SOFT" | "HARD" };
   delivery?: { mode: "OFFICE_ONLY" | "HERMES_CHANNEL"; targetRef?: Record<string, JsonValue> };
   sourceRef?: Record<string, JsonValue> | null;
+  acceptance?: Array<{ id: string; kind: string; required: boolean; description: string; verifierRef?: string | null }>;
 };
 export type PlanDependencyProposal = { stepKey: string; condition: DependencyCondition };
 export type PlanInputProposal = { name: string; source: "MISSION_INPUT" | "STEP_OUTPUT"; inputId?: string; stepKey?: string; artifactName?: string };
@@ -36,6 +40,22 @@ export type PlanProposal = { schemaVersion: 1; expectedObjectiveRevision: number
 export type RoleCreateInput = { name: string; responsibilities: string; contract: Record<string, JsonValue> };
 export type MemberCreateInput = { roleId: string; roleVersion: number; displayName: string; avatarKey?: string | null; seatKey: string; binding: Record<string, JsonValue>; maxConcurrency: number };
 
+export const BRAIN_ACTIONS = ["COMPLETE", "SELF_TOOL", "DELEGATE", "WAIT", "ASK_OWNER", "REPLAN", "STOP"] as const;
+export type BrainAction = typeof BRAIN_ACTIONS[number];
+export type BrainDecision = {
+  brainProtocolVersion: 2;
+  commandId: string;
+  brainAttemptId: string;
+  authorityEpoch: string;
+  expectedObjectiveRevision: number;
+  expectedControlRevision: number;
+  expectedContextRevision: number;
+  decisionGeneration: number;
+  action: BrainAction;
+  rationaleSummary: string;
+  payload: Record<string, JsonValue>;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], context: string): void { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`UNKNOWN_FIELD:${context}.${key}`); }
 function requiredString(value: unknown, field: string, max: number): string { if (typeof value !== "string" || value.trim().length === 0 || value.length > max) throw new Error(`INVALID_FIELD:${field}`); return value; }
@@ -45,7 +65,7 @@ function stringArray(value: unknown, field: string, maxItems: number, maxLength 
 
 export function parseCreateMissionInput(value: unknown): MissionCreateInput {
   if (!isRecord(value)) throw new Error("INVALID_MISSION");
-  rejectUnknown(value, ["office_id", "title", "goal", "inputs", "scope", "limits", "deadline", "delivery", "source_ref"], "mission");
+  rejectUnknown(value, ["office_id", "brain_protocol_version", "source_intent_key", "conversation_ref", "title", "goal", "inputs", "scope", "limits", "deadline", "delivery", "source_ref", "acceptance"], "mission");
   if (!isRecord(value.scope)) throw new Error("INVALID_FIELD:scope");
   rejectUnknown(value.scope, ["workspace_ids", "capabilities", "external_effects"], "scope");
   const inputsRaw = value.inputs ?? [];
@@ -57,7 +77,23 @@ export function parseCreateMissionInput(value: unknown): MissionCreateInput {
   const deliveryRaw = value.delivery; if (deliveryRaw !== undefined && !isRecord(deliveryRaw)) throw new Error("INVALID_FIELD:delivery"); const delivery = isRecord(deliveryRaw) ? deliveryRaw : {}; rejectUnknown(delivery, ["mode", "target_ref"], "delivery"); const deliveryMode = delivery.mode ?? "OFFICE_ONLY"; if (deliveryMode !== "OFFICE_ONLY" && deliveryMode !== "HERMES_CHANNEL") throw new Error("INVALID_FIELD:delivery.mode"); if (delivery.target_ref !== undefined && !isRecord(delivery.target_ref)) throw new Error("INVALID_FIELD:delivery.target_ref");
   const sourceRef = value.source_ref === null || value.source_ref === undefined ? null : isRecord(value.source_ref) ? value.source_ref : (() => { throw new Error("INVALID_FIELD:source_ref"); })();
   const onLimit = limits.on_limit ?? "WAIT_OWNER"; if (onLimit !== "WAIT_OWNER" && onLimit !== "FAIL") throw new Error("INVALID_FIELD:limits.on_limit");
-  return { officeId: requiredString(value.office_id, "office_id", 200), title: requiredString(value.title, "title", 200), goal: requiredString(value.goal, "goal", 32 * 1024), inputs, scope: { workspaceIds: stringArray(value.scope.workspace_ids, "scope.workspace_ids", 100), capabilities: stringArray(value.scope.capabilities, "scope.capabilities", 100), externalEffects: stringArray(value.scope.external_effects, "scope.external_effects", 100) }, limits: { maxElapsedSeconds: boundedInt(limits.max_elapsed_seconds, "limits.max_elapsed_seconds", 604800, 3600, 2_592_000), maxHermesTurns: boundedInt(limits.max_hermes_turns, "limits.max_hermes_turns", 30, 1, 200), maxWorkerAttempts: boundedInt(limits.max_worker_attempts, "limits.max_worker_attempts", 100, 1, 1000), maxActiveExecutions: boundedInt(limits.max_active_executions, "limits.max_active_executions", 3, 1, 10), maxReplans: boundedInt(limits.max_replans, "limits.max_replans", 3, 0, 10), onLimit }, deadline: { at: deadlineAt, mode: deadlineMode }, delivery: { mode: deliveryMode, ...(delivery.target_ref ? { targetRef: delivery.target_ref as Record<string, JsonValue> } : {}) }, sourceRef: sourceRef as Record<string, JsonValue> | null };
+  const brainProtocolVersion = value.brain_protocol_version === undefined ? 1 : value.brain_protocol_version; if (brainProtocolVersion !== 1 && brainProtocolVersion !== 2) throw new Error("INVALID_FIELD:brain_protocol_version");
+  const sourceIntentKey = value.source_intent_key === undefined || value.source_intent_key === null ? null : requiredString(value.source_intent_key, "source_intent_key", 300);
+  const conversationRef = value.conversation_ref === undefined || value.conversation_ref === null ? null : requiredString(value.conversation_ref, "conversation_ref", 300);
+  const acceptanceRaw = value.acceptance ?? []; if (!Array.isArray(acceptanceRaw) || acceptanceRaw.length > 100) throw new Error("INVALID_FIELD:acceptance");
+  const acceptance = acceptanceRaw.map((item, index) => { if (!isRecord(item)) throw new Error(`INVALID_FIELD:acceptance[${index}]`); rejectUnknown(item, ["id", "kind", "required", "description", "verifier_ref"], `acceptance[${index}]`); if (typeof item.required !== "boolean") throw new Error(`INVALID_FIELD:acceptance[${index}].required`); return { id: requiredString(item.id, `acceptance[${index}].id`, 100), kind: requiredString(item.kind, `acceptance[${index}].kind`, 100), required: item.required, description: requiredString(item.description, `acceptance[${index}].description`, 2_000), verifierRef: item.verifier_ref === undefined || item.verifier_ref === null ? null : requiredString(item.verifier_ref, `acceptance[${index}].verifier_ref`, 300) }; });
+  return { officeId: requiredString(value.office_id, "office_id", 200), brainProtocolVersion: brainProtocolVersion as 1 | 2, sourceIntentKey, conversationRef, title: requiredString(value.title, "title", 200), goal: requiredString(value.goal, "goal", 32 * 1024), inputs, scope: { workspaceIds: stringArray(value.scope.workspace_ids, "scope.workspace_ids", 100), capabilities: stringArray(value.scope.capabilities, "scope.capabilities", 100), externalEffects: stringArray(value.scope.external_effects, "scope.external_effects", 100) }, limits: { maxElapsedSeconds: boundedInt(limits.max_elapsed_seconds, "limits.max_elapsed_seconds", 604800, 3600, 2_592_000), maxHermesTurns: boundedInt(limits.max_hermes_turns, "limits.max_hermes_turns", 30, 1, 200), maxWorkerAttempts: boundedInt(limits.max_worker_attempts, "limits.max_worker_attempts", 100, 1, 1000), maxActiveExecutions: boundedInt(limits.max_active_executions, "limits.max_active_executions", 3, 1, 10), maxReplans: boundedInt(limits.max_replans, "limits.max_replans", 3, 0, 10), onLimit }, deadline: { at: deadlineAt, mode: deadlineMode }, delivery: { mode: deliveryMode, ...(delivery.target_ref ? { targetRef: delivery.target_ref as Record<string, JsonValue> } : {}) }, sourceRef: sourceRef as Record<string, JsonValue> | null, acceptance };
+}
+
+export function parseBrainDecision(value: unknown): BrainDecision {
+  if (!isRecord(value)) throw new Error("INVALID_BRAIN_DECISION");
+  rejectUnknown(value, ["brain_protocol_version", "command_id", "brain_attempt_id", "authority_epoch", "expected_objective_revision", "expected_control_revision", "expected_context_revision", "decision_generation", "action", "rationale_summary", "payload"], "brain_decision");
+  if (value.brain_protocol_version !== 2) throw new Error("INVALID_FIELD:brain_protocol_version");
+  const action = value.action; if (!BRAIN_ACTIONS.includes(action as BrainAction)) throw new Error("INVALID_FIELD:action");
+  if (!isRecord(value.payload)) throw new Error("INVALID_FIELD:payload");
+  const requiredRevision = (candidate: unknown, field: string): number => boundedInt(candidate, field, Number.NaN, 1, 10_000);
+  if (value.expected_objective_revision === undefined || value.expected_control_revision === undefined || value.expected_context_revision === undefined || value.decision_generation === undefined) throw new Error("INVALID_BRAIN_DECISION");
+  return { brainProtocolVersion: 2, commandId: requiredString(value.command_id, "command_id", 300), brainAttemptId: requiredString(value.brain_attempt_id, "brain_attempt_id", 300), authorityEpoch: requiredString(value.authority_epoch, "authority_epoch", 300), expectedObjectiveRevision: requiredRevision(value.expected_objective_revision, "expected_objective_revision"), expectedControlRevision: requiredRevision(value.expected_control_revision, "expected_control_revision"), expectedContextRevision: requiredRevision(value.expected_context_revision, "expected_context_revision"), decisionGeneration: requiredRevision(value.decision_generation, "decision_generation"), action: action as BrainAction, rationaleSummary: requiredString(value.rationale_summary, "rationale_summary", 1_000), payload: value.payload as Record<string, JsonValue> };
 }
 
 export function parseCreateRoleInput(value: unknown): RoleCreateInput {

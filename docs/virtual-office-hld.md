@@ -1,5 +1,7 @@
 # Personal AI Control Plane — 虛擬辦公室 HLD
 
+2026-09-09 後續設計：[Hermes 中控大腦第二版 HLD](hermes-control-brain-v2-hld.md) 與 [Detailed Design](hermes-control-brain-v2-detailed-design.md) 定義 Telegram／Hermes 優先入口、自主決策、排程與原對話交付。入口及新 Brain 協定以第二版為準；本文的 Office／Mission／Worker 基礎沿用。第二版核心已本機實作，待雙 repository CI／live 驗收。
+
 文件日期：2026-09-06
 
 文件狀態：設計基準；截至 2026-09-07 已完成本機執行切片（`implemented_local`），包含 Hermes wake-up contract、Mission Coordinator、Worker mission path、Office UI 與 recovery/acceptance probe；尚未取得 production/provider/live evidence。

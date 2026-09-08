@@ -34,5 +34,7 @@ test("Virtual Office HTTP routes expose the seeded office and idempotent intake"
     assert.equal(first.response.status, 202); assert.equal(second.response.status, 202); assert.equal(second.body.missionId, first.body.missionId);
     const detail = await jsonRequest(`/api/v2/missions/${first.body.missionId}`); assert.equal(detail.response.status, 200); assert.equal(detail.body.run.phase, "PLANNING"); assert.equal(detail.body.events[0].type, "mission.created");
     const context = await jsonRequest(`/api/v2/internal/office/commands/${first.body.planCommandId}/context`); assert.equal(context.response.status, 200); assert.equal(context.body.commandId, first.body.planCommandId);
+    const operations = await jsonRequest("/api/v2/internal/office/operations"); assert.equal(operations.response.status, 200); assert.ok(operations.body.items.some((item: any) => item.operationId === "control.missions.create"));
+    const operation = await jsonRequest("/api/v2/internal/office/operations/control.missions.create"); assert.equal(operation.response.status, 200); assert.equal(operation.body.state, "AVAILABLE");
   } finally { missionCoordinator.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); db.close(); await rm(directory, { recursive: true, force: true }); }
 });

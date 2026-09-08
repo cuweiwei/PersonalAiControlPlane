@@ -1,5 +1,7 @@
 # Personal AI Control Plane v2 — HLD
 
+後續設計：[Hermes 中控大腦第二版 HLD](hermes-control-brain-v2-hld.md)（2026-09-09，核心已本機實作，待 live 驗收）在本文執行層上擴充 Mission 決策、Telegram 對話入口與完整業務工具。本文的 fresh DB／cutover 是 2026-09-02 的歷史改版規格；後續設計使用 additive migration，不再次清空現有資料。
+
 狀態：v2 實作基準（2026-09-02）
 
 本文件與 `/Users/tim_hong/Downloads/v2_HLD.md` 對應。實作以 v2 的架構邊界為準；目前 repository 已依使用者要求直接改版，不保留 v1 runtime 相容層，也不執行資料 migration。

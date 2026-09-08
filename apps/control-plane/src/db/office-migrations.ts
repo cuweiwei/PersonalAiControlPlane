@@ -157,4 +157,49 @@ ALTER TABLE mission_inbox ADD COLUMN claim_until INTEGER;
 ALTER TABLE mission_command_attempts ADD COLUMN progress_seq INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_mission_inbox_claim ON mission_inbox(state, claim_until);
 `,],
+  [11, "hermes-control-brain-v2", `
+ALTER TABLE missions ADD COLUMN source_intent_key TEXT;
+ALTER TABLE missions ADD COLUMN conversation_ref TEXT;
+ALTER TABLE missions ADD COLUMN acceptance_json TEXT NOT NULL DEFAULT '[]';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_source_intent ON missions(source_intent_key) WHERE source_intent_key IS NOT NULL;
+ALTER TABLE mission_runs ADD COLUMN brain_protocol_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE mission_runs ADD COLUMN brain_state TEXT NOT NULL DEFAULT 'IDLE';
+ALTER TABLE mission_runs ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE mission_runs ADD COLUMN decision_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE mission_runs ADD COLUMN current_decision_command_id TEXT;
+ALTER TABLE mission_runs ADD COLUMN decision_pending INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS mission_waits (
+  id TEXT PRIMARY KEY, mission_run_id TEXT NOT NULL REFERENCES mission_runs(id),
+  decision_command_id TEXT, reason TEXT NOT NULL, subscription_json TEXT NOT NULL DEFAULT '{}',
+  deadline_at INTEGER, state TEXT NOT NULL, satisfied_event_id TEXT, created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_wait_active ON mission_waits(mission_run_id) WHERE state IN ('PENDING', 'SATISFIED');
+CREATE TABLE IF NOT EXISTS mission_tool_operations (
+  id TEXT PRIMARY KEY, mission_run_id TEXT NOT NULL REFERENCES mission_runs(id),
+  execution_id TEXT, command_id TEXT, tool_id TEXT NOT NULL, operation_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL, effect_class TEXT NOT NULL, state TEXT NOT NULL,
+  external_handle_json TEXT, result_hash TEXT, result_json TEXT, scope_revision INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(operation_key)
+);
+CREATE INDEX IF NOT EXISTS idx_mission_tool_operations_state ON mission_tool_operations(state, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_one_decision_pending ON mission_commands(mission_run_id)
+  WHERE kind = 'mission.decide' AND processing_state IN ('NOT_STARTED', 'ADMITTED', 'RUNNING');
+CREATE TABLE IF NOT EXISTS mission_acceptance_checks (
+  id TEXT PRIMARY KEY, mission_run_id TEXT NOT NULL REFERENCES mission_runs(id), criterion_id TEXT NOT NULL,
+  objective_revision INTEGER NOT NULL, subject_hash TEXT NOT NULL, verdict TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}', reviewer_ref TEXT, producer_command_id TEXT,
+  check_key TEXT NOT NULL, created_at INTEGER NOT NULL,
+  UNIQUE(producer_command_id, check_key)
+);
+CREATE INDEX IF NOT EXISTS idx_mission_acceptance_run ON mission_acceptance_checks(mission_run_id, objective_revision, criterion_id);
+ALTER TABLE mission_deliveries ADD COLUMN delivery_key TEXT;
+ALTER TABLE mission_deliveries ADD COLUMN conversation_ref TEXT;
+ALTER TABLE mission_deliveries ADD COLUMN uncertainty_reason TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_delivery_key ON mission_deliveries(delivery_key) WHERE delivery_key IS NOT NULL;
+`,],
+  [12, "hermes-source-intent-fencing-v1", `
+ALTER TABLE missions ADD COLUMN source_intent_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_source_intent_hash ON missions(source_intent_key, source_intent_hash) WHERE source_intent_key IS NOT NULL;
+`,],
 ];
