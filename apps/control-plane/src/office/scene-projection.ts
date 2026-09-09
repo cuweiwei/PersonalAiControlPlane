@@ -47,6 +47,7 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     return { ...result, workerId: worker?.id, workerName: worker?.name, runtime: binding.runtime, model: modelId };
   };
   const byMember = new Map<string, OfficeActivity[]>();
+  const byWorker = new Map<string, OfficeActivity[]>();
   const steps = db.all<Row>(`SELECT s.*, m.id AS mission_id, m.title AS mission_title, r.control, e.state AS execution_state, e.task_id,
     t.status AS task_status, a.status AS attempt_status, a.worker_id, a.resolved_execution_json,
     c.processing_state, c.transport_state, c.last_error, ca.state AS brain_state, ca.deadline_at AS brain_deadline
@@ -71,6 +72,7 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     const resolved = parse(s.resolved_execution_json); const binding = snapshot.binding ?? {};
     current = { ...current, missionId: s.mission_id, missionTitle: s.mission_title, taskId: s.task_id ?? undefined, stepKey: s.step_key, workerId: s.worker_id ?? binding.worker_id, workerName: workers.find((w) => w.id === s.worker_id)?.name, runtime: resolved.runtime ?? binding.runtime, model: resolved.model?.name ?? resolved.modelId ?? resolved.model_id ?? binding.model_id ?? binding.modelId, activeCount: ["WORKING", "REVIEWING"].includes(current.state) ? 1 : 0 };
     const list = byMember.get(snapshot.memberId) ?? []; list.push(current); byMember.set(snapshot.memberId, list);
+    if (typeof s.worker_id === "string") { const workerList = byWorker.get(s.worker_id) ?? []; workerList.push(current); byWorker.set(s.worker_id, workerList); }
   }
   const commandActivities: OfficeActivity[] = [];
   const commands = db.all<Row>(`SELECT c.*, m.id AS mission_id, m.title AS mission_title, d.state AS delivery_state, ca.state AS brain_state, ca.deadline_at AS brain_deadline FROM mission_commands c
@@ -95,9 +97,24 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     const work = byMember.get(member.id) ?? [];
     // A profile is a role, not an independent copy of the manager's command.
     const isManager = member.binding?.kind === "HERMES_PROFILE" && /^(manager|orchestrator|hermes)$/i.test(member.seatKey);
-    return { ...member, activity: choose(isManager ? [...work, ...commandActivities] : work, defaultActivity(member.binding ?? {})) } as OfficeSceneMember;
+    return { ...member, kind: "ROLE", activity: choose(isManager ? [...work, ...commandActivities] : work, defaultActivity(member.binding ?? {})) } as OfficeSceneMember;
   });
+  const boundWorkerIds = new Set(members.map((member) => member.binding?.worker_id ?? member.binding?.workerId).filter((id): id is string => typeof id === "string"));
+  for (const worker of workers) {
+    if (boundWorkerIds.has(worker.id)) continue;
+    const binding = { kind: "WORKER_SELECTOR", worker_id: worker.id };
+    sceneMembers.push({
+      id: `worker:${worker.id}`,
+      displayName: worker.name,
+      seatKey: `worker-${worker.id}`,
+      kind: "WORKER",
+      role: { name: "Worker" },
+      binding,
+      maxConcurrency: Math.max(1, Number(worker.max_concurrency ?? 1)),
+      activity: choose(byWorker.get(worker.id) ?? [], defaultActivity(binding)),
+    });
+  }
   const recentEvents = db.all<Row>(`SELECT e.event_id, e.type, e.mission_id, e.created_at, m.title FROM mission_events e JOIN missions m ON m.id = e.mission_id WHERE e.office_id = ? AND m.archived_at IS NULL ORDER BY e.seq DESC LIMIT 12`, officeId)
     .map((e) => ({ id: e.event_id, type: e.type, missionId: e.mission_id, title: e.title, at: new Date(e.created_at).toISOString() }));
-  return { observedAt: new Date(now).toISOString(), members: sceneMembers, orchestrator, board, missions, recentEvents };
+  return { observedAt: new Date(now).toISOString(), members: sceneMembers, workerSummary: { total: workers.length, online: workers.filter(workerFresh).length }, orchestrator, board, missions, recentEvents };
 }

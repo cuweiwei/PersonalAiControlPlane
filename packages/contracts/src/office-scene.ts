@@ -17,6 +17,7 @@ export interface OfficeSceneMember {
   id: string;
   displayName: string;
   seatKey: string;
+  kind: "ROLE" | "WORKER";
   role: { name: string };
   binding: Record<string, any>;
   maxConcurrency: number;
@@ -35,6 +36,7 @@ export interface OfficeSceneMission {
 export interface OfficeSceneData {
   observedAt: string;
   members: OfficeSceneMember[];
+  workerSummary: { total: number; online: number };
   orchestrator: OfficeActivity;
   board: { todo: number; active: number; attention: number; completed: number; closed: number; results: number };
   missions: OfficeSceneMission[];

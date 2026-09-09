@@ -10,10 +10,10 @@ export function demoOffice(tick = 0): OfficeSceneData {
   const now = new Date().toISOString();
   const members = names.map((name, i) => {
     const state = states[(i + tick) % states.length];
-    return { id: `demo-${i}`, displayName: name, seatKey: `desk-${i}`, role: { name: roles[i] }, binding: { kind: "WORKER_SELECTOR", runtime: models[i] }, maxConcurrency: 1, activity: { state, reason: "示範動畫：這不是實際執行中的任務", missionId: `demo-mission-${i}`, missionTitle: titles[i], workerName: ["Worker Mac", "Worker NAS", "Worker Windows"][i % 3], model: models[i], activeCount: ["WORKING", "REVIEWING", "DELIVERING"].includes(state) ? 1 : 0 } };
+    return { id: `demo-${i}`, displayName: name, seatKey: `desk-${i}`, kind: "ROLE" as const, role: { name: roles[i] }, binding: { kind: "WORKER_SELECTOR", runtime: models[i] }, maxConcurrency: 1, activity: { state, reason: "示範動畫：這不是實際執行中的任務", missionId: `demo-mission-${i}`, missionTitle: titles[i], workerName: ["Worker Mac", "Worker NAS", "Worker Windows"][i % 3], model: models[i], activeCount: ["WORKING", "REVIEWING", "DELIVERING"].includes(state) ? 1 : 0 } };
   });
   return {
-    observedAt: now, members,
+    observedAt: now, members, workerSummary: { total: 3, online: 3 },
     orchestrator: { state: tick % 2 ? "REVIEWING" : "PLANNING", reason: "示範動畫：Hermes 規劃與審閱姿態", missionTitle: "安排團隊的下一步", activeCount: 1 },
     board: { todo: 1, active: 2, attention: 1, completed: 1, closed: 0, results: 1 },
     missions: titles.map((title, i) => ({ id: `demo-mission-${i}`, title, phase: i === 2 ? "COMPLETED" : "EXECUTING", control: "ACTIVE", waitReason: i === 4 ? "WAITING_OWNER" : null, bucket: (["active", "active", "completed", "todo", "attention"] as const)[i], hasResult: i === 2, updatedAt: now })),

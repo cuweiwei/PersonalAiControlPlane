@@ -66,6 +66,21 @@ test("Office availability respects heartbeat, paused intake, drain and capabilit
   } finally { f.close(); }
 });
 
+test("Office scene shows online Workers that are not assigned to a logical role", () => {
+  const f = setup(); try {
+    const registration = f.workers.register({ name: "第二台 Worker", registrationSecret: "scene-test-second-worker-123", platform: "test", hardware: {} }, f.now + 20);
+    const approved = f.workers.approveRegistration(registration.registrationId, "owner", f.now + 21);
+    f.workers.pollRegistration(registration.registrationId, "scene-test-second-worker-123", f.now + 22);
+    const secondWorkerId = String(approved.workerId);
+    f.workers.markConnected(secondWorkerId, f.now + 23);
+    f.workers.updateCapabilities(secondWorkerId, [{ capability: "generic", runtime: "test", status: "READY" }], f.now + 23);
+    const scene = f.scene(f.now + 24);
+    assert.deepEqual(scene.workerSummary, { total: 2, online: 2 });
+    assert.equal(scene.members.filter((member) => member.kind === "ROLE").length, 1);
+    assert.deepEqual(scene.members.filter((member) => member.kind === "WORKER").map((member) => ({ id: member.binding.worker_id, name: member.displayName, state: member.activity.state })), [{ id: secondWorkerId, name: "第二台 Worker", state: "IDLE" }]);
+  } finally { f.close(); }
+});
+
 test("Hermes transport ACK never animates planning; current admitted progress is required", () => {
   const f = setup(); try {
     const created = f.create(); const commandId = String(created.response.planCommandId);
