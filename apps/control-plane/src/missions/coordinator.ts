@@ -85,12 +85,11 @@ export class MissionCoordinator {
     this.db.transaction(() => {
       // A restarted container cannot retain its old agent processes. Only
       // reconcile terminal Missions; never convert lost work into success.
-      const attempts = this.db.all<Row>("SELECT a.id, a.command_id FROM mission_command_attempts a JOIN mission_commands c ON c.id = a.command_id JOIN mission_runs r ON r.id = c.mission_run_id WHERE a.state = 'UNKNOWN' AND a.created_at < ? AND r.phase IN ('FAILED', 'CANCELLED')", containerStartedAt);
+      const attempts = this.db.all<Row>("SELECT a.id, a.command_id FROM mission_command_attempts a JOIN mission_commands c ON c.id = a.command_id JOIN mission_runs r ON r.id = c.mission_run_id WHERE a.state = 'UNKNOWN' AND a.created_at < ? AND r.phase IN ('FAILED', 'CANCELLED') AND c.kind IN ('plan.requested', 'plan.repair', 'plan.revise', 'mission.decide', 'mission.finalize')", containerStartedAt);
       for (const attempt of attempts) {
         const evidence = { reason: "HERMES_CONTAINER_RESTART_VERIFIED", containerStartedAt, observedAt: now };
         this.db.run("UPDATE mission_command_attempts SET state = 'STOPPED', finished_at = ?, process_evidence_json = ? WHERE id = ?", now, JSON.stringify(evidence), attempt.id);
         this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, attempt.id);
-        this.db.run("UPDATE mission_step_executions SET state = 'CANCELLED', resource_state = 'RELEASED' WHERE command_id = ? AND state = 'UNKNOWN'", attempt.command_id);
         reconciled.push(String(attempt.id));
       }
     });
