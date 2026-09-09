@@ -21,6 +21,7 @@ import { MissionService } from "./missions/mission-service.ts";
 import { PlanService } from "./missions/plan-service.ts";
 import { MissionCoordinator } from "./missions/coordinator.ts";
 import { AgentWorkService } from "./agent-work/agent-work-service.ts";
+import { readHermesCapabilities } from "./missions/hermes-capabilities.ts";
 import { operationCatalog } from "./control/operation-catalog.ts";
 import { safeHash } from "./tasks/task-service.ts";
 import { parseCreateMemberInput, parseCreateMissionInput, parseCreateRoleInput, parseCreateTaskInput, parseRegistrationInput } from "../../../packages/contracts/src/index.ts";
@@ -78,12 +79,12 @@ async function internalPeerAllowed(request: IncomingMessage): Promise<boolean> {
 
 export function createControlPlaneServer(options: Options) {
   const root = options.assetRoot ?? process.env.PAI_CONTROL_WEB_ROOT ?? "./dist/control-web";
-  const capabilitySnapshot = (): Record<string, unknown> => {
+  const capabilitySnapshot = async (): Promise<Record<string, unknown>> => {
     const workers = options.workers.listWorkers().map((worker: any) => ({ workerId: worker.id, executorKind: "WORKER", available: worker.status === "ONLINE" && worker.enabled !== false && worker.drain !== true, status: worker.status, observedAt: worker.lastHeartbeatAt ?? null }));
     const models = options.workers.listModels(false).map((model: any) => ({ workerId: model.workerId, executorKind: "WORKER", capability: model.taskType ?? "llm.inference", runtime: model.runtime, model: model.model, available: model.dispatchable === true, observedAt: model.lastSeenAt ?? null }));
-    const hermesConfigured = Boolean(process.env.PAI_HERMES_OFFICE_URL); const supervisorReadOnly = process.env.PAI_HERMES_SUPERVISOR_READ_ONLY === "true";
+    const hermes = await readHermesCapabilities();
     const items = [...workers, ...models];
-    return { snapshotId: randomUUID(), observedAt: new Date().toISOString(), ttlSeconds: Number(options.settings.get().hermes_brain_capability_ttl_seconds ?? 30), contentHash: safeHash(items), items, hermes: { executorKind: "HERMES_TOOL", available: hermesConfigured && supervisorReadOnly, supervisorReadOnly, tools: ["control.missions", "control.tasks", "control.workers", "control.models", "control.systems", "control.settings", "control.artifacts"], unavailableReasons: hermesConfigured ? supervisorReadOnly ? [] : ["SUPERVISOR_READ_ONLY_NOT_VERIFIED"] : ["HERMES_ADAPTER_NOT_CONFIGURED"] } };
+    return { snapshotId: randomUUID(), observedAt: new Date().toISOString(), ttlSeconds: Number(options.settings.get().hermes_brain_capability_ttl_seconds ?? 30), contentHash: safeHash({ items, hermes }), items, hermes };
   };
   const api = async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
     const parts = pathParts(request); const method = request.method ?? "GET"; const q = query(request);
@@ -107,7 +108,7 @@ export function createControlPlaneServer(options: Options) {
         return writeJson(response, 200, { service: "personal-ai-control-plane", ready: Boolean(options.isReady?.() ?? true), office, coordinator: options.missionCoordinator?.health() ?? null, observedAt: new Date().toISOString() }), true;
       }
       if (parts[2] === "capabilities" && method === "GET" && parts.length === 3) {
-        return writeJson(response, 200, capabilitySnapshot()), true;
+        return writeJson(response, 200, await capabilitySnapshot()), true;
       }
       if (parts[2] === "role-definitions") {
         if (!options.office) throw new Error("OFFICE_NOT_READY");
@@ -232,7 +233,7 @@ export function createControlPlaneServer(options: Options) {
           if (operationId === "control.office.list") return writeJson(response, 200, { operationId, state: "APPLIED", result: { items: options.office?.list() ?? [] } }), true;
           if (operationId === "control.settings.get") return writeJson(response, 200, { operationId, state: "APPLIED", result: options.settings.getEffective() }), true;
           if (operationId === "control.systems.list") return writeJson(response, 200, { operationId, state: "APPLIED", result: options.health.list(Boolean(options.isReady?.() ?? true)) }), true;
-          if (operationId === "control.capabilities.get") return writeJson(response, 200, { operationId, state: "APPLIED", result: capabilitySnapshot() }), true;
+          if (operationId === "control.capabilities.get") return writeJson(response, 200, { operationId, state: "APPLIED", result: await capabilitySnapshot() }), true;
           if (operationId === "control.models.test_templates") { if (!options.modelTests) throw new Error("MODEL_TEST_UNAVAILABLE"); return writeJson(response, 200, { operationId, state: "APPLIED", result: { items: options.modelTests.listTemplates() } }), true; }
           if (operationId === "control.model_preferences.list") { if (!options.modelPreferences) throw new Error("MODEL_PREFERENCE_UNAVAILABLE"); return writeJson(response, 200, { operationId, state: "APPLIED", result: { items: options.modelPreferences.list() } }), true; }
           if (operationId === "control.artifacts.get") { const artifact = options.db.one<Row>("SELECT id, filename, display_filename, media_type, size_bytes, sha256, storage_state FROM artifacts WHERE id = ?", String(parameters.artifact_id)); if (!artifact) throw new Error("ARTIFACT_NOT_FOUND"); return writeJson(response, 200, { operationId, state: "APPLIED", result: { id: artifact.id, filename: artifact.display_filename ?? artifact.filename, mediaType: artifact.media_type, sizeBytes: artifact.size_bytes, sha256: artifact.sha256, availability: artifact.storage_state ?? "AVAILABLE" } }), true; }

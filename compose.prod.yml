@@ -13,6 +13,7 @@ services:
       PAI_DATA_DIR: /data
       PAI_ARTIFACT_DIR: /data/artifacts
       PAI_HERMES_URL: ${PAI_HERMES_URL:-http://hermes-agent:9119}
+      PAI_HERMES_BRAIN_V2_ENABLED: "true"
       PAI_HERMES_OFFICE_URL: ${PAI_HERMES_OFFICE_URL:-http://hermes-agent:9121}
       # Fixed private service identity; the runtime resolves this alias and
       # still compares the real socket peer address (never a forwarded header).
