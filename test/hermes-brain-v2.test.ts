@@ -128,3 +128,22 @@ test("Hermes brain v2 can replace a failed plan with a fenced replan", () => {
     assert.equal(fixture.db.one<{ status: string }>("SELECT status FROM mission_plans WHERE mission_run_id = ? AND revision = 2", created.response.missionRunId)?.status, "ACTIVE");
   } finally { fixture.coordinator.close(); fixture.db.close(); }
 });
+
+test("restart reconciliation releases only older UNKNOWN turns of terminal Missions", () => {
+  const f = setup(); const createdAt = 1_700_000_100_000;
+  try {
+    const created = f.missions.create({ officeId: "office-1", brainProtocolVersion: 2, title: "restart evidence", goal: "test", inputs: [], scope: { workspaceIds: [], capabilities: [], externalEffects: [] }, acceptance: [] }, "restart-test", createdAt);
+    const admitted = f.coordinator.admitCommand(String(created.response.planCommandId), {}, createdAt + 1);
+    f.db.run("UPDATE mission_command_attempts SET state = 'UNKNOWN' WHERE id = ?", admitted.brainAttemptId);
+    f.db.run("UPDATE office_resource_slots SET state = 'UNKNOWN' WHERE brain_attempt_id = ?", admitted.brainAttemptId);
+    assert.throws(() => f.coordinator.reconcileHermesRestart(null, createdAt + 20), /CAPABILITY_UNAVAILABLE/);
+    assert.throws(() => f.coordinator.reconcileHermesRestart(createdAt + 30, createdAt + 20), /CAPABILITY_UNAVAILABLE/);
+    assert.deepEqual(f.coordinator.reconcileHermesRestart(createdAt + 10, createdAt + 20).reconciledBrainAttemptIds, []); // active Mission remains fenced
+    f.db.run("UPDATE mission_runs SET phase = 'FAILED' WHERE id = ?", created.response.missionRunId);
+    assert.deepEqual(f.coordinator.reconcileHermesRestart(createdAt, createdAt + 20).reconciledBrainAttemptIds, []); // same-container attempt
+    assert.deepEqual(f.coordinator.reconcileHermesRestart(createdAt + 10, createdAt + 20).reconciledBrainAttemptIds, [admitted.brainAttemptId]);
+    assert.equal(f.coordinator.recoveryStatus().unknownSlots, 0);
+    assert.equal((f.missions.get(String(created.response.missionId)) as any).run.phase, "FAILED");
+    assert.deepEqual(f.coordinator.reconcileHermesRestart(createdAt + 10, createdAt + 20).reconciledBrainAttemptIds, []);
+  } finally { f.coordinator.close(); f.db.close(); }
+});

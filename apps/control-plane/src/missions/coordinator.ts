@@ -79,6 +79,25 @@ export class MissionCoordinator {
     return this.recoveryStatus();
   }
 
+  reconcileHermesRestart(containerStartedAt: unknown, now = Date.now()): Record<string, unknown> {
+    if (typeof containerStartedAt !== "number" || !Number.isFinite(containerStartedAt) || containerStartedAt <= 0 || containerStartedAt > now) throw new Error("CAPABILITY_UNAVAILABLE");
+    const reconciled: string[] = [];
+    this.db.transaction(() => {
+      // A restarted container cannot retain its old agent processes. Only
+      // reconcile terminal Missions; never convert lost work into success.
+      const attempts = this.db.all<Row>("SELECT a.id, a.command_id FROM mission_command_attempts a JOIN mission_commands c ON c.id = a.command_id JOIN mission_runs r ON r.id = c.mission_run_id WHERE a.state = 'UNKNOWN' AND a.created_at < ? AND r.phase IN ('FAILED', 'CANCELLED')", containerStartedAt);
+      for (const attempt of attempts) {
+        const evidence = { reason: "HERMES_CONTAINER_RESTART_VERIFIED", containerStartedAt, observedAt: now };
+        this.db.run("UPDATE mission_command_attempts SET state = 'STOPPED', finished_at = ?, process_evidence_json = ? WHERE id = ?", now, JSON.stringify(evidence), attempt.id);
+        this.db.run("UPDATE office_resource_slots SET state = 'FREE', execution_id = NULL, brain_attempt_id = NULL, released_at = ? WHERE brain_attempt_id = ?", now, attempt.id);
+        this.db.run("UPDATE mission_step_executions SET state = 'CANCELLED', resource_state = 'RELEASED' WHERE command_id = ? AND state = 'UNKNOWN'", attempt.command_id);
+        reconciled.push(String(attempt.id));
+      }
+    });
+    this.events.publish({ type: "office.hermes.restart_reconciled", brainAttemptIds: reconciled, containerStartedAt });
+    return { ...this.recoveryStatus(), reconciledBrainAttemptIds: reconciled };
+  }
+
   recoveryStatus(): Record<string, unknown> {
     const mode = Boolean(parseJson(this.db.one<Row>("SELECT value_json FROM runtime_metadata WHERE key = 'office_recovery_mode'")?.value_json, false));
     const epoch = String(parseJson(this.db.one<Row>("SELECT value_json FROM runtime_metadata WHERE key = 'office_authority_epoch'")?.value_json, ""));

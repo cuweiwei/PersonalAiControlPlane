@@ -9,7 +9,7 @@ export async function readHermesCapabilities(origin = process.env.PAI_HERMES_OFF
     if (body.service !== "hermes-office-adapter" || !body.brain_protocol_versions?.includes(2)) return unavailable("HERMES_PROTOCOL_UNSUPPORTED");
     if (body.supervisor_read_only !== true) return unavailable("SUPERVISOR_READ_ONLY_NOT_VERIFIED");
     if (body.driver?.available !== true) return unavailable("HERMES_BRAIN_UNAVAILABLE");
-    return { executorKind: "HERMES_TOOL", available: true, supervisorReadOnly: true, tools: [] as string[], unavailableReasons: [] as string[] };
+    return { executorKind: "HERMES_TOOL", available: true, supervisorReadOnly: true, containerStartedAt: body.container_started_at, tools: [] as string[], unavailableReasons: [] as string[] };
   } catch {
     return unavailable("HERMES_CAPABILITY_PROBE_FAILED");
   }

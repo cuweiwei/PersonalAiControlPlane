@@ -98,6 +98,11 @@ export function createControlPlaneServer(options: Options) {
         if (method === "GET" && parts.length === 4) return writeJson(response, 200, options.missionCoordinator.recoveryStatus()), true;
         if (method === "POST" && parts.length === 4) {
           const input = await bodyJson(request); const action = String(input.action ?? "").toUpperCase();
+          if (action === "RECONCILE_HERMES_RESTART") {
+            const capability = await readHermesCapabilities();
+            if (!capability.available || !("containerStartedAt" in capability)) throw new Error("CAPABILITY_UNAVAILABLE");
+            return writeJson(response, 200, options.missionCoordinator.reconcileHermesRestart(capability.containerStartedAt)), true;
+          }
           if (action === "ENTER") return writeJson(response, 202, options.missionCoordinator.enterRecovery()), true;
           if (action === "CLEAR") return writeJson(response, 200, options.missionCoordinator.leaveRecovery()), true;
           throw new Error("INVALID_RECOVERY_ACTION");
