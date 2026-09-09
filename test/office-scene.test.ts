@@ -81,6 +81,16 @@ test("Office scene shows online Workers that are not assigned to a logical role"
   } finally { f.close(); }
 });
 
+test("Office scene recognizes legacy Worker bindings without a kind field", () => {
+  const f = setup(); try {
+    f.db.run("UPDATE office_members SET binding_json = ? WHERE id = ?", JSON.stringify({ worker_id: f.workerId, runtime: "test", capabilities: ["generic"] }), f.member.id);
+    const member = f.scene().members.find((item) => item.kind === "ROLE");
+    assert.equal(member?.activity.state, "IDLE");
+    assert.equal(member?.activity.workerId, f.workerId);
+    assert.notEqual(member?.activity.reason, "尚未綁定執行資源");
+  } finally { f.close(); }
+});
+
 test("Hermes transport ACK never animates planning; current admitted progress is required", () => {
   const f = setup(); try {
     const created = f.create(); const commandId = String(created.response.planCommandId);

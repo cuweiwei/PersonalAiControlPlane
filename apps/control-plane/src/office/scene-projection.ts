@@ -32,10 +32,11 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     if (!enabled) return activity("WAITING", "辦公室尚未啟用");
     if (recovery) return activity("UNKNOWN", "復原對帳中，暫停新派工");
     if (binding.kind === "HERMES_PROFILE") return activity(hermesConfigured ? "WAITING" : "OFFLINE", hermesConfigured ? "等待 Hermes 接案；連線設定不代表正在執行" : "尚未設定 Hermes 連線");
-    if (binding.kind !== "WORKER_SELECTOR") return activity("WAITING", "尚未綁定執行資源");
     const workerId = binding.worker_id ?? binding.workerId;
     const modelId = binding.model_id ?? binding.modelId;
     const runtime = binding.runtime === "auto" ? undefined : binding.runtime;
+    const isWorkerSelector = binding.kind === "WORKER_SELECTOR" || !binding.kind && (typeof workerId === "string" || typeof modelId === "string" || typeof binding.runtime === "string" || Array.isArray(binding.capabilities));
+    if (!isWorkerSelector) return activity("WAITING", "尚未綁定執行資源");
     const candidates = workers.filter((w) => !workerId || w.id === workerId);
     const online = candidates.filter(workerFresh);
     const available = online.find((w) => !w.drain && w.occupied < w.max_concurrency && !preferences.some((p) => p.worker_id === w.id && (p.mode !== "NORMAL" || p.pause_id && (p.pause_indefinite || p.pause_until > now))) &&
