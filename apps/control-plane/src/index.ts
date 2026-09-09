@@ -19,6 +19,7 @@ import { MissionService } from "./missions/mission-service.ts";
 import { PlanService } from "./missions/plan-service.ts";
 import { MissionCommandDispatcher } from "./missions/command-dispatcher.ts";
 import { MissionCoordinator } from "./missions/coordinator.ts";
+import { AgentWorkService } from "./agent-work/agent-work-service.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
 function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -41,6 +42,7 @@ const modelPreferences = new ModelPreferenceService(db);
 const onboarding = new OnboardingService(db);
 const office = new OfficeService(db, events, settings);
 const missions = new MissionService(db, events, settings);
+const agentWork = new AgentWorkService({ db, events, settings, artifacts, missions });
 const plans = new PlanService(db, events, missions);
 const missionCommands = new MissionCommandDispatcher(db);
 const missionCoordinator = new MissionCoordinator(db, events, tasks, missions, plans, missionCommands, coordinator);
@@ -51,7 +53,7 @@ let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }

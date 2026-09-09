@@ -202,4 +202,173 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_delivery_key ON mission_deliveries
 ALTER TABLE missions ADD COLUMN source_intent_hash TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_source_intent_hash ON missions(source_intent_key, source_intent_hash) WHERE source_intent_key IS NOT NULL;
 `,],
+  [13, "personal-agent-capabilities-v1", `
+CREATE TABLE IF NOT EXISTS agent_operations (
+  id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, operation_kind TEXT NOT NULL,
+  resource_kind TEXT NOT NULL, resource_id TEXT, logical_scope TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
+  authority_epoch TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+  result_json TEXT, error_code TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  UNIQUE(logical_scope, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS agent_commands (
+  id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES agent_operations(id),
+  target TEXT NOT NULL, kind TEXT NOT NULL, logical_key TEXT NOT NULL,
+  envelope_json TEXT NOT NULL, request_hash TEXT NOT NULL,
+  transport_state TEXT NOT NULL, processing_state TEXT NOT NULL,
+  next_send_at INTEGER NOT NULL, claim_token TEXT, claim_until INTEGER,
+  delivery_attempts INTEGER NOT NULL DEFAULT 0, result_revision INTEGER NOT NULL DEFAULT 0,
+  result_hash TEXT, result_json TEXT, last_error TEXT, created_at INTEGER NOT NULL,
+  UNIQUE(operation_id, logical_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_commands_due ON agent_commands(transport_state, next_send_at);
+CREATE TABLE IF NOT EXISTS agent_inbox (
+  producer_id TEXT NOT NULL, event_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
+  payload_json TEXT NOT NULL, state TEXT NOT NULL, result_json TEXT,
+  received_at INTEGER NOT NULL, processed_at INTEGER,
+  PRIMARY KEY(producer_id, event_id)
+);
+CREATE TABLE IF NOT EXISTS agent_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+  producer_id TEXT NOT NULL, source_key TEXT NOT NULL, subject_kind TEXT NOT NULL,
+  subject_id TEXT NOT NULL, subject_revision INTEGER NOT NULL, type TEXT NOT NULL,
+  payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+  UNIQUE(producer_id, source_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_subject ON agent_events(subject_kind, subject_id, seq);
+CREATE TABLE IF NOT EXISTS agent_projection_cursors (
+  consumer TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS work_skills (
+  id TEXT PRIMARY KEY, office_id TEXT NOT NULL REFERENCES offices(id), name TEXT NOT NULL,
+  active_version INTEGER, revision INTEGER NOT NULL DEFAULT 1, next_version INTEGER NOT NULL DEFAULT 1,
+  archived_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS work_skill_versions (
+  skill_id TEXT NOT NULL REFERENCES work_skills(id), version INTEGER NOT NULL CHECK(version > 0),
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id), content_hash TEXT NOT NULL, spec_json TEXT NOT NULL,
+  source_mission_id TEXT REFERENCES missions(id), source_result_hash TEXT,
+  validation_state TEXT NOT NULL, compatibility_state TEXT NOT NULL, lifecycle TEXT NOT NULL,
+  state_revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+  PRIMARY KEY(skill_id, version)
+);
+CREATE TABLE IF NOT EXISTS skill_validation_runs (
+  id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, skill_version INTEGER NOT NULL, case_key TEXT NOT NULL,
+  mode TEXT NOT NULL, input_hash TEXT NOT NULL, mission_id TEXT REFERENCES missions(id),
+  operation_id TEXT NOT NULL REFERENCES agent_operations(id), evidence_json TEXT NOT NULL,
+  state TEXT NOT NULL, created_at INTEGER NOT NULL,
+  UNIQUE(operation_id, case_key),
+  FOREIGN KEY(skill_id, skill_version) REFERENCES work_skill_versions(skill_id, version)
+);
+CREATE TABLE IF NOT EXISTS mission_skill_bindings (
+  mission_run_id TEXT PRIMARY KEY REFERENCES mission_runs(id), skill_id TEXT NOT NULL,
+  skill_version INTEGER NOT NULL, content_hash TEXT NOT NULL, parameters_json TEXT NOT NULL,
+  capability_snapshot_hash TEXT NOT NULL,
+  FOREIGN KEY(skill_id, skill_version) REFERENCES work_skill_versions(skill_id, version)
+);
+CREATE TABLE IF NOT EXISTS routine_bindings (
+  id TEXT PRIMARY KEY, office_id TEXT NOT NULL REFERENCES offices(id), native_key TEXT NOT NULL UNIQUE,
+  routine_id TEXT UNIQUE, desired_revision INTEGER NOT NULL DEFAULT 1, effective_revision INTEGER,
+  native_revision INTEGER, remote_state TEXT NOT NULL, sync_state TEXT NOT NULL,
+  admission_blocked INTEGER NOT NULL DEFAULT 1 CHECK(admission_blocked IN (0,1)),
+  next_fire_at INTEGER, observed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routine_binding_revisions (
+  binding_id TEXT NOT NULL REFERENCES routine_bindings(id), revision INTEGER NOT NULL,
+  skill_id TEXT NOT NULL, skill_version INTEGER NOT NULL, intent_json TEXT NOT NULL,
+  request_hash TEXT NOT NULL, operation_id TEXT NOT NULL REFERENCES agent_operations(id),
+  created_at INTEGER NOT NULL, PRIMARY KEY(binding_id, revision),
+  FOREIGN KEY(skill_id, skill_version) REFERENCES work_skill_versions(skill_id, version)
+);
+CREATE TABLE IF NOT EXISTS routine_occurrences (
+  source_key TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES routine_bindings(id),
+  binding_revision INTEGER NOT NULL, native_revision INTEGER NOT NULL, payload_hash TEXT NOT NULL,
+  payload_json TEXT NOT NULL, scheduled_for INTEGER, state TEXT NOT NULL, reason_code TEXT,
+  mission_id TEXT UNIQUE REFERENCES missions(id), received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goals (
+  id TEXT PRIMARY KEY, office_id TEXT NOT NULL REFERENCES offices(id), title TEXT NOT NULL,
+  objective_json TEXT NOT NULL, scope_json TEXT NOT NULL, limits_json TEXT NOT NULL,
+  state TEXT NOT NULL, health TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+  projection_revision INTEGER NOT NULL DEFAULT 1, deadline_at INTEGER, next_review_at INTEGER,
+  review_generation INTEGER NOT NULL DEFAULT 0, review_state TEXT NOT NULL DEFAULT 'IDLE',
+  review_pending INTEGER NOT NULL DEFAULT 0 CHECK(review_pending IN (0,1)),
+  review_schedule_ref_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goal_milestones (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), ordinal INTEGER NOT NULL,
+  title TEXT NOT NULL, required INTEGER NOT NULL CHECK(required IN (0,1)), criteria_json TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL, acceptance_json TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(goal_id, ordinal)
+);
+CREATE TABLE IF NOT EXISTS goal_mission_links (
+  mission_id TEXT PRIMARY KEY REFERENCES missions(id), goal_id TEXT NOT NULL REFERENCES goals(id),
+  milestone_id TEXT REFERENCES goal_milestones(id), goal_revision INTEGER NOT NULL,
+  proposal_key TEXT NOT NULL, work_fingerprint TEXT NOT NULL,
+  blocked_by_goal_control INTEGER NOT NULL DEFAULT 0 CHECK(blocked_by_goal_control IN (0,1)),
+  created_at INTEGER NOT NULL, UNIQUE(goal_id, proposal_key)
+);
+CREATE INDEX IF NOT EXISTS idx_goal_links_goal ON goal_mission_links(goal_id, work_fingerprint);
+CREATE TABLE IF NOT EXISTS goal_budget_accounts (
+  goal_id TEXT NOT NULL REFERENCES goals(id), period_key TEXT NOT NULL, dimension TEXT NOT NULL,
+  limit_amount INTEGER NOT NULL CHECK(limit_amount >= 0), consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed >= 0),
+  reserved INTEGER NOT NULL DEFAULT 0 CHECK(reserved >= 0), state TEXT NOT NULL,
+  period_start INTEGER NOT NULL, period_end INTEGER, PRIMARY KEY(goal_id, period_key, dimension)
+);
+CREATE TABLE IF NOT EXISTS goal_budget_reservations (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, period_key TEXT NOT NULL, dimension TEXT NOT NULL,
+  mission_run_id TEXT REFERENCES mission_runs(id), operation_id TEXT REFERENCES agent_operations(id),
+  remaining INTEGER NOT NULL CHECK(remaining >= 0), state TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  CHECK((mission_run_id IS NOT NULL) <> (operation_id IS NOT NULL)),
+  UNIQUE(mission_run_id, dimension), UNIQUE(operation_id, dimension),
+  FOREIGN KEY(goal_id, period_key, dimension) REFERENCES goal_budget_accounts(goal_id, period_key, dimension)
+);
+CREATE TABLE IF NOT EXISTS goal_budget_entries (
+  id TEXT PRIMARY KEY, reservation_id TEXT NOT NULL REFERENCES goal_budget_reservations(id),
+  charge_key TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount >= 0), evidence_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL, UNIQUE(reservation_id, charge_key)
+);
+CREATE TABLE IF NOT EXISTS attention_items (
+  id TEXT PRIMARY KEY, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL, reason_code TEXT NOT NULL,
+  episode INTEGER NOT NULL, severity TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+  change_revision INTEGER NOT NULL DEFAULT 1, fingerprint TEXT NOT NULL, evidence_json TEXT NOT NULL,
+  action_ref_json TEXT, deadline_at INTEGER, snooze_until INTEGER, read_through_revision INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  UNIQUE(subject_kind, subject_id, reason_code, episode)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attention_open ON attention_items(subject_kind, subject_id, reason_code) WHERE state IN ('OPEN', 'SNOOZED');
+CREATE TABLE IF NOT EXISTS attention_notifications (
+  id TEXT PRIMARY KEY, attention_id TEXT NOT NULL REFERENCES attention_items(id), change_revision INTEGER NOT NULL,
+  target_ref TEXT NOT NULL, policy_revision INTEGER NOT NULL, delivery_key TEXT NOT NULL UNIQUE,
+  disposition TEXT NOT NULL, receipt_revision INTEGER NOT NULL DEFAULT 0, receipt_json TEXT,
+  created_at INTEGER NOT NULL, UNIQUE(attention_id, change_revision, target_ref)
+);
+CREATE TABLE IF NOT EXISTS agent_artifact_refs (
+  owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, owner_version INTEGER NOT NULL DEFAULT 1,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id), purpose TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}',
+  pin_state TEXT NOT NULL, retain_until INTEGER, created_at INTEGER NOT NULL,
+  PRIMARY KEY(owner_kind, owner_id, owner_version, artifact_id, purpose)
+);
+CREATE TABLE IF NOT EXISTS browser_sessions (
+  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES workers(id), broker_id TEXT NOT NULL,
+  profile_ref TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1, controller TEXT NOT NULL, mission_run_id TEXT REFERENCES mission_runs(id),
+  lease_until INTEGER, policy_hash TEXT NOT NULL, broker_snapshot_seq INTEGER NOT NULL DEFAULT 0,
+  observed_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_active_profile ON browser_sessions(broker_id, profile_ref) WHERE state NOT IN ('CLOSED', 'EXPIRED');
+CREATE TABLE IF NOT EXISTS browser_action_receipts (
+  operation_key TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES browser_sessions(id), generation INTEGER NOT NULL,
+  action_seq INTEGER NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL, receipt_revision INTEGER NOT NULL,
+  receipt_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  UNIQUE(session_id, generation, action_seq)
+);
+CREATE TABLE IF NOT EXISTS teaching_sessions (
+  id TEXT PRIMARY KEY, browser_session_id TEXT NOT NULL REFERENCES browser_sessions(id), revision INTEGER NOT NULL DEFAULT 1,
+  state TEXT NOT NULL, allowed_origins_json TEXT NOT NULL, started_at INTEGER, stopped_at INTEGER,
+  expires_at INTEGER NOT NULL, manifest_artifact_id TEXT REFERENCES artifacts(id), draft_skill_id TEXT REFERENCES work_skills(id),
+  capture_hash TEXT, error_code TEXT, created_at INTEGER NOT NULL
+);
+`,],
 ];

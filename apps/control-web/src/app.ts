@@ -8,6 +8,10 @@ const nav = [
   ["/", "工作總覽"],
   ["/office", "Virtual Office"],
   ["/missions", "Missions"],
+  ["/skills", "工作技能"],
+  ["/goals", "長期目標"],
+  ["/routines", "例行工作"],
+  ["/attention", "待處理"],
   ["/tasks", "任務"],
   ["/workers", "執行裝置"],
   ["/models", "模型"],
@@ -271,6 +275,19 @@ function Settings({ refreshVersion }: { refreshVersion: number }) {
   return h(React.Fragment, null, h("p", { className: "eyebrow" }, "執行環境設定"), h("h1", null, "設定"), h("p", null, "只送出有變更的欄位；環境變數鎖定的欄位不能在此修改。"), dirty ? h("p", { className: "notice", role: "status" }, "目前有未保存草稿；背景同步已暫停。") : null, h("form", { className: "editor", onSubmit: save }, fields.map((field) => { const value = draft[field.key]; const locked = field.editable === false; return h("label", { key: field.key }, `${field.label}${field.unit ? `（${field.unit}）` : ""}`, h("small", null, `${field.description} · 來源：${field.source} · 套用：${field.applyScope}`), h("input", { type: field.type === "boolean" ? "checkbox" : field.type === "integer" ? "number" : "text", disabled: locked, checked: field.type === "boolean" ? Boolean(value) : undefined, value: field.type !== "boolean" ? value ?? "" : undefined, min: field.min ?? undefined, max: field.max ?? undefined, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { setDirty(true); setDraft({ ...draft, [field.key]: field.type === "boolean" ? event.target.checked : field.type === "integer" ? Number(event.target.value) : event.target.value }); } })); }), h("button", { type: "submit" }, "保存設定"), message ? h("p", { className: "notice", role: "status" }, message) : null));
 }
 
+function AgentWorkPage({ kind, refreshVersion }: { kind: "skills" | "goals" | "routines" | "attention" | "browser-sessions"; refreshVersion: number }) {
+  const labels: Record<string, string> = { skills: "工作技能", goals: "長期目標", routines: "例行工作", attention: "待處理事項", "browser-sessions": "工作電腦" };
+  const [data, setData] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null);
+  useEffect(() => { const listPath = kind === "browser-sessions" ? "/api/v2/browser-sessions" : `/api/v2/${kind}`; Promise.all([request(listPath), request("/api/v2/agent-work/capabilities")]).then(([items, capabilities]) => setData({ items: items.items ?? [], capabilities })).catch(setError); }, [kind, refreshVersion]);
+  if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const capability = data.capabilities?.[kind === "browser-sessions" ? "browser" : kind] ?? null; const items = data.items as Item[];
+  return h(React.Fragment, null,
+    h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "PERSONAL AGENT WORK"), h("h1", null, labels[kind])), h(Status, { value: capability?.available ? "READY" : capability?.configured ? "UNAVAILABLE" : "DISABLED" })),
+    capability && !capability.available ? h("p", { className: "notice" }, `目前不能執行此能力：${capability.reason ?? "等待依賴驗證"}。頁面只顯示 Control Plane 已持久化的事實。`) : null,
+    h("div", { className: "metric-grid" }, h(Card, { title: "記錄數", value: items.length }), h(Card, { title: "最後觀察", value: time(items[0]?.updatedAt ?? items[0]?.observedAt) }), h(Card, { title: "能力", value: capability?.available ? "可用" : "未驗證" })),
+    items.length === 0 ? h("p", { className: "notice" }, "目前沒有已持久化的記錄。") : h("div", { className: "card-grid" }, items.map((item) => h("article", { className: "card", key: item.id ?? item.sourceKey }, h("div", { className: "card-title-row" }, h("h2", null, item.name ?? item.title ?? item.reasonCode ?? item.profileRef ?? item.id), h(Status, { value: item.lifecycle ?? item.state ?? item.syncState ?? item.severity ?? "UNKNOWN" })), h(Details, { item: Object.fromEntries(Object.entries(item).filter(([key]) => !["spec", "objective", "scope", "limits", "evidence", "payload", "milestones", "missions", "versions", "refs"].includes(key))) }), item.versions ? h("p", null, `版本 ${item.versions.length} · active ${item.activeVersion ?? "—"}`) : null, item.milestones ? h("p", null, `里程碑 ${item.milestones.filter((milestone: Item) => milestone.state === "ACCEPTED").length}/${item.milestones.length} 已驗收`) : null))));
+}
+
 function OfficeMembers({ refreshVersion }: { refreshVersion: number }) {
   const [office, setOffice] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null);
   useEffect(() => { request("/api/v2/offices").then((value) => value.items?.[0] ? request(`/api/v2/offices/${encodeURIComponent(value.items[0].id)}`) : null).then(setOffice).catch(setError); }, [refreshVersion]);
@@ -337,6 +354,7 @@ export function App({ initialPath = currentPath() }: { initialPath?: string }) {
     if (parts[0] === "missions" && parts[1] === "new") return h(MissionIntake);
     if (parts[0] === "missions" && parts[1]) return h(MissionDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "missions") return h(MissionList, { refreshVersion });
+    if (["skills", "goals", "routines", "attention", "browser-sessions"].includes(parts[0] ?? "")) return h(AgentWorkPage, { kind: (parts[0] ?? "skills") as "skills" | "goals" | "routines" | "attention" | "browser-sessions", refreshVersion });
     if (parts[0] === "workers" && parts[1] === "new") return h(WorkerOnboarding);
     if (parts[0] === "workers" && parts[1]) return h(WorkerDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "workers") return h(Workers, { refreshVersion });

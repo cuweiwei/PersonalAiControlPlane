@@ -26,7 +26,7 @@ const write = (operationId: string, group: string, action: string, effectClass: 
  * request and route through the owning service; the catalog never grants scope
  * or exposes an arbitrary HTTP/shell escape hatch.
  */
-export function operationCatalog(options: { artifacts: boolean; modelTests: boolean; modelPreferences: boolean; onboarding: boolean }): OperationDescriptor[] {
+export function operationCatalog(options: { artifacts: boolean; modelTests: boolean; modelPreferences: boolean; onboarding: boolean; agentWork?: boolean }): OperationDescriptor[] {
   return [
     read("control.missions.list", "control.missions", "list"),
     read("control.missions.get", "control.missions", "get", ["mission_id"]),
@@ -94,6 +94,26 @@ export function operationCatalog(options: { artifacts: boolean; modelTests: bool
     write("control.missions.retry_delivery", "control.missions", "retry_delivery", "EXTERNAL_EFFECT", ["mission_id", "delivery_id"], false, "DELIVERY_RETRY_NOT_IMPLEMENTED"),
     read("control.operations.catalog", "control.operations", "catalog"),
     read("control.operations.status", "control.operations", "status", ["operation_id"]),
+    read("control.skills.list", "control.skills", "list", [], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.skills.get", "control.skills", "get", ["skill_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.skills.version", "control.skills", "version", ["skill_id", "version"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.skills.draft_create", "control.skills", "draft_create", "IDEMPOTENT_WRITE", ["office_id", "bundle_artifact_id", "content_hash", "spec"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.skills.validate", "control.skills", "validate", "IDEMPOTENT_WRITE", ["skill_id", "version", "mode"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.skills.activate", "control.skills", "activate", "IDEMPOTENT_WRITE", ["skill_id", "version", "expected_revision"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.skills.run", "control.skills", "run", "IDEMPOTENT_WRITE", ["skill_id", "version"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.routines.list", "control.routines", "list", [], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.routines.get", "control.routines", "get", ["binding_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.routines.history", "control.routines", "history", ["binding_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.routines.create", "control.routines", "create", "IDEMPOTENT_WRITE", ["office_id", "skill_id", "trigger_intent"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.goals.list", "control.goals", "list", [], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.goals.get", "control.goals", "get", ["goal_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.goals.budget", "control.goals", "budget", ["goal_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.goals.events", "control.goals", "events", ["goal_id"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.goals.create", "control.goals", "create", "IDEMPOTENT_WRITE", ["office_id", "title", "objective"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.goals.command", "control.goals", "command", "IDEMPOTENT_WRITE", ["goal_id", "kind", "expected_revision"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.attention.list", "control.attention", "list", [], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    write("control.memory.request", "control.memory", "request", "IDEMPOTENT_WRITE", ["mission_id", "expected_objective_revision", "kind"], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
+    read("control.agent_work.events", "control.agent_work", "events", [], options.agentWork === true, options.agentWork ? undefined : "AGENT_WORK_UNAVAILABLE"),
     write("hermes.schedules.create", "hermes.schedules", "create", "IDEMPOTENT_WRITE", ["schedule_expression", "timezone", "instruction"], false, "HERMES_SCHEDULER_OWNED"),
     read("hermes.schedules.list", "hermes.schedules", "list", [], false, "HERMES_SCHEDULER_OWNED"),
     read("hermes.schedules.get", "hermes.schedules", "get", ["schedule_id"], false, "HERMES_SCHEDULER_OWNED"),

@@ -1,6 +1,6 @@
 # v2 實作狀態與證據
 
-更新：2026-09-07
+更新：2026-09-09
 
 ## 本機 repository evidence
 
@@ -28,10 +28,14 @@
 | NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |
+| Personal Agent Work durable domain | `implemented_local` | migration 13、`AgentWorkService`、Skill immutable version／artifact pin／static validation、Routine binding／receipt fence／occurrence dedup、Goal／milestone／budget、Attention projection、Artifact view、Browser/Teaching fail-closed routes；`test/agent-work.test.ts` |
+| Personal Agent Work external lanes | `implemented_local` with capability gates | Hermes native scheduler、ContextHub memory authority、browser broker 與 teaching executor 尚未在本 repository 驗證；未收到 typed receipt 時維持 `PENDING`／`CAPABILITY_UNAVAILABLE`，不宣稱 live/provider 完成 |
 
 ## 明確未宣告的事項
 
 本文件不把 UI 顯示、health、executor flag 或 unit/integration tests 誤當成 production、provider、memory authority、backup/restore 或實體 worker acceptance。ContextHub 仍是記憶 authority；Control Plane 沒有 memory projection 或 conversation archive。Virtual Office 的本機實作已涵蓋 durable wake-up contract、Coordinator、Worker mission path、UI 與 recovery gates；尚不代表真實 Hermes provider turn、實體 Worker 執行、跨服務重啟、備份還原或 Mission 可跨日完成。
+
+Personal Agent Work 的本機 domain 已可保存可追溯的技能、例行 binding、Goal／budget、Attention 與成果投影；技能 `VALIDATE_ONLY` 只代表靜態核對，不能直接升成 READY。Hermes／ContextHub／browser broker 的 receipt、provider、重啟與實體 Worker 證據仍須在各自 repository／部署環境完成。
 
 ## 驗證命令
 
