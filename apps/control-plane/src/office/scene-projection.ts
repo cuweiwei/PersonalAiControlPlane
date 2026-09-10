@@ -81,7 +81,7 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     LEFT JOIN mission_deliveries d ON d.command_id = c.id
     LEFT JOIN mission_command_attempts ca ON ca.id = c.current_brain_attempt_id
     WHERE m.office_id = ? AND m.archived_at IS NULL AND c.kind IN ('plan.requested', 'mission.finalize', 'mission.deliver')
-    AND c.processing_state NOT IN ('APPLIED', 'CANCELLED', 'STALE') AND (r.phase NOT IN ('COMPLETED', 'CANCELLED') OR c.kind = 'mission.deliver')
+    AND c.processing_state NOT IN ('APPLIED', 'CANCELLED', 'STALE') AND (r.phase NOT IN ('COMPLETED', 'CANCELLED', 'FAILED') OR c.kind = 'mission.deliver')
     AND (d.state IS NULL OR d.state <> 'DELIVERED')`, officeId);
   for (const c of commands) {
     let current = activity("WAITING", "等待 Hermes 實際領取並執行");

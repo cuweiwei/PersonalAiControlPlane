@@ -108,6 +108,19 @@ test("Hermes transport ACK never animates planning; current admitted progress is
   } finally { f.close(); }
 });
 
+test("Historical failed Mission commands do not override current Hermes activity", () => {
+  const f = setup(); try {
+    const created = f.create("historical failure"); const commandId = String(created.response.planCommandId);
+    f.db.run("UPDATE mission_runs SET phase = 'FAILED', wait_summary_json = ?, finished_at = ? WHERE mission_id = ?", JSON.stringify({ reason: "MAX_ELAPSED_EXCEEDED" }), f.now + 60_000, created.response.missionId);
+    f.db.run("UPDATE mission_commands SET processing_state = 'FAILED', last_error = ? WHERE id = ?", "CP_ATTEMPT_UNKNOWN_NO_LOCAL_HANDLE", commandId);
+    const scene = f.scene();
+    assert.equal(scene.orchestrator.state, "WAITING");
+    assert.equal(scene.orchestrator.reason, "等待 Hermes 接案；連線設定不代表正在執行");
+    assert.equal(scene.board.attention, 1);
+    assert.equal(scene.missions[0].bucket, "attention");
+  } finally { f.close(); }
+});
+
 test("Recovery mode overrides busy and available avatars with unknown state", () => {
   const f = setup(); try {
     const work = f.execute(); f.tasks.accept(work.taskId, work.attemptId, f.workerId, f.now + 10); f.tasks.started(work.taskId, work.attemptId, f.workerId, f.now + 11);
