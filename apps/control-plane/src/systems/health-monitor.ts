@@ -12,7 +12,7 @@ export class HealthMonitor {
     const systems = [
       { id: "hermes", name: "Hermes", type: "assistant", baseUrl: process.env.PAI_HERMES_URL ?? "http://hermes-agent:9119", healthPath: process.env.PAI_HERMES_HEALTH_PATH ?? "/api/health", entryUrl: process.env.PAI_HERMES_ENTRY_URL ?? null },
       { id: "contexthub", name: "ContextHub", type: "memory", baseUrl: process.env.PAI_CONTEXTHUB_URL ?? "http://contexthub:8787", healthPath: process.env.PAI_CONTEXTHUB_HEALTH_PATH ?? "/health", entryUrl: process.env.PAI_CONTEXTHUB_ENTRY_URL ?? null },
-      { id: "information-radar", name: "Information Radar", type: "radar", baseUrl: process.env.PAI_INFORMATION_RADAR_URL ?? "http://information-radar-radar-web:8787", healthPath: process.env.PAI_INFORMATION_RADAR_HEALTH_PATH ?? "/health/ready", entryUrl: process.env.PAI_INFORMATION_RADAR_ENTRY_URL ?? null },
+      { id: "information-radar", name: "Information Radar", type: "radar", baseUrl: process.env.PAI_INFORMATION_RADAR_URL ?? "http://radar-web:8787", healthPath: process.env.PAI_INFORMATION_RADAR_HEALTH_PATH ?? "/health/ready", entryUrl: process.env.PAI_INFORMATION_RADAR_ENTRY_URL ?? null },
     ];
     for (const system of systems) this.db.run("INSERT INTO systems(id, name, type, base_url, health_path, enabled, entry_url) VALUES (?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, base_url = excluded.base_url, health_path = excluded.health_path, entry_url = COALESCE(excluded.entry_url, systems.entry_url)", system.id, system.name, system.type, system.baseUrl, system.healthPath, system.entryUrl);
   }

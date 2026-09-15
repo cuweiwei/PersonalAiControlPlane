@@ -23,7 +23,7 @@ services:
       PAI_HERMES_TASK_EVENT_PATH: ${PAI_HERMES_TASK_EVENT_PATH:-/api/internal/control-plane/task-events}
       PAI_CONTEXTHUB_URL: ${PAI_CONTEXTHUB_URL:-http://contexthub:8787}
       PAI_CONTEXTHUB_ENTRY_URL: ${PAI_CONTEXTHUB_ENTRY_URL:-https://gnest.taila77e5f.ts.net:8443/dashboard}
-      PAI_INFORMATION_RADAR_URL: ${PAI_INFORMATION_RADAR_URL:-https://gnest.taila77e5f.ts.net:8789}
+      PAI_INFORMATION_RADAR_URL: ${PAI_INFORMATION_RADAR_URL:-http://radar-web:8787}
       PAI_INFORMATION_RADAR_HEALTH_PATH: ${PAI_INFORMATION_RADAR_HEALTH_PATH:-/health/ready}
       PAI_INFORMATION_RADAR_ENTRY_URL: ${PAI_INFORMATION_RADAR_ENTRY_URL:-https://gnest.taila77e5f.ts.net:8789/}
       PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}
@@ -43,7 +43,11 @@ services:
       personal-ai-network:
         aliases:
           - personal-ai-control-plane
+      information-radar-default: {}
 
 networks:
   personal-ai-network:
     external: true
+  information-radar-default:
+    external: true
+    name: information-radar_default
