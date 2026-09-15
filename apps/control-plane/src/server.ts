@@ -117,7 +117,7 @@ export function createControlPlaneServer(options: Options) {
       const workerAvailable = candidate.status === "ONLINE";
       const reasons = [...missing.map((id) => `capability_unverified:${id}`), ...runtimeMissing, ...modelMissing, ...(workerAvailable ? [] : ["worker_offline"])]
       if (reasons.length === 0) matchedCandidates.push({ worker_id: candidate.worker_id, name: candidate.name, capabilities: capabilities.map((item) => item.id), verification_refs: [...new Set(candidate.verification_refs as string[])] });
-      else rejectionReasons.push({ worker_id: candidate.worker_id, reasons });
+      else rejectionReasons.push({ worker_id: candidate.worker_id, reasons: [...missing.map((requirement) => `capability_unverified:${requirement.id}`), ...runtimeMissing, ...modelMissing, ...(workerAvailable ? [] : ["worker_offline"])] });
     }
     const ttlSeconds = Math.max(1, Number(options.settings.get().hermes_brain_capability_ttl_seconds ?? 30));
     return { snapshot_id: randomUUID(), observed_at: new Date(observedAt).toISOString(), expires_at: new Date(observedAt + ttlSeconds * 1000).toISOString(), matched_candidates: matchedCandidates, rejection_reasons: rejectionReasons, verification_refs: [...new Set(matchedCandidates.flatMap((item) => item.verification_refs as string[]))], queue: { queued: Number(options.tasks.summary({ status: "QUEUED" }).total ?? 0) }, load: { workers_online: [...grouped.values()].filter((item) => item.status === "ONLINE").length }, cost_status: { state: "NOT_TRACKED", provider_verified: false } };
