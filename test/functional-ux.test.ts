@@ -12,7 +12,7 @@ import { addWorkspace, readWorkerConfig, writeWorkerConfig } from "../apps/worke
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseCreateTaskInput } from "../packages/contracts/src/index.ts";
+import { parseCreateTaskInput, parseTaskContractV2Input } from "../packages/contracts/src/index.ts";
 import type { WorkerCoordinator } from "../apps/control-plane/src/workers/worker-channel.ts";
 
 function setup() {
@@ -37,6 +37,30 @@ test("F01 retry creates a new run and preserves task-wide attempt history", () =
 test("F02 scheduler stores exact runtime/model target and ignores unavailable runtime", () => {
   const { db, tasks, workers, scheduler, offers, workerId } = workerFixture(2_000); workers.updateCapabilities(workerId, [{ capability: "llm.inference", runtime: "omlx", status: "UNAVAILABLE" }, { capability: "llm.inference", runtime: "ollama", status: "READY" }], 2_003); workers.updateModels(workerId, [{ runtime: "omlx", id: "dead", status: "unavailable" }, { runtime: "ollama", id: "live", status: "ready" }], 2_003);
   const task = tasks.create({ ...genericTask(), taskType: "llm.inference", execution: { capabilities: ["llm.inference"], runtime: "auto", model: { mode: "any" }, resources: {} } }, 2_004); assert.equal(scheduler.tick(2_005), 1); const attempt = db.one<{ resolved_execution_json: string }>("SELECT resolved_execution_json FROM task_attempts WHERE task_id = ?", task.id); assert.deepEqual(JSON.parse(String(attempt?.resolved_execution_json)), { workerId, runtime: "ollama", model: { name: "live", mode: "required" }, workspaceId: null }); assert.equal(offers[0].task.resolvedExecution, undefined); db.close();
+});
+
+test("scheduler blocks a platform v2 task type/capability mismatch before offering it", () => {
+  const base = 2_500; const { db, tasks, workers, scheduler, offers, workerId } = workerFixture(base);
+  workers.updateCapabilities(workerId, [{ capability: "llm.inference", runtime: "ollama", status: "READY", contract_version: 2, evidence_state: "VERIFIED" }], base + 3);
+  workers.updateModels(workerId, [{ runtime: "ollama", id: "live", status: "ready" }], base + 3);
+  const created = tasks.delegate(parseTaskContractV2Input({
+    schema_version: 2,
+    source: "hermes",
+    idempotency_key: "type-mismatch-scheduler-1",
+    source_intent_ref: "type-mismatch-intent-1",
+    task_type: "llm.inference",
+    description: "valid source task before persistence corruption simulation",
+    requirements: { capabilities_all: [{ id: "llm.inference", contract_version: 2 }], runtime: { id: "ollama" }, model: { name: "live", mode: "required" } },
+    input: {},
+    criteria: [],
+    execution_timeout_seconds: 60,
+    retry_policy: { max_attempts: 1, effect_class: "READ_ONLY" },
+  }), "hermes:owner", base + 4);
+  db.run("UPDATE tasks SET task_type = 'codex' WHERE id = ?", created.task_id);
+  assert.equal(scheduler.tick(base + 5), 0);
+  assert.equal(offers.length, 0);
+  assert.equal((tasks.detail(String(created.task_id)) as any).dispatch.primaryReason, "TASK_TYPE_CAPABILITY_MISMATCH");
+  db.close();
 });
 
 test("F03 canonical workspace rejects conflicts and preserves the execution value", () => {

@@ -2,7 +2,7 @@ import { ControlPlaneDatabase } from "../db/database.ts";
 import { EventHub } from "../events/event-hub.ts";
 import { TaskService, safeHash } from "../tasks/task-service.ts";
 import { WorkerCoordinator } from "../workers/worker-channel.ts";
-import { uuidv7 } from "../../../../packages/contracts/src/index.ts";
+import { taskTypeCapabilityMismatch, uuidv7 } from "../../../../packages/contracts/src/index.ts";
 
 type Row = Record<string, any>;
 type Requirement = { capabilities?: string[]; capabilityVersions?: Record<string, number>; workerId?: string | null; runtime?: string; model?: { name?: string; mode?: string }; resources?: { minRamMb?: number; gpuRequired?: boolean }; workspaceId?: string; preferenceId?: string | null };
@@ -55,11 +55,15 @@ export class ResourceScheduler {
     const workers = this.db.all<Row>("SELECT * FROM workers WHERE removed_at IS NULL ORDER BY id");
     const candidates: Candidate[] = [];
     const reasons: Array<{ code: string; count: number; message: string }> = [];
+    const required = requirement.capabilities?.length ? requirement.capabilities : [task.task_type];
+    if (task.execution_semantics === "platform_v2" && taskTypeCapabilityMismatch(task.task_type, required)) {
+      this.updateDispatch(task, [{ code: "TASK_TYPE_CAPABILITY_MISMATCH", count: 1, message: "任務類型與要求能力不相容，已阻止派送" }], now);
+      return candidates;
+    }
     for (const worker of workers) {
       const failure = this.rejectionReason(worker, task, requirement, now);
       if (failure) { reasons.push(failure); continue; }
       const capabilities = this.db.all<Row>("SELECT * FROM worker_capabilities WHERE worker_id = ?", worker.id).filter((item) => READY_CAPABILITY.has(String(item.status)) && !["REVOKED", "REQUIRES_REVIEW"].includes(String(item.grant_status ?? "DISCOVERED")) && (task.execution_semantics !== "platform_v2" || (String(item.grant_status) === "GRANTED" && String(item.evidence_state) === "VERIFIED" && (!item.verification_expires_at || Number(item.verification_expires_at) > now))));
-      const required = requirement.capabilities?.length ? requirement.capabilities : [task.task_type];
       const preference = requirement.preferenceId ? this.db.one<Row>("SELECT * FROM model_preferences WHERE id = ? AND deleted_at IS NULL", requirement.preferenceId) : undefined;
       const preferenceTargets = preference ? parse(preference.targets_json, []) as Array<Record<string, unknown>> : [];
       const capability = capabilities.find((item) => {
@@ -177,7 +181,7 @@ export class ResourceScheduler {
     }
     const grouped = new Map<string, { code: string; count: number; message: string }>();
     for (const failure of failures) grouped.set(failure.code, { ...failure, count: (grouped.get(failure.code)?.count ?? 0) + failure.count });
-    const reasons = [...grouped.values()]; const priority = ["WORKER_UPDATE_REQUIRED", "WORKER_DISABLED", "WORKER_OFFLINE", "WORKSPACE_MISSING", "CAPABILITY_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "MODEL_UNAVAILABLE", "RESOURCE_UNKNOWN", "INSUFFICIENT_RESOURCES", "PAUSED", "IDLE_REQUIRED", "CAPACITY_BUSY", "NO_CANDIDATE"];
+    const reasons = [...grouped.values()]; const priority = ["TASK_TYPE_CAPABILITY_MISMATCH", "WORKER_UPDATE_REQUIRED", "WORKER_DISABLED", "WORKER_OFFLINE", "WORKSPACE_MISSING", "CAPABILITY_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "MODEL_UNAVAILABLE", "RESOURCE_UNKNOWN", "INSUFFICIENT_RESOURCES", "PAUSED", "IDLE_REQUIRED", "CAPACITY_BUSY", "NO_CANDIDATE"];
     reasons.sort((left, right) => priority.indexOf(left.code) - priority.indexOf(right.code));
     const primary = reasons[0]; const hash = safeHash({ primary: primary.code, reasons: reasons.map(({ code, count }) => ({ code, count })) });
     const previous = this.db.one<Row>("SELECT * FROM task_dispatch_state WHERE task_id = ?", task.id);

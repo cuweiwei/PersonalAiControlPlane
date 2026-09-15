@@ -51,6 +51,39 @@ test("platform v2 delegation is idempotent and projects execution facts separate
   } finally { db.close(); }
 });
 
+test("platform v2 rejects a task type whose typed capability is missing", () => {
+  assert.throws(() => parseTaskContractV2Input({
+    schema_version: 2,
+    source: "hermes",
+    idempotency_key: "hermes-type-mismatch-1",
+    source_intent_ref: "intent-type-mismatch-1",
+    task_type: "codex",
+    description: "This must not be offered to an LLM executor.",
+    requirements: {
+      capabilities_all: [{ id: "llm.inference", contract_version: 2 }],
+      runtime: { id: "ollama" },
+      model: { name: "llama3:latest", mode: "required" },
+    },
+    input: {},
+    criteria: [],
+    execution_timeout_seconds: 60,
+    retry_policy: { max_attempts: 1, effect_class: "READ_ONLY" },
+  }), /TASK_TYPE_CAPABILITY_MISMATCH/);
+  assert.throws(() => parseTaskContractV2Input({
+    schema_version: 2,
+    source: "hermes",
+    idempotency_key: "hermes-codex-workspace-1",
+    source_intent_ref: "intent-codex-workspace-1",
+    task_type: "codex",
+    description: "Codex needs an explicit workspace.",
+    requirements: { capabilities_all: [{ id: "codex", contract_version: 2 }] },
+    input: {},
+    criteria: [],
+    execution_timeout_seconds: 60,
+    retry_policy: { max_attempts: 1, effect_class: "READ_ONLY" },
+  }), /WORKSPACE_REQUIRED_FOR_CODEX/);
+});
+
 test("platform v2 workspace cancellation stays UNKNOWN until stop evidence confirms release", () => {
   const db = new ControlPlaneDatabase(":memory:");
   const events = new EventHub();

@@ -61,6 +61,11 @@ export type TaskContractV2Input = CreateTaskInput & {
   sourceIntentRef: string;
 };
 
+/** A typed task must require the capability implemented by its executor. */
+export function taskTypeCapabilityMismatch(taskType: TaskType, capabilities: readonly string[]): boolean {
+  return taskType !== "generic" && !capabilities.includes(taskType);
+}
+
 export type TaskEventName =
   | "TASK_CREATED" | "TASK_ASSIGNED" | "WORKER_ACCEPTED" | "TASK_STARTED"
   | "TASK_PROGRESS" | "TASK_LOG" | "TASK_SUCCEEDED" | "TASK_FAILED"
@@ -200,6 +205,7 @@ export function parseTaskContractV2Input(value: unknown, defaults: { timeoutSeco
     capabilities.push(id);
     capabilityRequirements.push({ id, contract_version: contractVersion });
   }
+  if (taskTypeCapabilityMismatch(taskType, capabilities)) throw new Error("TASK_TYPE_CAPABILITY_MISMATCH");
   let runtime: string | undefined;
   if (requirementsRaw.runtime !== undefined && requirementsRaw.runtime !== null) {
     if (!isRecord(requirementsRaw.runtime)) throw new Error("requirements.runtime is invalid");
@@ -227,6 +233,7 @@ export function parseTaskContractV2Input(value: unknown, defaults: { timeoutSeco
     resources = { minRamMb: nonNegativeInt(resourcesRaw.min_ram_mb, "requirements.resources.min_ram_mb", 0, 1_048_576), gpuRequired: resourcesRaw.gpu_required === true };
   }
   const workspaceRef = optionalString(requirementsRaw.workspace_ref, "requirements.workspace_ref") ?? undefined;
+  if (taskType === "codex" && !workspaceRef) throw new Error("WORKSPACE_REQUIRED_FOR_CODEX");
   const requiredWorker = optionalString(requirementsRaw.required_worker, "requirements.required_worker") ?? undefined;
   const preferredWorker = optionalString(requirementsRaw.preferred_worker, "requirements.preferred_worker") ?? undefined;
   const criteriaRaw = value.criteria ?? [];
