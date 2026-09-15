@@ -1,5 +1,5 @@
 import type { ControlPlaneDatabase } from "../db/database.ts";
-import type { OfficeActivity, OfficeSceneData, OfficeSceneMember, OfficeSceneMission } from "../../../../packages/contracts/src/office-scene.ts";
+import type { OfficeActivity, OfficeBindingStatus, OfficeSceneData, OfficeSceneMember, OfficeSceneMission } from "../../../../packages/contracts/src/office-scene.ts";
 
 type Row = Record<string, any>;
 const parse = (value: unknown): Row => { try { return JSON.parse(String(value ?? "{}")); } catch { return {}; } };
@@ -28,6 +28,32 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
   const models = db.all<Row>("SELECT worker_id, runtime, model_id, status, present FROM worker_models");
   const preferences = db.all<Row>("SELECT worker_id, mode, pause_id, pause_until, pause_indefinite FROM worker_preferences");
   const workerFresh = (w: Row) => w.status === "ONLINE" && Boolean(w.enabled) && now - Number(w.last_heartbeat_at ?? w.last_connected_at ?? 0) < Number(process.env.PAI_WORKER_OFFLINE_SECONDS ?? 90) * 1000;
+  const bindingObservation = (binding: Row, worker: Row | undefined): Pick<OfficeActivity, "configured" | "observed"> => {
+    const workerId = binding.worker_id ?? binding.workerId;
+    const modelId = binding.model_id ?? binding.modelId;
+    const configuredCapabilities = Array.isArray(binding.capabilities) ? binding.capabilities.filter((value: unknown): value is string => typeof value === "string") : [];
+    const configured = {
+      ...(typeof workerId === "string" ? { workerId } : {}),
+      ...(typeof binding.runtime === "string" && binding.runtime !== "auto" ? { runtime: binding.runtime } : {}),
+      ...(typeof modelId === "string" ? { model: modelId } : {}),
+      ...(configuredCapabilities.length ? { capabilities: configuredCapabilities } : {}),
+    };
+    if (!worker) return { configured, observed: undefined };
+    const workerCapabilities = capabilities.filter((item) => item.worker_id === worker.id);
+    const workerModels = models.filter((item) => item.worker_id === worker.id);
+    return {
+      configured,
+      observed: {
+        workerId: worker.id,
+        workerName: worker.name,
+        status: worker.status,
+        fresh: workerFresh(worker),
+        runtimes: [...new Set([...workerCapabilities, ...workerModels].map((item) => String(item.runtime ?? "")).filter(Boolean))],
+        capabilities: workerCapabilities.map((item) => ({ id: String(item.capability), ...(item.runtime ? { runtime: String(item.runtime) } : {}), ...(item.status ? { status: String(item.status) } : {}) })),
+        models: workerModels.map((item) => ({ runtime: String(item.runtime), model: String(item.model_id), ...(item.status ? { status: String(item.status) } : {}), present: Boolean(item.present) })),
+      },
+    };
+  };
   const defaultActivity = (binding: Row): OfficeActivity => {
     if (!enabled) return activity("WAITING", "辦公室尚未啟用");
     if (recovery) return activity("UNKNOWN", "復原對帳中，暫停新派工");
@@ -43,9 +69,17 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
       capabilities.some((cap) => cap.worker_id === w.id && ["READY", "HEALTHY"].includes(cap.status) && (!runtime || cap.runtime === runtime)) &&
       (binding.capabilities ?? []).every((c: string) => capabilities.some((cap) => cap.worker_id === w.id && cap.capability === c && ["READY", "HEALTHY"].includes(cap.status) && (!runtime || cap.runtime === runtime))) &&
       (!modelId || models.some((m) => m.worker_id === w.id && m.model_id === modelId && m.present && m.status === "READY" && (!runtime || m.runtime === runtime))));
-    const result = available ? activity("IDLE", "執行資源在線，等待派工；實際接案仍依排程器判定") : activity(online.length ? "WAITING" : candidates.length ? "OFFLINE" : "WAITING", online.length ? "等待符合模型、能力與接案條件的資源" : candidates.length ? "Worker 離線或心跳已過期" : "尚無符合綁定的 Worker");
+    const status: OfficeBindingStatus = available ? "MATCHED" : !candidates.length ? "UNAVAILABLE" : !online.length ? "STALE" : "MISMATCH";
+    const reason = status === "MATCHED"
+      ? "執行資源在線，等待派工；實際接案仍依排程器判定"
+      : status === "UNAVAILABLE"
+        ? "尚無符合綁定的 Worker；已保留角色設定，未自動改派"
+        : status === "STALE"
+          ? "綁定的 Worker 離線或心跳已過期；等待重新觀察"
+          : "角色設定與 Worker 實際能力或模型不一致；已分開呈現，未自動改設定";
+    const result = available ? activity("IDLE", reason) : activity(status === "STALE" ? "OFFLINE" : "WAITING", reason);
     const worker = available ?? candidates.find((w) => w.id === workerId);
-    return { ...result, workerId: worker?.id, workerName: worker?.name, runtime: binding.runtime, model: modelId };
+    return { ...result, ...bindingObservation(binding, worker), bindingStatus: status, workerId: worker?.id, workerName: worker?.name, runtime: binding.runtime, model: modelId };
   };
   const byMember = new Map<string, OfficeActivity[]>();
   const byWorker = new Map<string, OfficeActivity[]>();

@@ -91,6 +91,22 @@ test("Office scene recognizes legacy Worker bindings without a kind field", () =
   } finally { f.close(); }
 });
 
+test("Office scene exposes configured role and observed Worker mismatch separately", () => {
+  const f = setup(); try {
+    f.member.binding = { kind: "WORKER_SELECTOR", worker_id: f.workerId, runtime: "missing-runtime", model_id: "missing-model", capabilities: ["generic"] };
+    const mismatch = f.scene().members.find((item) => item.kind === "ROLE")?.activity;
+    assert.equal(mismatch?.state, "WAITING");
+    assert.equal(mismatch?.bindingStatus, "MISMATCH");
+    assert.deepEqual(mismatch?.configured, { workerId: f.workerId, runtime: "missing-runtime", model: "missing-model", capabilities: ["generic"] });
+    assert.equal(mismatch?.observed?.workerId, f.workerId);
+    assert.equal(mismatch?.observed?.runtimes?.includes("test"), true);
+
+    const stale = f.scene(f.now + 100_000).members.find((item) => item.kind === "ROLE")?.activity;
+    assert.equal(stale?.state, "OFFLINE");
+    assert.equal(stale?.bindingStatus, "STALE");
+  } finally { f.close(); }
+});
+
 test("Hermes transport ACK never animates planning; current admitted progress is required", () => {
   const f = setup(); try {
     const created = f.create(); const commandId = String(created.response.planCommandId);

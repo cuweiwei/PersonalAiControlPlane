@@ -8,6 +8,7 @@ import "./office.css";
 const h = React.createElement;
 type OfficeResponse = { id: string; name: string; scene: OfficeSceneData; workflowHealth: { officeEnabled: boolean; hermesAdapterConfigured: boolean } };
 const bucketNames = { todo: "待辦", active: "進行中", attention: "待處理", completed: "已完成", closed: "已取消" };
+const bindingLabels = { MATCHED: "綁定符合", MISMATCH: "綁定不一致", STALE: "綁定已過期", UNAVAILABLE: "綁定不可用" } as const;
 
 function Badge({ activity, stale = false }: { activity: OfficeActivity; stale?: boolean }) {
   const p = statePresentation[stale ? "UNKNOWN" : activity.state];
@@ -122,6 +123,7 @@ export function OfficePage({ refreshVersion }: { refreshVersion: number }) {
           work ? h(React.Fragment, null,
             h("div", { className: "vo-person-heading" }, h("div", { className: "vo-avatar", style: { "--state-color": statePresentation[stale ? "UNKNOWN" : work.state].color } as React.CSSProperties }, (person?.displayName ?? "H").slice(0, 1)), h("h2", null, person?.displayName ?? "Hermes"), h("p", null, person?.role.name ?? "Orchestrator / 團隊主管"), h(Badge, { activity: work, stale })),
             h("div", { className: "vo-detail-section" }, h("span", null, "目前任務"), h("h3", null, work.missionTitle ?? "等待下一份工作"), h("p", null, stale ? "資料暫時無法更新，請以重新連線後的狀態為準。" : work.reason), work.stepKey ? h("small", null, `步驟 · ${work.stepKey}`) : null),
+            work.bindingStatus && work.bindingStatus !== "MATCHED" ? h("div", { className: "vo-inline-note", role: "status" }, `綁定狀態：${bindingLabels[work.bindingStatus]}。角色設定與實際 Worker 已分開顯示，未自動改派。`, work.configured ? h("small", null, `設定：${[work.configured.runtime, work.configured.model].filter(Boolean).join(" / ") || "未指定"}`) : null, work.observed ? h("small", null, `觀察：${work.observed.runtimes?.join(", ") || "未回報 runtime"}`) : null) : null,
             h("dl", { className: "vo-facts" }, h("dt", null, "執行裝置"), h("dd", null, work.workerName ?? work.workerId ?? (selection === "orchestrator" || person?.binding.kind === "HERMES_PROFILE" ? "Hermes" : "尚未指派")), h("dt", null, "模型 / 工具"), h("dd", null, work.model ?? work.runtime ?? person?.binding.model_id ?? person?.binding.runtime ?? "尚未回報"), h("dt", null, "活動工作"), h("dd", null, stale ? "待同步" : `${work.activeCount}${person ? ` / ${person.maxConcurrency} 個執行槽` : " 件"}`)),
             h("div", { className: "vo-inspector-actions" }, button("聚焦工作席", () => scene.current?.focus(selection), { disabled: fallback }), !demo && work.taskId ? h("a", { href: `/tasks/${encodeURIComponent(work.taskId)}` }, "查看執行任務 ↗") : null, !demo && work.missionId ? h("a", { href: `/missions/${encodeURIComponent(work.missionId)}` }, "查看交辦與成果 ↗") : null, !demo && person?.kind === "ROLE" ? h("a", { href: "/office/members" }, "成員與綁定設定") : null)) : selection === "overview" ? h(React.Fragment, null,
               h("h2", null, "今天，一起完成。"), h("p", { className: "vo-intro" }, "點選一位同事，看看他正在忙什麼；或走近看板，掌握團隊進度。"),

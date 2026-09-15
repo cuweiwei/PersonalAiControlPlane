@@ -1,5 +1,6 @@
 /** Read-only presentation of persisted Office evidence. Animation never advances work. */
 export type OfficeActivityState = "IDLE" | "WORKING" | "PLANNING" | "REVIEWING" | "DELIVERING" | "WAITING" | "OFFLINE" | "ERROR" | "UNKNOWN";
+export type OfficeBindingStatus = "MATCHED" | "MISMATCH" | "STALE" | "UNAVAILABLE";
 export interface OfficeActivity {
   state: OfficeActivityState;
   reason: string;
@@ -12,6 +13,9 @@ export interface OfficeActivity {
   workerName?: string;
   runtime?: string;
   model?: string;
+  bindingStatus?: OfficeBindingStatus;
+  configured?: { workerId?: string; runtime?: string; model?: string; capabilities?: string[] };
+  observed?: { workerId?: string; workerName?: string; status?: string; fresh?: boolean; runtimes?: string[]; capabilities?: Array<{ id: string; runtime?: string; status?: string }>; models?: Array<{ runtime: string; model: string; status?: string; present?: boolean }> };
   activeCount: number;
 }
 export interface OfficeSceneMember {
