@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS tasks (
   ,settings_version INTEGER
   ,request_snapshot_json TEXT
   ,archived_at INTEGER
+  ,schema_version INTEGER NOT NULL DEFAULT 1
+  ,execution_semantics TEXT NOT NULL DEFAULT 'legacy'
+  ,requested_by TEXT NOT NULL DEFAULT 'owner'
+  ,source_intent_ref TEXT
+  ,conversation_ref TEXT
+  ,work_ref_json TEXT
+  ,requirements_json TEXT
+  ,criteria_json TEXT NOT NULL DEFAULT '[]'
+  ,idempotency_key TEXT
+  ,queue_deadline_at INTEGER
+  ,approval_ref TEXT
+  ,execution_certainty TEXT NOT NULL DEFAULT 'NOT_STARTED'
+  ,waiting_reason TEXT
+  ,control_cancel TEXT NOT NULL DEFAULT 'NONE'
+  ,control_timeout TEXT NOT NULL DEFAULT 'NOT_EXCEEDED'
+  ,occupancy TEXT NOT NULL DEFAULT 'RELEASED'
+  ,effect_state TEXT NOT NULL DEFAULT 'NONE_CONFIRMED'
+  ,validation_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED'
+  ,validation_json TEXT
+  ,delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED'
+  ,delivery_json TEXT
+  ,last_progress_json TEXT
+  ,progress_sequence INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority DESC, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_correlation ON tasks(correlation_id);
@@ -72,6 +95,14 @@ CREATE TABLE IF NOT EXISTS task_attempts (
   occupancy TEXT NOT NULL DEFAULT 'RELEASED',
   cancel_requested_at INTEGER,
   cancel_ack_at INTEGER,
+  stop_evidence_json TEXT,
+  effect_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  fence_epoch INTEGER NOT NULL DEFAULT 1,
+  worker_boot_id TEXT,
+  workspace_id TEXT,
+  progress_sequence INTEGER NOT NULL DEFAULT 0,
+  last_progress_json TEXT,
+  lease_expires_at INTEGER,
   UNIQUE(task_id, attempt_number)
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_worker_status ON task_attempts(worker_id, status);
@@ -153,6 +184,11 @@ CREATE TABLE IF NOT EXISTS worker_capabilities (
   superseded_at INTEGER,
   status TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
+  contract_version INTEGER NOT NULL DEFAULT 1,
+  evidence_state TEXT NOT NULL DEFAULT 'ADVERTISED',
+  verified_at INTEGER,
+  verification_expires_at INTEGER,
+  verification_ref TEXT,
   UNIQUE(worker_id, capability, runtime)
 );
 
@@ -312,6 +348,33 @@ CREATE TABLE IF NOT EXISTS operation_receipts (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(scope, operation_key)
 );
+CREATE TABLE IF NOT EXISTS workspace_locks (
+  workspace_id TEXT PRIMARY KEY,
+  lock_mode TEXT NOT NULL CHECK (lock_mode IN ('READ', 'WRITE_EXCLUSIVE')),
+  attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(id),
+  fence_epoch INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('HELD', 'RELEASING', 'UNKNOWN', 'RELEASED')),
+  acquired_at INTEGER NOT NULL,
+  released_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_locks_state ON workspace_locks(state, updated_at);
+CREATE TABLE IF NOT EXISTS task_event_outbox (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  source TEXT NOT NULL,
+  source_epoch INTEGER NOT NULL DEFAULT 1,
+  sequence INTEGER NOT NULL,
+  subject_revision INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'PENDING',
+  available_at INTEGER NOT NULL,
+  claimed_until INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE(source, source_epoch, task_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_task_event_outbox_due ON task_event_outbox(state, available_at, claimed_until);
 CREATE TABLE IF NOT EXISTS runtime_metadata (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL
@@ -459,6 +522,40 @@ export class ControlPlaneDatabase {
       ensureColumn("artifacts", "owner_scope_json", "TEXT");
       ensureColumn("tasks", "owner_kind", "TEXT NOT NULL DEFAULT 'STANDALONE'");
       ensureColumn("tasks", "mission_execution_id", "TEXT");
+      ensureColumn("tasks", "schema_version", "INTEGER NOT NULL DEFAULT 1");
+      ensureColumn("tasks", "execution_semantics", "TEXT NOT NULL DEFAULT 'legacy'");
+      ensureColumn("tasks", "requested_by", "TEXT NOT NULL DEFAULT 'owner'");
+      ensureColumn("tasks", "source_intent_ref", "TEXT");
+      ensureColumn("tasks", "conversation_ref", "TEXT");
+      ensureColumn("tasks", "work_ref_json", "TEXT");
+      ensureColumn("tasks", "requirements_json", "TEXT");
+      ensureColumn("tasks", "criteria_json", "TEXT NOT NULL DEFAULT '[]'");
+      ensureColumn("tasks", "idempotency_key", "TEXT");
+      ensureColumn("tasks", "queue_deadline_at", "INTEGER");
+      ensureColumn("tasks", "approval_ref", "TEXT");
+      ensureColumn("tasks", "execution_certainty", "TEXT NOT NULL DEFAULT 'NOT_STARTED'");
+      ensureColumn("tasks", "waiting_reason", "TEXT");
+      ensureColumn("tasks", "control_cancel", "TEXT NOT NULL DEFAULT 'NONE'");
+      ensureColumn("tasks", "control_timeout", "TEXT NOT NULL DEFAULT 'NOT_EXCEEDED'");
+      ensureColumn("tasks", "occupancy", "TEXT NOT NULL DEFAULT 'RELEASED'");
+      ensureColumn("tasks", "effect_state", "TEXT NOT NULL DEFAULT 'NONE_CONFIRMED'");
+      ensureColumn("tasks", "validation_state", "TEXT NOT NULL DEFAULT 'NOT_REQUESTED'");
+      ensureColumn("tasks", "validation_json", "TEXT");
+      ensureColumn("tasks", "delivery_state", "TEXT NOT NULL DEFAULT 'NOT_REQUESTED'");
+      ensureColumn("tasks", "delivery_json", "TEXT");
+      ensureColumn("tasks", "last_progress_json", "TEXT");
+      ensureColumn("tasks", "progress_sequence", "INTEGER NOT NULL DEFAULT 0");
+      ensureColumn("task_attempts", "fence_epoch", "INTEGER NOT NULL DEFAULT 1");
+      ensureColumn("task_attempts", "worker_boot_id", "TEXT");
+      ensureColumn("task_attempts", "workspace_id", "TEXT");
+      ensureColumn("task_attempts", "progress_sequence", "INTEGER NOT NULL DEFAULT 0");
+      ensureColumn("task_attempts", "last_progress_json", "TEXT");
+      ensureColumn("task_attempts", "lease_expires_at", "INTEGER");
+      ensureColumn("worker_capabilities", "contract_version", "INTEGER NOT NULL DEFAULT 1");
+      ensureColumn("worker_capabilities", "evidence_state", "TEXT NOT NULL DEFAULT 'ADVERTISED'");
+      ensureColumn("worker_capabilities", "verified_at", "INTEGER");
+      ensureColumn("worker_capabilities", "verification_expires_at", "INTEGER");
+      ensureColumn("worker_capabilities", "verification_ref", "TEXT");
       this.connection.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_mission_execution ON tasks(mission_execution_id) WHERE mission_execution_id IS NOT NULL");
       this.connection.exec(`
         CREATE TABLE IF NOT EXISTS task_runs (
@@ -486,6 +583,12 @@ export class ControlPlaneDatabase {
       this.connection.exec("CREATE INDEX IF NOT EXISTS idx_callback_state_due ON callback_outbox(state, available_at, claimed_until)");
       this.connection.exec("CREATE INDEX IF NOT EXISTS idx_callback_task_run ON callback_outbox(task_id, run_id)");
       this.connection.exec("CREATE INDEX IF NOT EXISTS idx_artifacts_state_created ON artifacts(storage_state, created_at)");
+      this.connection.exec("CREATE INDEX IF NOT EXISTS idx_tasks_v2_idempotency ON tasks(requested_by, idempotency_key) WHERE idempotency_key IS NOT NULL");
+      this.connection.exec("CREATE INDEX IF NOT EXISTS idx_attempts_workspace ON task_attempts(workspace_id, occupancy)");
+      this.connection.exec("CREATE TABLE IF NOT EXISTS workspace_locks (workspace_id TEXT PRIMARY KEY, lock_mode TEXT NOT NULL, attempt_id TEXT NOT NULL UNIQUE REFERENCES task_attempts(id), fence_epoch INTEGER NOT NULL, state TEXT NOT NULL, acquired_at INTEGER NOT NULL, released_at INTEGER, updated_at INTEGER NOT NULL)");
+      this.connection.exec("CREATE INDEX IF NOT EXISTS idx_workspace_locks_state ON workspace_locks(state, updated_at)");
+      this.connection.exec("CREATE TABLE IF NOT EXISTS task_event_outbox (id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), source TEXT NOT NULL, source_epoch INTEGER NOT NULL DEFAULT 1, sequence INTEGER NOT NULL, subject_revision INTEGER NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', available_at INTEGER NOT NULL, claimed_until INTEGER, created_at INTEGER NOT NULL, UNIQUE(source, source_epoch, task_id, sequence))");
+      this.connection.exec("CREATE INDEX IF NOT EXISTS idx_task_event_outbox_due ON task_event_outbox(state, available_at, claimed_until)");
       this.connection.exec("DROP INDEX IF EXISTS idx_artifacts_task_key; CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_task_key ON artifacts(attempt_id, artifact_key) WHERE artifact_key IS NOT NULL");
       const legacyTasks = this.connection.prepare("SELECT id, status, max_attempts, created_at, finished_at, current_attempt_id, attempt_count, current_run_id FROM tasks WHERE current_run_id IS NULL ORDER BY created_at, id").all() as Array<Record<string, any>>;
       for (const task of legacyTasks) {

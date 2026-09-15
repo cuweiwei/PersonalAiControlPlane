@@ -45,6 +45,7 @@ const required = [
   "scripts/production-acceptance.mjs",
   "docs/implementation-status.md",
   "schemas/api/v2/task-create.schema.json",
+  "schemas/api/v2/task-delegate.schema.json",
   "schemas/worker/v2/message.schema.json",
   "schemas/system/v2/health.schema.json",
   "schemas/release/v1/release-manifest.schema.json",
@@ -76,6 +77,7 @@ for (const relative of sourceFiles) {
 
 const schemas = [
   "schemas/api/v2/task-create.schema.json",
+  "schemas/api/v2/task-delegate.schema.json",
   "schemas/worker/v2/message.schema.json",
   "schemas/system/v2/health.schema.json",
   "schemas/release/v1/release-manifest.schema.json",

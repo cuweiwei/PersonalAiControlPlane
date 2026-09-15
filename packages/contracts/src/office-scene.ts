@@ -6,6 +6,7 @@ export interface OfficeActivity {
   missionId?: string;
   missionTitle?: string;
   taskId?: string;
+  taskTitle?: string;
   stepKey?: string;
   workerId?: string;
   workerName?: string;

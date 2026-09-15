@@ -75,6 +75,25 @@ export function projectOfficeScene(db: ControlPlaneDatabase, officeId: string, m
     const list = byMember.get(snapshot.memberId) ?? []; list.push(current); byMember.set(snapshot.memberId, list);
     if (typeof s.worker_id === "string") { const workerList = byWorker.get(s.worker_id) ?? []; workerList.push(current); byWorker.set(s.worker_id, workerList); }
   }
+  // Platform v2 standalone Tasks are execution facts too. Project them onto the
+  // physical Worker seat without inventing a Mission/role binding.
+  const platformTasks = db.all<Row>(`SELECT t.id, t.title, t.status, t.execution_certainty, t.waiting_reason, t.current_attempt_id,
+    a.worker_id, a.status AS attempt_status, a.occupancy, a.resolved_execution_json
+    FROM tasks t LEFT JOIN task_attempts a ON a.id = t.current_attempt_id
+    WHERE t.execution_semantics = 'platform_v2' AND t.owner_kind = 'STANDALONE'
+      AND t.status IN ('ASSIGNED', 'RUNNING') AND (t.archived_at IS NULL OR t.archived_at = 0)`);
+  for (const task of platformTasks) {
+    const workerId = task.worker_id ?? parse(task.resolved_execution_json).workerId ?? parse(task.resolved_execution_json).worker_id;
+    if (typeof workerId !== "string") continue;
+    const current = task.execution_certainty === "UNKNOWN" || task.occupancy === "UNKNOWN"
+      ? activity("UNKNOWN", task.waiting_reason ?? "執行狀態待對帳")
+      : task.attempt_status === "RUNNING" && task.status === "RUNNING"
+        ? activity("WORKING", "平台 Task 已回報開始執行")
+        : activity("WAITING", "平台 Task 已派送，等待 Worker 開始");
+    const workerList = byWorker.get(workerId) ?? [];
+    workerList.push({ ...current, taskId: task.id, taskTitle: task.title, workerId, runtime: parse(task.resolved_execution_json).runtime ?? null, activeCount: current.state === "WORKING" ? 1 : 0 });
+    byWorker.set(workerId, workerList);
+  }
   const commandActivities: OfficeActivity[] = [];
   const commands = db.all<Row>(`SELECT c.*, m.id AS mission_id, m.title AS mission_title, d.state AS delivery_state, ca.state AS brain_state, ca.deadline_at AS brain_deadline FROM mission_commands c
     JOIN mission_runs r ON r.id = c.mission_run_id JOIN missions m ON m.current_mission_run_id = r.id

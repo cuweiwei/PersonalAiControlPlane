@@ -2,7 +2,7 @@ import type { JsonValue } from "../../../packages/contracts/src/index.ts";
 import { WorkerLocalDatabase } from "./local-db.ts";
 
 export type MissionWorkerContext = { authority_epoch: string; mission_id: string; mission_run_id: string; plan_revision: number; step_id: string; execution_generation: number; operation_key: string; retry_safety: string; scope_hash: string | null; workspace_access: "NONE" | "READ" | "WRITE_EXCLUSIVE" };
-export type WorkerTaskOffer = { task_id: string; run_id?: string | null; run_number?: number | null; attempt_id: string; attempt_number?: number | null; attempt_in_run?: number | null; task_type: string; purpose?: string; title?: string; instruction: string; context?: Record<string, JsonValue>; payload?: Record<string, JsonValue>; execution?: Record<string, JsonValue>; limits?: Record<string, JsonValue>; input_artifact_ids?: string[]; mission_context?: MissionWorkerContext };
+export type WorkerTaskOffer = { task_id: string; run_id?: string | null; run_number?: number | null; attempt_id: string; attempt_number?: number | null; attempt_in_run?: number | null; fence_epoch?: number; worker_boot_id?: string | null; workspace_id?: string | null; task_type: string; purpose?: string; title?: string; instruction: string; context?: Record<string, JsonValue>; payload?: Record<string, JsonValue>; execution?: Record<string, JsonValue>; limits?: Record<string, JsonValue>; input_artifact_ids?: string[]; mission_context?: MissionWorkerContext };
 export type ExecutionEvent = { type: "progress" | "log" | "result" | "artifact"; progress?: Record<string, JsonValue>; log?: Record<string, JsonValue>; result?: Record<string, JsonValue>; metrics?: Record<string, JsonValue>; result_manifest?: Record<string, JsonValue>; resultManifest?: Record<string, JsonValue>; artifact?: Record<string, JsonValue> };
 export type WorkerExecutor = { type: string; discover?(): Promise<{ capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] }>; canExecute(task: WorkerTaskOffer): boolean; execute(task: WorkerTaskOffer, context: { emit(event: ExecutionEvent): Promise<void>; signal?: AbortSignal }): AsyncIterable<ExecutionEvent>; cancel?(attemptId: string): Promise<void> };
 export type WorkerTransport = { connect?(onMessage: (message: Record<string, any>) => void, onClose?: (error: Error) => void): Promise<void>; send(message: Record<string, any>): Promise<void> | void; close?(): void; connected?(): boolean; poll?(): Promise<WorkerTaskOffer[]> };
@@ -25,11 +25,12 @@ export class OutboundWorkerRuntime {
   private readonly workspaces: Record<string, { name: string; path: string }>;
   private readonly running = new Map<string, RunningExecution>();
   private readonly workspaceLocks = new Map<string, string>();
+  private readonly workerBootId: string;
   private readonly negotiatedFeatures = new Set<string>();
   private transportError?: Error;
   private helloWaiter?: HelloWaiter;
 
-  constructor(options: WorkerRuntimeOptions) { this.workerId = options.workerId; this.db = options.db; this.transport = options.transport; this.executors = options.executors; this.workspaces = options.workspaces ?? {}; this.clock = options.clock ?? Date.now; this.report = options.report; }
+  constructor(options: WorkerRuntimeOptions) { this.workerId = options.workerId; this.db = options.db; this.transport = options.transport; this.executors = options.executors; this.workspaces = options.workspaces ?? {}; this.clock = options.clock ?? Date.now; this.report = options.report; this.workerBootId = `${this.workerId}:${this.clock()}`; }
   async connect(): Promise<void> {
     this.transportError = undefined;
     if (this.transport.connect) {
@@ -61,17 +62,18 @@ export class OutboundWorkerRuntime {
     if (missionError) { await this.transport.send({ type: "task.reject", task_id: offer.task_id, attempt_id: offer.attempt_id, reason: missionError }); return; }
     const targetRuntime = typeof offer.execution?.runtime === "string" ? offer.execution.runtime : undefined;
     const executor = this.executors.find((candidate) => candidate.canExecute(offer) && (!targetRuntime || targetRuntime === "auto" || candidate.type === targetRuntime || candidate.type === offer.task_type));
-    const workspaceResourceKey = offer.mission_context?.workspace_access === "WRITE_EXCLUSIVE" ? String(offer.execution?.workspace_id ?? offer.execution?.workspaceId ?? "") : undefined;
+    const workspaceResourceKey = String(offer.workspace_id ?? offer.execution?.workspace_id ?? offer.execution?.workspaceId ?? "").trim() || undefined;
     if (workspaceResourceKey && this.workspaceLocks.has(workspaceResourceKey)) { await this.transport.send({ type: "task.reject", task_id: offer.task_id, attempt_id: offer.attempt_id, reason: "WORKSPACE_CONFLICT" }); return; }
-    this.db.transaction(() => this.db.connection.prepare("INSERT INTO assignments(attempt_id, task_id, task_type, offer_json, status, accepted_at, updated_at) VALUES (?, ?, ?, ?, 'ACCEPTED', ?, ?)").run(offer.attempt_id, offer.task_id, offer.task_type, JSON.stringify(offer), this.clock(), this.clock()));
-    await this.transport.send({ type: "task.accept", task_id: offer.task_id, attempt_id: offer.attempt_id });
+    this.db.transaction(() => this.db.connection.prepare("INSERT INTO assignments(attempt_id, task_id, task_type, offer_json, fence_epoch, worker_boot_id, workspace_id, lease_expires_at, status, accepted_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?)").run(offer.attempt_id, offer.task_id, offer.task_type, JSON.stringify(offer), Number(offer.fence_epoch ?? 1), offer.worker_boot_id ?? this.workerBootId, workspaceResourceKey ?? null, offer.limits?.remaining_seconds ? this.clock() + Number(offer.limits.remaining_seconds) * 1000 : null, this.clock(), this.clock()));
+    await this.transport.send({ type: "task.accept", task_id: offer.task_id, attempt_id: offer.attempt_id, fence_epoch: offer.fence_epoch ?? 1, worker_boot_id: offer.worker_boot_id ?? this.workerBootId });
     if (!executor) { await this.fail(offer, "EXECUTOR_UNAVAILABLE", "No enabled executor can handle this task type.", true); return; }
     const controller = new AbortController();
     if (workspaceResourceKey) this.workspaceLocks.set(workspaceResourceKey, offer.attempt_id);
     this.running.set(offer.attempt_id, { executor, controller, workspaceResourceKey });
     this.db.connection.prepare("UPDATE assignments SET status = 'RUNNING', updated_at = ? WHERE attempt_id = ? AND status = 'ACCEPTED'").run(this.clock(), offer.attempt_id);
     if (this.isCancelled(offer.attempt_id)) { controller.abort(); this.releaseWorkspace(workspaceResourceKey, offer.attempt_id); this.running.delete(offer.attempt_id); return; }
-    await this.transport.send({ type: "task.started", task_id: offer.task_id, attempt_id: offer.attempt_id });
+    this.db.connection.prepare("INSERT INTO process_registry(attempt_id, pid, process_identity, started_at, workspace_resource_key, state, updated_at) VALUES (?, ?, ?, ?, ?, 'RUNNING', ?) ON CONFLICT(attempt_id) DO UPDATE SET process_identity = excluded.process_identity, state = 'RUNNING', updated_at = excluded.updated_at").run(offer.attempt_id, null, `${this.workerId}:${offer.attempt_id}`, this.clock(), workspaceResourceKey ?? null, this.clock());
+    await this.transport.send({ type: "task.started", task_id: offer.task_id, attempt_id: offer.attempt_id, fence_epoch: offer.fence_epoch ?? 1 });
     try {
       for await (const event of executor.execute(offer, { emit: (item) => this.emit(offer, item), signal: controller.signal })) {
         if (this.isCancelled(offer.attempt_id)) break;
@@ -81,7 +83,7 @@ export class OutboundWorkerRuntime {
       const state = this.db.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get(offer.attempt_id) as { status: string } | undefined;
       if (state?.status === "RUNNING") await this.complete(offer, {}, {});
     } catch (error) { const code = error instanceof Error ? error.message : "EXECUTION_FAILED"; await this.fail(offer, code, "Worker executor failed.", isInfrastructureFailure(code)); }
-    finally { this.releaseWorkspace(workspaceResourceKey, offer.attempt_id); this.running.delete(offer.attempt_id); }
+    finally { this.db.connection.prepare("UPDATE process_registry SET state = CASE WHEN state = 'RUNNING' THEN 'FINISHED' ELSE state END, updated_at = ? WHERE attempt_id = ?").run(this.clock(), offer.attempt_id); this.releaseWorkspace(workspaceResourceKey, offer.attempt_id); this.running.delete(offer.attempt_id); }
   }
 
   async handleCancel(message: { task_id: string; attempt_id: string }): Promise<void> {
@@ -92,8 +94,9 @@ export class OutboundWorkerRuntime {
       this.db.connection.prepare("UPDATE assignments SET status = 'CANCELLED', updated_at = ? WHERE attempt_id = ? AND status IN ('ACCEPTED', 'RUNNING')").run(this.clock(), message.attempt_id);
       const stored = this.db.connection.prepare("SELECT offer_json FROM assignments WHERE attempt_id = ?").get(message.attempt_id) as { offer_json?: string } | undefined;
       const offer = stored?.offer_json ? JSON.parse(stored.offer_json) as WorkerTaskOffer : undefined;
-      await this.transport.send({ type: "task.stop.receipt", task_id: message.task_id, attempt_id: message.attempt_id, ...(offer?.mission_context ? { mission_context: offer.mission_context } : {}), stop_state: "UNKNOWN", effect_state: "UNKNOWN", evidence: { observed_at: new Date(this.clock()).toISOString(), process_identity: null, children_accounted_for: false, reason: "executor_cancel_is_not_physical_stop_proof" } });
-      await this.transport.send({ type: "task.cancelled", task_id: message.task_id, attempt_id: message.attempt_id });
+      this.db.connection.prepare("UPDATE process_registry SET state = 'UNKNOWN', updated_at = ? WHERE attempt_id = ? AND state = 'RUNNING'").run(this.clock(), message.attempt_id);
+      await this.transport.send({ type: "task.stop.receipt", task_id: message.task_id, attempt_id: message.attempt_id, fence_epoch: offer?.fence_epoch ?? 1, ...(offer?.mission_context ? { mission_context: offer.mission_context } : {}), stop_state: "UNKNOWN", effect_state: "UNKNOWN", evidence: { observed_at: new Date(this.clock()).toISOString(), process_identity: null, children_accounted_for: false, reason: "executor_cancel_is_not_physical_stop_proof" } });
+      await this.transport.send({ type: "task.cancelled", task_id: message.task_id, attempt_id: message.attempt_id, fence_epoch: offer?.fence_epoch ?? 1 });
     }
   }
   close(): void { this.transport.close?.(); }
@@ -106,7 +109,7 @@ export class OutboundWorkerRuntime {
     else if (message.type === "config.apply") await this.applyConfig(message);
     else if (message.type === "task.result.ack") this.db.connection.prepare("UPDATE results SET status = 'DELIVERED', delivered_at = ? WHERE attempt_id = ?").run(this.clock(), message.attempt_id);
   }
-  private async sendHello(): Promise<void> { await this.transport.send({ type: "hello", protocol_version: 2, worker_id: this.workerId, agent_version: "2.0.0", features: ["resolved_execution_v1", "task_run_v1", "workspace_inventory_v1", "settings_apply_v1", "availability_v1", "result_manifest_v1", "artifact_ack_v1", "mission_execution_v1", "stop_evidence_v1", "workspace_exclusion_v1"] }); }
+  private async sendHello(): Promise<void> { await this.transport.send({ type: "hello", protocol_version: 2, worker_id: this.workerId, worker_boot_id: this.workerBootId, agent_version: "2.0.0", features: ["resolved_execution_v1", "task_run_v1", "workspace_inventory_v1", "settings_apply_v1", "availability_v1", "result_manifest_v1", "artifact_ack_v1", "mission_execution_v1", "stop_evidence_v1", "workspace_exclusion_v1", "attempt_fencing_v1", "durable_result_ack_v1", "workspace_lock_v1"] }); }
   private async applyConfig(message: Record<string, any>): Promise<void> {
     const settingsVersion = Number(message.settings_version ?? 0); const preferencesVersion = Number(message.preferences_version ?? 0); const config = message.config;
     if (!Number.isInteger(settingsVersion) || settingsVersion < 0 || !config || typeof config !== "object" || Array.isArray(config)) { await this.transport.send({ type: "config.applied", worker_id: this.workerId, settings_version: settingsVersion, preferences_version: preferencesVersion, state: "FAILED", error_code: "INVALID_CONFIG" }); return; }
@@ -131,12 +134,13 @@ export class OutboundWorkerRuntime {
   private async discover(): Promise<void> {
     const capabilities: Record<string, JsonValue>[] = [];
     const models: Record<string, JsonValue>[] = [];
-    for (const executor of this.executors) { const found = await executor.discover?.(); if (found?.capabilities) capabilities.push(...found.capabilities); if (found?.models) models.push(...found.models); }
+    const observedAt = this.clock();
+    for (const executor of this.executors) { const found = await executor.discover?.(); if (found?.capabilities) capabilities.push(...found.capabilities.map((item) => ({ ...item, evidence_state: "VERIFIED", verification_expires_at: observedAt + 30_000, verification_ref: `worker:${this.workerId}:${observedAt}` }))); if (found?.models) models.push(...found.models); }
     await this.transport.send({ type: "capabilities.update", worker_id: this.workerId, capabilities });
     if (Object.keys(this.workspaces).length > 0) await this.transport.send({ type: "inventory.update", worker_id: this.workerId, capabilities, models, workspaces: Object.entries(this.workspaces).map(([workspace_id, value]) => ({ workspace_id, display_name: value.name, state: "READY", capabilities: ["codex", "python"], config_version: 1 })) });
     await this.transport.send({ type: "models.update", worker_id: this.workerId, models });
   }
-  private async emit(offer: WorkerTaskOffer, event: ExecutionEvent): Promise<void> { if (this.isCancelled(offer.attempt_id)) return; const mission = offer.mission_context ? { mission_context: offer.mission_context } : {}; if (event.type === "progress") await this.transport.send({ type: "task.progress", task_id: offer.task_id, attempt_id: offer.attempt_id, ...mission, progress: event.progress ?? {} }); else if (event.type === "log") await this.transport.send({ type: "task.log", task_id: offer.task_id, attempt_id: offer.attempt_id, ...mission, log: event.log ?? {} }); else if (event.type === "artifact") await this.transport.send({ type: "task.artifact", task_id: offer.task_id, attempt_id: offer.attempt_id, ...mission, artifact: event.artifact ?? {} }); }
+  private async emit(offer: WorkerTaskOffer, event: ExecutionEvent): Promise<void> { if (this.isCancelled(offer.attempt_id)) return; const mission = offer.mission_context ? { mission_context: offer.mission_context } : {}; const fence = { fence_epoch: offer.fence_epoch ?? 1 }; if (event.type === "progress") await this.transport.send({ type: "task.progress", task_id: offer.task_id, attempt_id: offer.attempt_id, ...fence, ...mission, progress: event.progress ?? {} }); else if (event.type === "log") await this.transport.send({ type: "task.log", task_id: offer.task_id, attempt_id: offer.attempt_id, ...fence, ...mission, log: event.log ?? {} }); else if (event.type === "artifact") await this.transport.send({ type: "task.artifact", task_id: offer.task_id, attempt_id: offer.attempt_id, ...fence, ...mission, artifact: event.artifact ?? {} }); }
   private async complete(offer: WorkerTaskOffer, result: Record<string, JsonValue>, metrics: Record<string, JsonValue>, resultManifest?: Record<string, JsonValue>): Promise<void> {
     const payload = { result, metrics, resultManifest: resultManifest ?? defaultResultManifest(offer, result, metrics) };
     const completed = this.db.transaction(() => {
@@ -148,11 +152,11 @@ export class OutboundWorkerRuntime {
     });
     if (completed) await this.resendResult(offer.attempt_id);
   }
-  private async resendResult(attemptId: string): Promise<void> { const row = this.db.connection.prepare("SELECT * FROM results WHERE attempt_id = ? AND status = 'PENDING'").get(attemptId) as Record<string, any> | undefined; if (!row) return; const offer = this.db.connection.prepare("SELECT * FROM assignments WHERE attempt_id = ?").get(attemptId) as Record<string, any> | undefined; if (!offer) return; const parsed = JSON.parse(row.result_json); const task = JSON.parse(offer.offer_json) as WorkerTaskOffer; await this.transport.send({ type: "task.result", task_id: task.task_id, attempt_id: attemptId, ...(task.mission_context ? { mission_context: task.mission_context } : {}), result: parsed.result, metrics: parsed.metrics, result_manifest: parsed.resultManifest }); }
+  private async resendResult(attemptId: string): Promise<void> { const row = this.db.connection.prepare("SELECT * FROM results WHERE attempt_id = ? AND status = 'PENDING'").get(attemptId) as Record<string, any> | undefined; if (!row) return; const offer = this.db.connection.prepare("SELECT * FROM assignments WHERE attempt_id = ?").get(attemptId) as Record<string, any> | undefined; if (!offer) return; const parsed = JSON.parse(row.result_json); const task = JSON.parse(offer.offer_json) as WorkerTaskOffer; await this.transport.send({ type: "task.result", task_id: task.task_id, attempt_id: attemptId, fence_epoch: Number(offer.fence_epoch ?? task.fence_epoch ?? 1), ...(task.mission_context ? { mission_context: task.mission_context } : {}), result: parsed.result, metrics: parsed.metrics, result_manifest: parsed.resultManifest }); }
   private async resendPending(): Promise<void> { const rows = this.db.connection.prepare("SELECT attempt_id FROM results WHERE status = 'PENDING' ORDER BY created_at").all() as Array<{ attempt_id: string }>; for (const row of rows) await this.resendResult(row.attempt_id); }
   private async fail(offer: WorkerTaskOffer, code: string, message: string, retryable: boolean): Promise<void> {
     const failed = this.db.connection.prepare("UPDATE assignments SET status = 'FAILED', updated_at = ? WHERE attempt_id = ? AND status IN ('ACCEPTED', 'RUNNING')").run(this.clock(), offer.attempt_id);
-    if (Number(failed.changes) > 0) await this.transport.send({ type: "task.failed", task_id: offer.task_id, attempt_id: offer.attempt_id, code, message, retryable });
+    if (Number(failed.changes) > 0) await this.transport.send({ type: "task.failed", task_id: offer.task_id, attempt_id: offer.attempt_id, fence_epoch: offer.fence_epoch ?? 1, code, message, retryable });
   }
   private isCancelled(attemptId: string): boolean { return (this.db.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get(attemptId) as { status?: string } | undefined)?.status === "CANCELLED"; }
   private setTransportError(error: unknown): void { this.transportError ??= workerError(error); this.helloWaiter?.reject(this.transportError); }

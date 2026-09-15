@@ -39,6 +39,26 @@ export type CreateTaskInput = {
   inputArtifactIds: string[];
   purpose?: "USER" | "MISSION" | "MODEL_TEST" | "WORKER_TEST";
   settingsVersion?: number | null;
+  /** Optional platform contract metadata. Omitted values retain legacy v1 semantics. */
+  schemaVersion?: 1 | 2;
+  executionSemantics?: "legacy" | "platform_v2";
+  idempotencyKey?: string | null;
+  sourceIntentRef?: string | null;
+  conversationRef?: string | null;
+  workRef?: { id: string; revision: number; owner: string } | null;
+  requirements?: Record<string, JsonValue> | null;
+  criteria?: Record<string, JsonValue>[];
+  retryPolicy?: { maxAttempts: number; effectClass: "READ_ONLY" | "WORKSPACE_WRITE" | "EXTERNAL_WRITE" } | null;
+  queueDeadlineAt?: number | null;
+  approvalRef?: string | null;
+  requestedBy?: string;
+};
+
+export type TaskContractV2Input = CreateTaskInput & {
+  schemaVersion: 2;
+  executionSemantics: "platform_v2";
+  idempotencyKey: string;
+  sourceIntentRef: string;
 };
 
 export type TaskEventName =
@@ -144,6 +164,106 @@ export function parseCreateTaskInput(value: unknown, defaults: { timeoutSeconds?
     priority,
     inputArtifactIds,
   };
+}
+
+/**
+ * Parse the additive v2 delegation contract. The legacy parser intentionally
+ * remains strict and unchanged so an old client cannot accidentally send v2
+ * fields to a reject-unknown consumer.
+ */
+export function parseTaskContractV2Input(value: unknown, defaults: { timeoutSeconds?: number; maxAttempts?: number } = {}): TaskContractV2Input {
+  if (!isRecord(value)) throw new Error("request body must be an object");
+  rejectUnknown(value, ["schema_version", "source", "idempotency_key", "source_intent_ref", "conversation_ref", "work_ref", "task_type", "description", "title", "input", "requirements", "criteria", "input_artifact_ids", "priority", "queue_deadline", "execution_timeout_seconds", "retry_policy", "approval_ref"], "request");
+  if (value.schema_version !== 2) throw new Error("CONTRACT_UPGRADE_REQUIRED");
+  const idempotencyKey = stringValue(value.idempotency_key, "idempotency_key", 300);
+  const sourceIntentRef = stringValue(value.source_intent_ref, "source_intent_ref", 500);
+  const source = stringValue(value.source ?? "hermes", "source", 120);
+  const taskType = value.task_type as TaskType;
+  if (!TASK_TYPES.includes(taskType)) throw new Error("task_type is invalid");
+  const description = typeof value.description === "string" ? value.description : value.title;
+  const instruction = stringValue(description, "description", 100_000);
+  const title = stringValue(value.title ?? instruction.slice(0, 1_000), "title", 1_000);
+  const input = value.input ?? {};
+  if (!isRecord(input)) throw new Error("input must be an object");
+  const requirementsRaw = value.requirements;
+  if (!isRecord(requirementsRaw)) throw new Error("requirements must be an object");
+  rejectUnknown(requirementsRaw, ["capabilities_all", "runtime", "model", "workspace_ref", "data_policy_ref", "os", "resources", "required_worker", "preferred_worker"], "requirements");
+  const capabilitiesRaw = requirementsRaw.capabilities_all;
+  if (!Array.isArray(capabilitiesRaw) || capabilitiesRaw.length === 0 || capabilitiesRaw.length > 20) throw new Error("requirements.capabilities_all is invalid");
+  const capabilities: string[] = [];
+  const capabilityRequirements: JsonValue[] = [];
+  for (const [index, item] of capabilitiesRaw.entries()) {
+    if (!isRecord(item)) throw new Error(`requirements.capabilities_all[${index}] is invalid`);
+    rejectUnknown(item, ["id", "contract_version"], `requirements.capabilities_all[${index}]`);
+    const id = stringValue(item.id, `requirements.capabilities_all[${index}].id`, 120);
+    const contractVersion = nonNegativeInt(item.contract_version, `requirements.capabilities_all[${index}].contract_version`, 1, 100);
+    capabilities.push(id);
+    capabilityRequirements.push({ id, contract_version: contractVersion });
+  }
+  let runtime: string | undefined;
+  if (requirementsRaw.runtime !== undefined && requirementsRaw.runtime !== null) {
+    if (!isRecord(requirementsRaw.runtime)) throw new Error("requirements.runtime is invalid");
+    rejectUnknown(requirementsRaw.runtime, ["id", "version_constraint"], "requirements.runtime");
+    runtime = stringValue(requirementsRaw.runtime.id, "requirements.runtime.id", 120);
+  }
+  let model: TaskModelRequirement | undefined;
+  if (requirementsRaw.model !== undefined && requirementsRaw.model !== null) {
+    if (typeof requirementsRaw.model === "string") model = { name: stringValue(requirementsRaw.model, "requirements.model", 200), mode: "required" };
+    else {
+      if (!isRecord(requirementsRaw.model)) throw new Error("requirements.model is invalid");
+      rejectUnknown(requirementsRaw.model, ["id", "name", "mode", "version_constraint"], "requirements.model");
+      const name = optionalString(requirementsRaw.model.id ?? requirementsRaw.model.name, "requirements.model.id") ?? undefined;
+      const mode = (requirementsRaw.model.mode ?? "any") as TaskModelRequirement["mode"];
+      if (!name && mode !== "any") throw new Error("requirements.model.id is required for this mode");
+      if (!name && mode === "any") model = { mode };
+      else { if (!["required", "preferred", "any"].includes(mode ?? "")) throw new Error("requirements.model.mode is invalid"); model = { name, mode }; }
+    }
+  }
+  const resourcesRaw = requirementsRaw.resources;
+  let resources: TaskExecution["resources"] = {};
+  if (resourcesRaw !== undefined && resourcesRaw !== null) {
+    if (!isRecord(resourcesRaw)) throw new Error("requirements.resources is invalid");
+    rejectUnknown(resourcesRaw, ["min_ram_mb", "gpu_required", "cpu_cores", "free_storage_mb"], "requirements.resources");
+    resources = { minRamMb: nonNegativeInt(resourcesRaw.min_ram_mb, "requirements.resources.min_ram_mb", 0, 1_048_576), gpuRequired: resourcesRaw.gpu_required === true };
+  }
+  const workspaceRef = optionalString(requirementsRaw.workspace_ref, "requirements.workspace_ref") ?? undefined;
+  const requiredWorker = optionalString(requirementsRaw.required_worker, "requirements.required_worker") ?? undefined;
+  const preferredWorker = optionalString(requirementsRaw.preferred_worker, "requirements.preferred_worker") ?? undefined;
+  const criteriaRaw = value.criteria ?? [];
+  if (!Array.isArray(criteriaRaw) || criteriaRaw.length > 100) throw new Error("criteria is invalid");
+  const criteria: Record<string, JsonValue>[] = criteriaRaw.map((raw, index) => {
+    if (!isRecord(raw)) throw new Error(`criteria[${index}] is invalid`);
+    rejectUnknown(raw, ["id", "kind", "description", "expected", "evidence_refs"], `criteria[${index}]`);
+    return { id: stringValue(raw.id, `criteria[${index}].id`, 120), kind: stringValue(raw.kind ?? "custom", `criteria[${index}].kind`, 80), description: stringValue(raw.description, `criteria[${index}].description`, 2_000), expected: (raw.expected ?? null) as JsonValue, evidence_refs: (raw.evidence_refs ?? []) as JsonValue };
+  });
+  const timeoutSeconds = nonNegativeInt(value.execution_timeout_seconds, "execution_timeout_seconds", defaults.timeoutSeconds ?? 1_800, 86_400);
+  if (timeoutSeconds < 1) throw new Error("execution_timeout_seconds must be positive");
+  const retryRaw = value.retry_policy;
+  if (!isRecord(retryRaw)) throw new Error("retry_policy must be an object");
+  rejectUnknown(retryRaw, ["max_attempts", "effect_class"], "retry_policy");
+  const maxAttempts = nonNegativeInt(retryRaw.max_attempts, "retry_policy.max_attempts", defaults.maxAttempts ?? 1, 10);
+  if (maxAttempts < 1) throw new Error("retry_policy.max_attempts must be positive");
+  const effectClass = String(retryRaw.effect_class ?? "READ_ONLY") as "READ_ONLY" | "WORKSPACE_WRITE" | "EXTERNAL_WRITE";
+  if (!["READ_ONLY", "WORKSPACE_WRITE", "EXTERNAL_WRITE"].includes(effectClass)) throw new Error("retry_policy.effect_class is invalid");
+  let queueDeadlineAt: number | null = null;
+  if (value.queue_deadline !== undefined && value.queue_deadline !== null) {
+    if (typeof value.queue_deadline !== "string" || !Number.isFinite(Date.parse(value.queue_deadline))) throw new Error("queue_deadline must be an RFC3339 timestamp");
+    queueDeadlineAt = Date.parse(value.queue_deadline);
+  }
+  let workRef: { id: string; revision: number; owner: string } | null = null;
+  if (value.work_ref !== undefined && value.work_ref !== null) {
+    if (!isRecord(value.work_ref)) throw new Error("work_ref must be an object");
+    rejectUnknown(value.work_ref, ["id", "revision", "owner"], "work_ref");
+    const revision = nonNegativeInt(value.work_ref.revision, "work_ref.revision", 1, Number.MAX_SAFE_INTEGER);
+    workRef = { id: stringValue(value.work_ref.id, "work_ref.id", 300), revision, owner: stringValue(value.work_ref.owner ?? "hermes", "work_ref.owner", 120) };
+  }
+  const inputArtifactIds = value.input_artifact_ids ?? [];
+  if (!Array.isArray(inputArtifactIds) || inputArtifactIds.length > 100 || inputArtifactIds.some((item) => typeof item !== "string" || item.length === 0 || item.length > 300)) throw new Error("input_artifact_ids is invalid");
+  const priority = (value.priority ?? "normal") as TaskPriority;
+  if (!TASK_PRIORITIES.includes(priority)) throw new Error("priority is invalid");
+  const approvalRef = optionalString(value.approval_ref, "approval_ref") ?? null;
+  const requirements = { capabilities_all: capabilityRequirements, runtime: requirementsRaw.runtime ?? null, model: requirementsRaw.model ?? null, workspace_ref: workspaceRef ?? null, data_policy_ref: requirementsRaw.data_policy_ref ?? null, os: requirementsRaw.os ?? null, resources: (resourcesRaw ?? {}) as JsonValue, required_worker: requiredWorker ?? null, preferred_worker: preferredWorker ?? null } as Record<string, JsonValue>;
+  return { schemaVersion: 2, executionSemantics: "platform_v2", idempotencyKey, sourceIntentRef, source, title, taskType, instruction, context: {}, payload: input as Record<string, JsonValue>, execution: { capabilities, workerId: requiredWorker ?? null, runtime: runtime ?? "auto", model, resources, workspaceId: workspaceRef, preferenceId: null }, limits: { timeoutSeconds, maxAttempts }, priority, inputArtifactIds: inputArtifactIds as string[], correlationId: typeof value.conversation_ref === "string" ? value.conversation_ref : null, sourceRef: null, groupId: null, parentTaskId: null, requirements, criteria, retryPolicy: { maxAttempts, effectClass }, queueDeadlineAt, approvalRef, workRef, conversationRef: typeof value.conversation_ref === "string" ? value.conversation_ref : null };
 }
 
 export function parseRegistrationInput(value: unknown): { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; onboardingId?: string; hardware: Record<string, JsonValue>; capabilities?: Record<string, JsonValue>[]; models?: Record<string, JsonValue>[] } {

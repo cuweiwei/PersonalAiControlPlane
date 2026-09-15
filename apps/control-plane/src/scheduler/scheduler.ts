@@ -54,7 +54,7 @@ export class ResourceScheduler {
     for (const worker of workers) {
       const failure = this.rejectionReason(worker, task, requirement, now);
       if (failure) { reasons.push(failure); continue; }
-      const capabilities = this.db.all<Row>("SELECT * FROM worker_capabilities WHERE worker_id = ?", worker.id).filter((item) => READY_CAPABILITY.has(String(item.status)) && !["REVOKED", "REQUIRES_REVIEW"].includes(String(item.grant_status ?? "DISCOVERED")));
+      const capabilities = this.db.all<Row>("SELECT * FROM worker_capabilities WHERE worker_id = ?", worker.id).filter((item) => READY_CAPABILITY.has(String(item.status)) && !["REVOKED", "REQUIRES_REVIEW"].includes(String(item.grant_status ?? "DISCOVERED")) && (task.execution_semantics !== "platform_v2" || (String(item.grant_status) === "GRANTED" && String(item.evidence_state) === "VERIFIED" && (!item.verification_expires_at || Number(item.verification_expires_at) > now))));
       const required = requirement.capabilities?.length ? requirement.capabilities : [task.task_type];
       const preference = requirement.preferenceId ? this.db.one<Row>("SELECT * FROM model_preferences WHERE id = ? AND deleted_at IS NULL", requirement.preferenceId) : undefined;
       const preferenceTargets = preference ? parse(preference.targets_json, []) as Array<Record<string, unknown>> : [];
@@ -90,13 +90,18 @@ export class ResourceScheduler {
     if (!this.coordinator.isConnected(String(worker.id)) || worker.status !== "ONLINE") return { code: "WORKER_OFFLINE", count: 1, message: "等待指定裝置重新連線" };
     const preferences = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", worker.id);
     const features = parse(worker.protocol_features_json, []);
-    if (task.owner_kind === "MISSION" || (Array.isArray(features) && features.length > 0)) {
+    if (task.execution_semantics === "platform_v2" || task.owner_kind === "MISSION" || (Array.isArray(features) && features.length > 0)) {
       const requiredFeatures = new Set(["resolved_execution_v1", "task_run_v1"]);
       if (task.task_type === "codex") requiredFeatures.add("workspace_inventory_v1");
       if (task.owner_kind === "MISSION") {
         requiredFeatures.add("mission_execution_v1");
         requiredFeatures.add("stop_evidence_v1");
         requiredFeatures.add("workspace_exclusion_v1");
+      }
+      if (task.execution_semantics === "platform_v2") {
+        requiredFeatures.add("attempt_fencing_v1");
+        requiredFeatures.add("durable_result_ack_v1");
+        if (requirement.workspaceId) requiredFeatures.add("workspace_lock_v1");
       }
       if (preferences && (preferences.mode === "IDLE_ONLY" || preferences.pause_id || Number(preferences.pause_indefinite ?? 0) === 1)) { requiredFeatures.add("availability_v1"); requiredFeatures.add("settings_apply_v1"); }
       if ([...requiredFeatures].some((feature) => !features.includes(feature))) return { code: "WORKER_UPDATE_REQUIRED", count: 1, message: "Worker 需要更新才能執行此工作" };
