@@ -53,6 +53,28 @@ test("OpenAI-compatible executor discovers models and returns inference result",
   }
 });
 
+test("Ollama executor sends bounded generation options with the typed prompt", async () => {
+  let requestBody: Record<string, any> | undefined;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, any>;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ message: { role: "assistant", content: "2" }, prompt_eval_count: 3, eval_count: 1 }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const executor = new OllamaExecutor(`http://127.0.0.1:${(server.address() as { port: number }).port}`);
+  try {
+    const events = [];
+    for await (const event of executor.execute({ task_id: "task", attempt_id: "attempt", task_type: "llm.inference", instruction: "fallback", payload: { prompt: "What is 1+1?", temperature: 0.4, max_tokens: 32 }, execution: { model: { name: "llama3:latest" } }, limits: { timeout_seconds: 30 } })) events.push(event);
+    assert.deepEqual(requestBody, { model: "llama3:latest", stream: false, messages: [{ role: "system", content: "You are an execution worker." }, { role: "user", content: "What is 1+1?" }], options: { temperature: 0.4, num_predict: 32 } });
+    assert.equal(events.at(-1)?.result?.text, "2");
+    assert.equal(events.at(-1)?.metrics?.completion_tokens, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("OpenAI-compatible executor preserves detailed model load state", async () => {
   const server = createServer((request, response) => {
     response.setHeader("content-type", "application/json");
