@@ -41,8 +41,10 @@ const definitions: SettingDefinition[] = [
   { key: "scheduler_interval_ms", label: "派工檢查間隔", description: "工作派送檢查間隔。", type: "integer", unit: "毫秒", defaultValue: 1000, min: 100, max: 60000, nullable: false, envKey: "PAI_SCHEDULER_INTERVAL_MS", applyScope: "SERVER_LOOP" },
   { key: "queue_attention_seconds", label: "等待提醒門檻", description: "工作持續阻擋超過此時間後列為需處理。", type: "integer", unit: "秒", defaultValue: 600, min: 60, max: 86400, nullable: false, envKey: "PAI_QUEUE_ATTENTION_SECONDS", applyScope: "DISPATCH_PROJECTION" },
   { key: "idle_threshold_seconds", label: "閒置接案門檻", description: "Worker 連續無互動後才可接案的時間。", type: "integer", unit: "秒", defaultValue: 600, min: 60, max: 7200, nullable: false, envKey: "PAI_IDLE_THRESHOLD_SECONDS", applyScope: "WORKER" },
+  { key: "control_plane_entry_url", label: "Personal AI Control Plane 入口", description: "使用者可開啟的控制平台入口。", type: "string", unit: null, defaultValue: null, min: null, max: null, nullable: true, envKey: "PAI_CONTROL_PLANE_ENTRY_URL", applyScope: "SYSTEMS" },
   { key: "hermes_entry_url", label: "Hermes 入口", description: "使用者可開啟的 Hermes 入口。", type: "string", unit: null, defaultValue: null, min: null, max: null, nullable: true, envKey: "PAI_HERMES_ENTRY_URL", applyScope: "SYSTEMS" },
   { key: "contexthub_entry_url", label: "ContextHub 入口", description: "使用者可開啟的 ContextHub 入口。", type: "string", unit: null, defaultValue: null, min: null, max: null, nullable: true, envKey: "PAI_CONTEXTHUB_ENTRY_URL", applyScope: "SYSTEMS" },
+  { key: "information_radar_entry_url", label: "Information Radar 入口", description: "使用者可開啟的 Information Radar 入口。", type: "string", unit: null, defaultValue: null, min: null, max: null, nullable: true, envKey: "PAI_INFORMATION_RADAR_ENTRY_URL", applyScope: "SYSTEMS" },
   { key: "office_enabled", label: "啟用虛擬辦公室", description: "允許建立新的 Virtual Office Mission；關閉時仍保留歷史資料查詢。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: "PAI_OFFICE_ENABLED", applyScope: "OFFICE_INTAKE" },
   { key: "office_max_active_missions", label: "同時進行的 Mission 上限", description: "新 Mission admission 的上限；活動中的等待工作也計入。", type: "integer", unit: "筆", defaultValue: 5, min: 1, max: 20, nullable: false, envKey: "PAI_OFFICE_MAX_ACTIVE_MISSIONS", applyScope: "OFFICE_INTAKE" },
   { key: "office_default_run_concurrency", label: "Mission 同時執行上限", description: "新 Mission 每輪允許的 Worker/Hermes 活動 execution 上限。", type: "integer", unit: "個", defaultValue: 3, min: 1, max: 10, nullable: false, envKey: "PAI_OFFICE_DEFAULT_RUN_CONCURRENCY", applyScope: "OFFICE_INTAKE" },
@@ -85,7 +87,12 @@ function parseEnv(definition: SettingDefinition): unknown {
 function isValid(definition: SettingDefinition, value: unknown): boolean {
   if (value === null && definition.nullable) return true;
   if (definition.type === "boolean") return typeof value === "boolean";
-  if (definition.type === "string") return typeof value === "string" && value.length <= 2_000;
+  if (definition.type === "string") {
+    if (typeof value !== "string" || value.length > 2_000) return false;
+    if (!definition.key.endsWith("_entry_url")) return true;
+    if (value.startsWith("/") && !value.startsWith("//")) return true;
+    try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
+  }
   return typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= (definition.min ?? Number.MIN_SAFE_INTEGER) && value <= (definition.max ?? Number.MAX_SAFE_INTEGER);
 }
 

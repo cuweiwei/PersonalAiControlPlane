@@ -18,7 +18,7 @@ const nav = [
   ["/systems", "系統"],
   ["/settings", "設定"],
 ] as const;
-const statusLabels: Record<string, string> = { QUEUED: "等待執行", ASSIGNED: "已派送", RUNNING: "執行中", STARTED: "執行中", ADMITTED: "已接案", NOT_STARTED: "尚未執行", APPLIED: "已套用", SUCCEEDED: "已完成", FAILED: "失敗", CANCELLED: "已取消", ONLINE: "線上", OFFLINE: "離線", DISABLED: "已停用", READY: "可用", UNAVAILABLE: "目前無法使用", DEGRADED: "降級", UNKNOWN: "未知", LOADED: "已載入", AVAILABLE: "可取得", PENDING: "等待中", RETRY_WAIT: "等待重試", IN_FLIGHT: "投遞中", DELIVERED: "已交付", ATTENTION: "需要處理", RELEASED: "已釋放", RELEASING: "釋放中", RESERVED: "已預留" };
+const statusLabels: Record<string, string> = { QUEUED: "等待執行", ASSIGNED: "已派送", RUNNING: "執行中", STARTED: "執行中", ADMITTED: "已接案", NOT_STARTED: "尚未執行", APPLIED: "已套用", SUCCEEDED: "已完成", FAILED: "失敗", CANCELLED: "已取消", ONLINE: "線上", OFFLINE: "離線", DISABLED: "已停用", READY: "可用", HEALTHY: "健康", UNAVAILABLE: "目前無法使用", DEGRADED: "降級", UNKNOWN: "未知", LOADED: "已載入", AVAILABLE: "可取得", PENDING: "等待中", RETRY_WAIT: "等待重試", IN_FLIGHT: "投遞中", DELIVERED: "已交付", ATTENTION: "需要處理", RELEASED: "已釋放", RELEASING: "釋放中", RESERVED: "已預留" };
 
 function display(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -130,7 +130,7 @@ function Home({ refreshVersion }: { refreshVersion: number }) {
     h("section", { className: "workspace-grid" },
       h("article", { className: "card workspace-team" },
         h("div", { className: "section-heading" }, h("div", null, h("p", { className: "eyebrow" }, "YOUR TEAM"), h("h2", null, "工作室裡的夥伴")), h("a", { className: "button-link secondary", href: "/office" }, "看 Office →")),
-        systems.map((item: Item) => h("div", { className: "evidence-row", key: item.id }, h("span", { className: "avatar-mark" }, String(item.name ?? item.id).slice(0, 1)), h("div", { className: "grow" }, h("strong", null, item.name ?? item.id), h("small", null, `${display(item.type)} · ${time(item.checkedAt)}`)), h(Status, { value: item.status }))),
+        systems.map((item: Item) => h("div", { className: "evidence-row", key: item.id }, h("span", { className: "avatar-mark" }, String(item.name ?? item.id).slice(0, 1)), h("div", { className: "grow" }, item.entryUrl ? h("a", { href: item.entryUrl, target: "_blank", rel: "noreferrer" }, h("strong", null, item.name ?? item.id)) : h("strong", null, item.name ?? item.id), h("small", null, `${display(item.type)} · ${time(item.checkedAt)}`)), h(Status, { value: item.status }))),
         h("div", { className: "subsection-heading" }, h("h3", null, "正在推進的工作"), h("a", { href: "/tasks" }, "全部任務 →")),
         visibleTasks.length ? visibleTasks.map((task: Item) => h("div", { className: "evidence-row compact", key: task.id }, h("div", { className: "grow" }, h("a", { href: `/tasks/${task.id}` }, task.title), h("small", null, `${display(task.taskType)} · ${time(task.createdAt)}`)), h(Status, { value: task.status }))) : h("p", { className: "empty-copy" }, "尚未建立正式任務。")),
       h("aside", { className: "card attention-panel" },
@@ -274,7 +274,16 @@ function Systems({ refreshVersion }: { refreshVersion: number }) {
   const [items, setItems] = useState<Item[] | null>(null);
   const [error, setError] = useState<unknown>(null); useEffect(() => { request("/api/v2/systems").then((value) => { setItems(value.items ?? []); setError(null); }).catch(setError); }, [refreshVersion]);
   if (!items) return error ? h(React.Fragment, null, h(ErrorPanel, { error }), h("button", { type: "button", onClick: () => setError(null) }, "重新載入")) : h(Loading);
-  return h(React.Fragment, null, h(PageHeader, { eyebrow: "SYSTEM ROOM", title: "系統", description: "分開查看 health、readiness 與目前可觀測的服務證據。" }), h("div", { className: "card-grid" }, items.map((item) => h("article", { className: "card", key: item.id }, h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.status })), h("p", null, `${display(item.type)} · ${display(item.baseUrl)}${display(item.healthPath)}`), h("p", null, `最後確認 ${time(item.checkedAt)} · ${display(item.latencyMs)} ms`), item.entryUrl ? h("a", { className: "button-link secondary", href: item.entryUrl, target: "_blank", rel: "noreferrer" }, `開啟 ${item.name}`) : h("p", { className: "notice" }, "尚未設定可由瀏覽器開啟的入口。")))));
+  return h(React.Fragment, null,
+    h(PageHeader, { eyebrow: "SYSTEM ROOM", title: "系統", description: "分開查看 health、readiness 與目前可觀測的服務證據。" }),
+    h("div", { className: "card-grid" }, items.map((item) => h("article", { className: "card", key: item.id },
+      h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.status })),
+      h("p", null, `${display(item.type)} · 最後確認 ${time(item.checkedAt)} · ${display(item.latencyMs)} ms`),
+      item.status !== "HEALTHY" && item.message ? h("p", { className: "notice error" }, `健康檢查：${item.message}`) : null,
+      item.entryUrl ? h("a", { className: "button-link secondary", href: item.entryUrl, target: "_blank", rel: "noreferrer" }, `開啟 ${item.name}`) : h("p", { className: "notice" }, "尚未設定可由瀏覽器開啟的入口。"),
+      h("details", { className: "system-evidence" }, h("summary", null, "查看健康檢查證據"), h(Details, { item: { baseUrl: item.baseUrl, healthPath: item.healthPath, message: item.message } }))
+    )))
+  );
 }
 
 function Settings({ refreshVersion }: { refreshVersion: number }) {

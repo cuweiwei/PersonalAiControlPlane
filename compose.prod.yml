@@ -13,6 +13,8 @@ services:
       PAI_DATA_DIR: /data
       PAI_ARTIFACT_DIR: /data/artifacts
       PAI_HERMES_URL: ${PAI_HERMES_URL:-http://hermes-agent:9119}
+      PAI_CONTROL_PLANE_ENTRY_URL: ${PAI_CONTROL_PLANE_ENTRY_URL:-https://gnest.taila77e5f.ts.net/}
+      PAI_HERMES_ENTRY_URL: ${PAI_HERMES_ENTRY_URL:-https://gnest.taila77e5f.ts.net:9119/}
       PAI_HERMES_BRAIN_V2_ENABLED: "true"
       PAI_HERMES_OFFICE_URL: ${PAI_HERMES_OFFICE_URL:-http://hermes-agent:9121}
       # Fixed private service identity; the runtime resolves this alias and
@@ -20,6 +22,10 @@ services:
       PAI_OFFICE_TRUSTED_PEERS: ${PAI_OFFICE_TRUSTED_PEERS:-hermes-agent}
       PAI_HERMES_TASK_EVENT_PATH: ${PAI_HERMES_TASK_EVENT_PATH:-/api/internal/control-plane/task-events}
       PAI_CONTEXTHUB_URL: ${PAI_CONTEXTHUB_URL:-http://contexthub:8787}
+      PAI_CONTEXTHUB_ENTRY_URL: ${PAI_CONTEXTHUB_ENTRY_URL:-https://gnest.taila77e5f.ts.net:8443/dashboard}
+      PAI_INFORMATION_RADAR_URL: ${PAI_INFORMATION_RADAR_URL:-https://gnest.taila77e5f.ts.net:8789}
+      PAI_INFORMATION_RADAR_HEALTH_PATH: ${PAI_INFORMATION_RADAR_HEALTH_PATH:-/health/ready}
+      PAI_INFORMATION_RADAR_ENTRY_URL: ${PAI_INFORMATION_RADAR_ENTRY_URL:-https://gnest.taila77e5f.ts.net:8789/}
       PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}
       PAI_MAX_ARTIFACT_BYTES: ${PAI_MAX_ARTIFACT_BYTES:-1073741824}
     volumes:

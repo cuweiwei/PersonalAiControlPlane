@@ -95,7 +95,9 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     const repeated = await jsonRequest(`/api/v2/workers/${workerId}`, { method: "DELETE" });
     assert.equal(repeated.response.status, 200);
     assert.equal((await jsonRequest("/api/v2/models")).body.items.length, 0);
-    assert.equal((await jsonRequest("/api/v2/systems")).body.items.length, 3);
+    const systems = (await jsonRequest("/api/v2/systems")).body.items as Array<Record<string, any>>;
+    assert.equal(systems.length, 4);
+    assert.deepEqual(systems.map((item) => item.id), ["control-plane", "contexthub", "hermes", "information-radar"]);
     const patched = await jsonRequest("/api/v2/settings", { method: "PATCH", body: JSON.stringify({ default_max_attempts: 3 }) });
     assert.equal(patched.body.default_max_attempts, 3);
   } finally {
