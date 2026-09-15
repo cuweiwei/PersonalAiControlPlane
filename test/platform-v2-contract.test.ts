@@ -117,9 +117,16 @@ test("platform v2 HTTP and MCP adapters share the Task domain", async () => {
     assert.equal(created.body.deduplicated, false);
     const replay = await jsonRequest("/api/v2/tasks", { method: "POST", headers: { "idempotency-key": "http-v2-1", "x-actor": "hermes:http" }, body: JSON.stringify(payload) });
     assert.equal(replay.body.deduplicated, true);
-    const queried = await jsonRequest("/api/v2/capabilities/query", { method: "POST", body: JSON.stringify(payload) });
+    const registration = workers.register({ name: "Query Worker", registrationSecret: "query-registration-secret-123", platform: "test", hardware: {} });
+    workers.approveRegistration(registration.registrationId);
+    const enrollment = workers.pollRegistration(registration.registrationId, "query-registration-secret-123");
+    workers.markConnected(String(enrollment.workerId), 1000);
+    workers.updateCapabilities(String(enrollment.workerId), [{ capability: "llm.inference", runtime: "ollama", status: "READY", contract_version: 2, evidence_state: "VERIFIED" }], 1000);
+    workers.grantCapability(String(enrollment.workerId), String(db.one<Record<string, any>>("SELECT id FROM worker_capabilities WHERE worker_id = ?", enrollment.workerId)!.id), "owner", 1000);
+    workers.updateModels(String(enrollment.workerId), [{ runtime: "ollama", id: "llama3:latest", status: "ready" }], 1000);
+    const queried = await jsonRequest("/api/v2/capabilities/query", { method: "POST", body: JSON.stringify({ requirements: { capabilities_all: [{ id: "llm.inference", contract_version: 2 }], runtime: { id: "ollama" }, model: { id: "llama3:latest", mode: "required" } } }) });
     assert.equal(queried.response.status, 200);
-    assert.ok(Array.isArray(queried.body.rejection_reasons));
+    assert.deepEqual(queried.body.matched_candidates.map((item: Record<string, any>) => item.worker_id), [enrollment.workerId]);
     const mcp = await jsonRequest("/api/v2/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "control.tasks.get", params: { task_id: created.body.task_id } }) });
     assert.equal(mcp.response.status, 200);
     assert.equal(mcp.body.jsonrpc, "2.0");

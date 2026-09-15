@@ -135,7 +135,7 @@ export class OutboundWorkerRuntime {
     const capabilities: Record<string, JsonValue>[] = [];
     const models: Record<string, JsonValue>[] = [];
     const observedAt = this.clock();
-    for (const executor of this.executors) { const found = await executor.discover?.(); if (found?.capabilities) capabilities.push(...found.capabilities.map((item) => ({ ...item, evidence_state: "VERIFIED", verification_expires_at: observedAt + 30_000, verification_ref: `worker:${this.workerId}:${observedAt}` }))); if (found?.models) models.push(...found.models); }
+    for (const executor of this.executors) { const found = await executor.discover?.(); if (found?.capabilities) capabilities.push(...found.capabilities.map((item) => ({ ...item, contract_version: Number(item.contract_version ?? item.contractVersion ?? 2), evidence_state: "VERIFIED", verification_expires_at: observedAt + 30_000, verification_ref: `worker:${this.workerId}:${observedAt}` }))); if (found?.models) models.push(...found.models); }
     await this.transport.send({ type: "capabilities.update", worker_id: this.workerId, capabilities });
     if (Object.keys(this.workspaces).length > 0) await this.transport.send({ type: "inventory.update", worker_id: this.workerId, capabilities, models, workspaces: Object.entries(this.workspaces).map(([workspace_id, value]) => ({ workspace_id, display_name: value.name, state: "READY", capabilities: ["codex", "python"], config_version: 1 })) });
     await this.transport.send({ type: "models.update", worker_id: this.workerId, models });

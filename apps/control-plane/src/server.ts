@@ -91,9 +91,10 @@ export function createControlPlaneServer(options: Options) {
   const queryCapabilities = async (input: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const observedAt = Date.now();
     const requirements = input.requirements && typeof input.requirements === "object" && !Array.isArray(input.requirements) ? input.requirements as Row : {};
-    const required = Array.isArray(requirements.capabilities_all) ? requirements.capabilities_all.map((item) => typeof item === "string" ? item : item && typeof item === "object" ? String((item as Row).id ?? "") : "").filter(Boolean) : [];
+    const required = Array.isArray(requirements.capabilities_all) ? requirements.capabilities_all.map((item) => typeof item === "string" ? { id: item, contractVersion: 1 } : item && typeof item === "object" ? { id: String((item as Row).id ?? ""), contractVersion: Math.max(1, Number((item as Row).contract_version ?? (item as Row).contractVersion ?? 1)) } : { id: "", contractVersion: 1 }).filter((item) => item.id) : [];
     const runtime = requirements.runtime && typeof requirements.runtime === "object" ? String((requirements.runtime as Row).id ?? "") : typeof requirements.runtime === "string" ? requirements.runtime : "";
-    const model = requirements.model && typeof requirements.model === "object" ? String((requirements.model as Row).id ?? (requirements.model as Row).name ?? "") : typeof requirements.model === "string" ? requirements.model : "";
+    const modelName = requirements.model && typeof requirements.model === "object" ? String((requirements.model as Row).id ?? (requirements.model as Row).name ?? "") : typeof requirements.model === "string" ? requirements.model : "";
+    const modelMode = requirements.model && typeof requirements.model === "object" ? String((requirements.model as Row).mode ?? "any") : modelName ? "required" : "any";
     const rows = options.db.all<Row>("SELECT w.id AS worker_id, w.name, w.status, w.enabled, w.drain, w.last_heartbeat_at, wc.capability, wc.runtime, wc.runtime_version, wc.grant_status, wc.evidence_state, wc.verification_expires_at, wc.verification_ref, wc.contract_version, wc.descriptor_json FROM workers w JOIN worker_capabilities wc ON wc.worker_id = w.id WHERE w.removed_at IS NULL AND wc.superseded_at IS NULL ORDER BY w.id, wc.capability");
     const grouped = new Map<string, Row>();
     for (const row of rows) {
@@ -107,9 +108,12 @@ export function createControlPlaneServer(options: Options) {
     const rejectionReasons: Row[] = [];
     for (const candidate of grouped.values()) {
       const capabilities = candidate.capabilities as Row[];
-      const missing = required.filter((id) => !capabilities.some((item) => item.id === id && item.grant_status === "GRANTED" && item.evidence_state === "VERIFIED" && (!item.verification_expires_at || Number(item.verification_expires_at) > observedAt)));
+      const missing = required.filter((requirement) => !capabilities.some((item) => item.id === requirement.id && Number(item.contract_version ?? 1) >= requirement.contractVersion && item.grant_status === "GRANTED" && item.evidence_state === "VERIFIED" && (!item.verification_expires_at || Number(item.verification_expires_at) > observedAt)));
       const runtimeMissing = runtime && !capabilities.some((item) => String(item.runtime ?? "") === runtime) ? ["runtime_unavailable"] : [];
-      const modelMissing = model && !capabilities.some((item) => String(item.id ?? "") === model) ? ["model_unavailable"] : [];
+      const models = options.db.all<Row>("SELECT runtime, model_id, status, present FROM worker_models WHERE worker_id = ? AND present = 1 AND status = 'READY'", candidate.worker_id);
+      const hasAnyModel = models.some((item) => !runtime || String(item.runtime ?? "") === runtime);
+      const hasRequestedModel = modelName && models.some((item) => String(item.model_id ?? "") === modelName && (!runtime || String(item.runtime ?? "") === runtime));
+      const modelMissing = modelName && ((modelMode === "required" && !hasRequestedModel) || (modelMode !== "required" && !hasAnyModel)) ? ["model_unavailable"] : [];
       const workerAvailable = candidate.status === "ONLINE";
       const reasons = [...missing.map((id) => `capability_unverified:${id}`), ...runtimeMissing, ...modelMissing, ...(workerAvailable ? [] : ["worker_offline"])]
       if (reasons.length === 0) matchedCandidates.push({ worker_id: candidate.worker_id, name: candidate.name, capabilities: capabilities.map((item) => item.id), verification_refs: [...new Set(candidate.verification_refs as string[])] });

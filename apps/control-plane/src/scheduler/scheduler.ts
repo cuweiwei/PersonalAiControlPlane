@@ -5,7 +5,7 @@ import { WorkerCoordinator } from "../workers/worker-channel.ts";
 import { uuidv7 } from "../../../../packages/contracts/src/index.ts";
 
 type Row = Record<string, any>;
-type Requirement = { capabilities?: string[]; workerId?: string | null; runtime?: string; model?: { name?: string; mode?: string }; resources?: { minRamMb?: number; gpuRequired?: boolean }; workspaceId?: string; preferenceId?: string | null };
+type Requirement = { capabilities?: string[]; capabilityVersions?: Record<string, number>; workerId?: string | null; runtime?: string; model?: { name?: string; mode?: string }; resources?: { minRamMb?: number; gpuRequired?: boolean }; workspaceId?: string; preferenceId?: string | null };
 type Candidate = Row & { resolvedExecution: Record<string, unknown>; score: { exact: number; preferred: number; preference: number; loaded: number; active: number; headroom: number; lastAssigned: number } };
 const READY_CAPABILITY = new Set(["READY", "HEALTHY"]);
 
@@ -24,6 +24,10 @@ export class ResourceScheduler {
     const queued = this.db.all<Row>("SELECT t.* FROM tasks t LEFT JOIN task_dispatch_state d ON d.task_id = t.id WHERE t.status = 'QUEUED' AND (t.archived_at IS NULL OR t.archived_at = 0) AND (d.dispatch_not_before IS NULL OR d.dispatch_not_before <= ?) ORDER BY t.priority DESC, t.created_at ASC, t.id ASC", now);
     for (const task of queued) {
       const requirement = parse(task.execution_json) as Requirement;
+      if (task.execution_semantics === "platform_v2") {
+        const contract = parse(task.requirements_json, {});
+        requirement.capabilityVersions = Object.fromEntries((Array.isArray(contract.capabilities_all) ? contract.capabilities_all : []).filter((item: any) => item && typeof item.id === "string").map((item: any) => [item.id, Math.max(1, Number(item.contract_version ?? 1))]));
+      }
       const candidates = this.evaluate(task, requirement, now);
       if (candidates.length === 0) continue;
       const selected = this.select(candidates, requirement);
@@ -59,7 +63,7 @@ export class ResourceScheduler {
       const preference = requirement.preferenceId ? this.db.one<Row>("SELECT * FROM model_preferences WHERE id = ? AND deleted_at IS NULL", requirement.preferenceId) : undefined;
       const preferenceTargets = preference ? parse(preference.targets_json, []) as Array<Record<string, unknown>> : [];
       const capability = capabilities.find((item) => {
-        if (!required.includes(String(item.capability)) || (requirement.runtime && requirement.runtime !== "auto" && String(item.runtime || "") !== requirement.runtime)) return false;
+        if (!required.includes(String(item.capability)) || Number(item.contract_version ?? 1) < Number(requirement.capabilityVersions?.[String(item.capability)] ?? 1) || (requirement.runtime && requirement.runtime !== "auto" && String(item.runtime || "") !== requirement.runtime)) return false;
         if (task.task_type !== "llm.inference") return true;
         const runtime = requirement.runtime && requirement.runtime !== "auto" ? requirement.runtime : String(item.runtime || "");
         const models = this.db.all<Row>("SELECT model_id FROM worker_models WHERE worker_id = ? AND present = 1 AND status = 'READY' AND (? = '' OR runtime = ?)", worker.id, runtime, runtime);
