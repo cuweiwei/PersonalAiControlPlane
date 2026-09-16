@@ -64,14 +64,18 @@ test("canonical v2 flow enrolls a worker, dispatches over WS, and records result
     const offer = await waitFor(messages, "task.offer");
     socket.send(JSON.stringify({ type: "task.accept", task_id: task.id, attempt_id: offer.attempt_id }));
     socket.send(JSON.stringify({ type: "task.started", task_id: task.id, attempt_id: offer.attempt_id }));
-    socket.send(JSON.stringify({ type: "task.artifact", task_id: task.id, attempt_id: offer.attempt_id, artifact: { filename: "output.txt", media_type: "text/plain", data_base64: Buffer.from("worker output").toString("base64") } }));
+    socket.send(JSON.stringify({ type: "task.artifact", task_id: task.id, attempt_id: offer.attempt_id, artifact: { artifact_key: "output.v1", filename: "output.txt", media_type: "text/plain", data_base64: Buffer.from("worker output").toString("base64") } }));
     const artifactAck = await waitFor(messages, "task.artifact.ack");
     assert.equal(typeof artifactAck.artifact_id, "string");
     assert.equal(db.one("SELECT id FROM artifacts WHERE id = ?", artifactAck.artifact_id)?.id, artifactAck.artifact_id);
-    socket.send(JSON.stringify({ type: "task.result", task_id: task.id, attempt_id: offer.attempt_id, result: { ok: true }, metrics: {} }));
+    socket.send(JSON.stringify({ type: "task.result", task_id: task.id, attempt_id: offer.attempt_id, result: { ok: true }, metrics: {}, result_manifest: { kind: "GENERIC", changes: { state: "OBSERVED", files: ["output.txt"], diff_artifact_key: "output.v1", attribution: "WORKER_OBSERVED" }, validation: { state: "FAILED", checks: [{ id: "test", actual: 1 }] }, artifacts: [{ artifact_key: "output.v1" }] } }));
     await waitFor(messages, "task.result.ack");
     for (let index = 0; index < 100; index += 1) { if (tasks.get(task.id as string)?.status === "SUCCEEDED") break; await new Promise((resolve) => setTimeout(resolve, 10)); }
     assert.equal(tasks.get(task.id as string)?.status, "SUCCEEDED");
+    const manifest = (tasks.get(task.id as string)?.result as Record<string, any>)?.resultManifest;
+    assert.equal(manifest.changes.diff_artifact_id, artifactAck.artifact_id);
+    assert.equal(manifest.artifacts[0].id, artifactAck.artifact_id);
+    assert.equal(manifest.validation.state, "FAILED");
   } finally {
     socket.close();
     coordinator.close();

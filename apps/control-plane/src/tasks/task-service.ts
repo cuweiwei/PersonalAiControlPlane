@@ -433,17 +433,28 @@ export class TaskService {
 
   private normalizeResultManifest(input: Record<string, unknown>, attempt: AttemptRow, taskType: string, result: Record<string, JsonValue>, metrics: Record<string, JsonValue>): Record<string, unknown> {
     const execution = parseJson(attempt.resolved_execution_json, {});
-    const artifacts = Array.isArray(input.artifacts) ? input.artifacts : [];
-    for (const item of artifacts) {
-      const artifactId = item && typeof item === "object" ? String((item as Record<string, unknown>).id ?? (item as Record<string, unknown>).artifact_id ?? "") : "";
-      const artifact = artifactId ? this.db.one<TaskRow>("SELECT id, attempt_id, storage_state, sha256, storage_path FROM artifacts WHERE id = ? AND task_id = ?", artifactId, attempt.task_id) : undefined;
-      if (!artifact || artifact.attempt_id !== attempt.id || String(artifact.storage_state ?? "AVAILABLE") !== "AVAILABLE") throw new Error("RESULT_ARTIFACT_NOT_READY");
-      const claimedHash = item && typeof item === "object" ? (item as Record<string, unknown>).sha256 ?? (item as Record<string, unknown>).digest : undefined;
-      if (claimedHash !== undefined && (typeof claimedHash !== "string" || claimedHash !== String(artifact.sha256))) throw new Error("ARTIFACT_CONTENT_CONFLICT");
-      if (this.artifactStorage) {
-        if (!this.artifactStorage.exists(String(artifact.storage_path))) throw new Error("ARTIFACT_MISSING");
-        if (sha256(this.artifactStorage.read(String(artifact.storage_path))) !== String(artifact.sha256)) throw new Error("ARTIFACT_CONTENT_CONFLICT");
-      }
+    const rawArtifacts = Array.isArray(input.artifacts) ? input.artifacts : [];
+    const artifacts: unknown[] = [];
+    for (const item of rawArtifacts) {
+      if (!item || typeof item !== "object") { artifacts.push(item); continue; }
+      const record = item as Record<string, unknown>;
+      const artifactId = String(record.id ?? record.artifact_id ?? "");
+      const artifactKey = typeof record.artifact_key === "string" ? record.artifact_key : "";
+      const artifact = artifactId
+        ? this.db.one<TaskRow>("SELECT id, attempt_id, filename, media_type, storage_state, sha256, storage_path FROM artifacts WHERE id = ? AND task_id = ?", artifactId, attempt.task_id)
+        : artifactKey
+          ? this.db.one<TaskRow>("SELECT id, attempt_id, filename, media_type, storage_state, sha256, storage_path FROM artifacts WHERE id IN (SELECT artifact_id FROM task_artifacts WHERE task_id = ? AND direction = 'OUTPUT') AND attempt_id = ? AND artifact_key = ?", attempt.task_id, attempt.id, artifactKey)
+          : undefined;
+      if (artifactId || artifactKey) {
+        if (!artifact || artifact.attempt_id !== attempt.id || String(artifact.storage_state ?? "AVAILABLE") !== "AVAILABLE") throw new Error("RESULT_ARTIFACT_NOT_READY");
+        const claimedHash = record.sha256 ?? record.digest;
+        if (claimedHash !== undefined && (typeof claimedHash !== "string" || claimedHash !== String(artifact.sha256))) throw new Error("ARTIFACT_CONTENT_CONFLICT");
+        if (this.artifactStorage) {
+          if (!this.artifactStorage.exists(String(artifact.storage_path))) throw new Error("ARTIFACT_MISSING");
+          if (sha256(this.artifactStorage.read(String(artifact.storage_path))) !== String(artifact.sha256)) throw new Error("ARTIFACT_CONTENT_CONFLICT");
+        }
+        artifacts.push({ ...record, id: artifact.id, artifact_id: artifact.id, filename: artifact.filename, media_type: artifact.media_type, sha256: artifact.sha256 });
+      } else artifacts.push(item);
     }
     const executionRecord = execution && typeof execution === "object" ? execution as Record<string, unknown> : {};
     const model = executionRecord.model && typeof executionRecord.model === "object" ? executionRecord.model as Record<string, unknown> : {};
@@ -451,7 +462,14 @@ export class TaskService {
     const kindByTaskType: Record<string, string> = { "llm.inference": "TEXT", codex: "CODEX", python: "PYTHON", command: "COMMAND", generic: "GENERIC" };
     const kind = ["TEXT", "CODEX", "PYTHON", "COMMAND", "GENERIC"].includes(String(input.kind)) ? String(input.kind) : kindByTaskType[taskType] ?? "GENERIC";
     const text = typeof input.text === "string" ? input.text : typeof result.text === "string" ? result.text : typeof result.stdout === "string" ? result.stdout : null;
-    return { schema_version: 1, kind, summary: typeof input.summary === "string" ? input.summary : text ? text.slice(0, 240) : null, text, format: typeof input.format === "string" ? input.format : "plain", execution: target, changes: input.changes ?? { state: "NOT_PROVIDED", files: [], diff_artifact_id: null, attribution: "UNKNOWN" }, validation: input.validation ?? { state: "NOT_RUN", checks: [] }, artifacts, metrics: input.metrics ?? metrics };
+    let changes: unknown = input.changes ?? { state: "NOT_PROVIDED", files: [], diff_artifact_id: null, attribution: "UNKNOWN" };
+    if (changes && typeof changes === "object" && typeof (changes as Record<string, unknown>).diff_artifact_key === "string") {
+      const diffKey = String((changes as Record<string, unknown>).diff_artifact_key);
+      const stored = this.db.one<TaskRow>("SELECT id, attempt_id, storage_state, sha256, storage_path FROM artifacts WHERE id IN (SELECT artifact_id FROM task_artifacts WHERE task_id = ? AND direction = 'OUTPUT') AND attempt_id = ? AND artifact_key = ?", attempt.task_id, attempt.id, diffKey);
+      if (!stored || stored.attempt_id !== attempt.id || String(stored.storage_state ?? "AVAILABLE") !== "AVAILABLE") throw new Error("RESULT_ARTIFACT_NOT_READY");
+      changes = { ...(changes as Record<string, unknown>), diff_artifact_id: String(stored.id) };
+    }
+    return { schema_version: 1, kind, summary: typeof input.summary === "string" ? input.summary : text ? text.slice(0, 240) : null, text, format: typeof input.format === "string" ? input.format : "plain", execution: target, changes, validation: input.validation ?? { state: "NOT_RUN", checks: [] }, artifacts, metrics: input.metrics ?? metrics };
   }
   private currentAttempt(taskId: string, attemptId: string, workerId: string): AttemptRow | undefined { return this.db.one<AttemptRow>("SELECT * FROM task_attempts WHERE id = ? AND task_id = ? AND worker_id = ?", attemptId, taskId, workerId); }
   private listRevision(): number { const value = this.db.one<{ value_json: string }>("SELECT value_json FROM runtime_metadata WHERE key = 'list_revision'")?.value_json; return Number(value ? JSON.parse(value) : 0); }

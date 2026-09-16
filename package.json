@@ -10,7 +10,7 @@
     "start": "node --experimental-strip-types apps/control-plane/src/index.ts",
     "worker:cli": "node --experimental-strip-types apps/worker/src/cli.ts",
     "build:web": "vite build --config apps/control-web/vite.config.ts",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types --test",
     "check": "node --experimental-strip-types scripts/check.mjs",
     "typecheck": "tsc --noEmit",
     "acceptance:production": "node scripts/production-acceptance.mjs",
