@@ -28,15 +28,27 @@ omlx_enabled=${PAI_OMLX_ENABLED:-true}
 omlx_api_key_file=${PAI_OMLX_API_KEY_FILE:-"$HOME/.omlx/settings.json"}
 lmstudio_enabled=${PAI_LMSTUDIO_ENABLED:-true}
 ollama_enabled=${PAI_OLLAMA_ENABLED:-true}
+cua_enabled=${PAI_CUA_ENABLED:-false}
+cua_driver_executable=${PAI_CUA_DRIVER_EXECUTABLE:-"$HOME/.local/bin/cua-driver"}
+cua_driver_socket=${PAI_CUA_DRIVER_SOCKET:-"$HOME/Library/Caches/cua-driver/cua-driver.sock"}
+cua_driver_mode=${PAI_CUA_DRIVER_MODE:-mcp}
 refresh_source=${PAI_WORKER_REFRESH_SOURCE:-true}
 label=com.personal-ai.worker
 
-for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$refresh_source"; do
+for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$cua_enabled" "$cua_driver_executable" "$cua_driver_socket" "$cua_driver_mode" "$refresh_source"; do
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "arguments must not contain newlines"
 done
 [[ "$omlx_enabled" == "true" || "$omlx_enabled" == "false" ]] || die "PAI_OMLX_ENABLED must be true or false"
 [[ "$lmstudio_enabled" == "true" || "$lmstudio_enabled" == "false" ]] || die "PAI_LMSTUDIO_ENABLED must be true or false"
 [[ "$ollama_enabled" == "true" || "$ollama_enabled" == "false" ]] || die "PAI_OLLAMA_ENABLED must be true or false"
+[[ "$cua_enabled" == "true" || "$cua_enabled" == "false" ]] || die "PAI_CUA_ENABLED must be true or false"
+[[ "$cua_driver_mode" == "mcp" || "$cua_driver_mode" == "cli" ]] || die "PAI_CUA_DRIVER_MODE must be mcp or cli"
+if [[ "$cua_enabled" == "true" ]]; then
+  [[ "$cua_driver_executable" == /* ]] || die "PAI_CUA_DRIVER_EXECUTABLE must be an absolute path when CUA is enabled"
+  if [[ "$cua_driver_mode" == "mcp" ]]; then
+    [[ "$cua_driver_socket" == /* ]] || die "PAI_CUA_DRIVER_SOCKET must be an absolute path in MCP mode"
+  fi
+fi
 [[ "$refresh_source" == "true" || "$refresh_source" == "false" ]] || die "PAI_WORKER_REFRESH_SOURCE must be true or false"
 [[ "$data_directory" != "/" && "$data_directory" != "$HOME" ]] || die "data directory must be a dedicated Worker directory"
 
@@ -152,6 +164,10 @@ sed \
   -e "s|REPLACE_OMLX_API_KEY_FILE|$(escape_sed "$omlx_api_key_file")|g" \
   -e "s|REPLACE_LMSTUDIO_ENABLED|$(escape_sed "$lmstudio_enabled")|g" \
   -e "s|REPLACE_OLLAMA_ENABLED|$(escape_sed "$ollama_enabled")|g" \
+  -e "s|REPLACE_CUA_ENABLED|$(escape_sed "$cua_enabled")|g" \
+  -e "s|REPLACE_CUA_DRIVER_EXECUTABLE|$(escape_sed "$cua_driver_executable")|g" \
+  -e "s|REPLACE_CUA_DRIVER_SOCKET|$(escape_sed "$cua_driver_socket")|g" \
+  -e "s|REPLACE_CUA_DRIVER_MODE|$(escape_sed "$cua_driver_mode")|g" \
   -e "s|REPLACE_LOG_PATH|$(escape_sed "$log_directory")|g" \
   "$template" > "$plist_path"
 chmod 600 "$plist_path"

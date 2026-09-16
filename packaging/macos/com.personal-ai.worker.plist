@@ -31,6 +31,14 @@
     <string>REPLACE_LMSTUDIO_ENABLED</string>
     <key>PAI_OLLAMA_ENABLED</key>
     <string>REPLACE_OLLAMA_ENABLED</string>
+    <key>PAI_CUA_ENABLED</key>
+    <string>REPLACE_CUA_ENABLED</string>
+    <key>PAI_CUA_DRIVER_EXECUTABLE</key>
+    <string>REPLACE_CUA_DRIVER_EXECUTABLE</string>
+    <key>PAI_CUA_DRIVER_SOCKET</key>
+    <string>REPLACE_CUA_DRIVER_SOCKET</string>
+    <key>PAI_CUA_DRIVER_MODE</key>
+    <string>REPLACE_CUA_DRIVER_MODE</string>
   </dict>
   <key>StandardOutPath</key>
   <string>REPLACE_LOG_PATH/worker.stdout.log</string>
