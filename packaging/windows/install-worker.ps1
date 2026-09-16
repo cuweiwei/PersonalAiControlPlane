@@ -43,6 +43,77 @@ function Download([string]$Url, [string]$Destination) {
   Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
 }
 function CmdLiteral([string]$Value) { return $Value.Replace("%", "%%") }
+function PowerShellLiteral([string]$Value) { return "'" + $Value.Replace("'", "''") + "'" }
+function Get-WorkerProcesses([string]$Directory, [string]$Executable, [string]$SourceRoot, [string]$LauncherDirectory) {
+  $cliPath = (Join-Path $SourceRoot "apps\worker\src\cli.ts").ToLowerInvariant()
+  $dataPath = $Directory.ToLowerInvariant()
+  $workerCommand = $Executable.ToLowerInvariant()
+  $oldVbs = (Join-Path $LauncherDirectory "pai-worker-hidden.vbs").ToLowerInvariant()
+  $scheduledScript = (Join-Path $LauncherDirectory "pai-worker-scheduled.ps1").ToLowerInvariant()
+  return @(
+    Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+      $command = if ($_.CommandLine) { $_.CommandLine.ToLowerInvariant() } else { "" }
+      if (!$command) { return $false }
+      switch ($_.Name.ToLowerInvariant()) {
+        "node.exe" { return $command.Contains($cliPath) -and $command.Contains("--data-dir") -and $command.Contains($dataPath) }
+        "cmd.exe" { return $command.Contains($workerCommand) -and $command.Contains("--data-dir") -and $command.Contains($dataPath) }
+        "wscript.exe" { return $command.Contains($oldVbs) }
+        "cscript.exe" { return $command.Contains($oldVbs) }
+        "powershell.exe" { return $command.Contains($scheduledScript) }
+        "pwsh.exe" { return $command.Contains($scheduledScript) }
+        default { return $false }
+      }
+    }
+  )
+}
+function Get-ActiveWorkerAttemptCount([string]$NodePath, [string]$Directory) {
+  $journal = Join-Path $Directory "worker.db"
+  if (!(Test-Path -LiteralPath $journal -PathType Leaf)) { return 0 }
+  $probe = 'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync(process.argv[1],{readOnly:true}); try { const row=db.prepare("SELECT COUNT(*) AS count FROM assignments WHERE status IN (''ACCEPTED'',''RUNNING'')").get(); console.log(row.count); } finally { db.close(); }'
+  $output = & $NodePath -e $probe $journal 2>$null
+  if ($LASTEXITCODE -ne 0) { Fail "could not inspect the Worker journal at $journal; no processes were stopped" }
+  $countText = ($output | Out-String).Trim()
+  if ($countText -notmatch '^\d+$') { Fail "Worker journal returned an invalid active-attempt count; no processes were stopped" }
+  return [int]$countText
+}
+function Stop-ExistingWorkerSafely([string]$NodePath, [string]$Directory, [string]$Executable, [string]$SourceRoot, [string]$LauncherDirectory) {
+  $processes = @(Get-WorkerProcesses $Directory $Executable $SourceRoot $LauncherDirectory)
+  $journal = Join-Path $Directory "worker.db"
+  if ($processes.Count -gt 0 -and !(Test-Path -LiteralPath $journal -PathType Leaf)) {
+    Fail "a Worker process is running but its local journal is missing; refusing to stop it without checking active work"
+  }
+  $activeAttempts = Get-ActiveWorkerAttemptCount $NodePath $Directory
+  if ($activeAttempts -gt 0) {
+    Fail "Worker journal contains $activeAttempts ACCEPTED/RUNNING attempt(s); let them finish before reinstalling. No process was stopped"
+  }
+
+  $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($task) {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+  }
+  $activeAttempts = Get-ActiveWorkerAttemptCount $NodePath $Directory
+  if ($activeAttempts -gt 0) {
+    Fail "Worker received $activeAttempts ACCEPTED/RUNNING attempt(s) while stopping; the scheduled task was stopped, but its Worker process was left intact. Let the work finish and retry"
+  }
+
+  $processes = @(Get-WorkerProcesses $Directory $Executable $SourceRoot $LauncherDirectory)
+  if ($processes.Count -eq 0) { return }
+  $ids = @($processes | ForEach-Object { [int]$_.ProcessId })
+  $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
+  if ($roots.Count -eq 0) { $roots = $processes }
+  $taskkill = Join-Path $env:WINDIR "System32\taskkill.exe"
+  foreach ($process in $roots) {
+    & $taskkill /PID ([string]$process.ProcessId) /T /F | Out-Null
+  }
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    Start-Sleep -Milliseconds 500
+    $remaining = @(Get-WorkerProcesses $Directory $Executable $SourceRoot $LauncherDirectory)
+    if ($remaining.Count -eq 0) { return }
+  }
+  $remainingIds = (@($remaining | ForEach-Object { [string]$_.ProcessId }) -join ", ")
+  Fail "could not stop stale Worker process(es) $remainingIds; source files were not replaced"
+}
 
 if ([string]::IsNullOrWhiteSpace($Repository)) { $Repository = if ($env:PAI_WORKER_REPOSITORY) { $env:PAI_WORKER_REPOSITORY } else { "https://github.com/cuweiwei/PersonalAiControlPlane" } }
 if ([string]::IsNullOrWhiteSpace($SourceRef)) { $SourceRef = if ($env:PAI_WORKER_REF) { $env:PAI_WORKER_REF } else { "main" } }
@@ -91,16 +162,13 @@ if ($cuaEnabled -eq "true") {
 if (!(Test-Path -LiteralPath $DataDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null }
 if (!(Test-Path -LiteralPath $LogDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null }
 
-$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($task) {
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 1
-}
-
 $tempDirectory = Join-Path ([IO.Path]::GetTempPath()) ("pai-worker-install-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDirectory | Out-Null
+$installSucceeded = $false
+$sourceBackupPath = $null
 try {
   $sourceCache = Join-Path $DataDirectory "source"
+  $sourceCandidate = $null
   if (!(Test-WorkerSource $sourceCache) -or $refresh) {
     $sourceArchive = Join-Path $tempDirectory "source.zip"
     $sourceExtract = Join-Path $tempDirectory "source"
@@ -108,10 +176,10 @@ try {
     Expand-Archive -LiteralPath $sourceArchive -DestinationPath $sourceExtract -Force
     $archiveRoot = Get-ChildItem -LiteralPath $sourceExtract -Directory | Select-Object -First 1
     if (!$archiveRoot -or !(Test-WorkerSource $archiveRoot.FullName)) { Fail "downloaded source does not contain a Worker checkout" }
-    if (Test-Path -LiteralPath $sourceCache) { Remove-Item -LiteralPath $sourceCache -Recurse -Force }
-    Move-Item -LiteralPath $archiveRoot.FullName -Destination $sourceCache
+    $sourceCandidate = $archiveRoot.FullName
   }
-  if (!(Test-WorkerSource $sourceCache)) { Fail "Worker source is unavailable at $sourceCache" }
+  $sourceForInstall = if ($sourceCandidate) { $sourceCandidate } else { $sourceCache }
+  if (!(Test-WorkerSource $sourceForInstall)) { Fail "Worker source is unavailable at $sourceForInstall" }
 
   $nodeBinary = $null
   $systemNode = Get-Command node.exe -ErrorAction SilentlyContinue
@@ -119,37 +187,73 @@ try {
     $nodeBinary = $systemNode.Source
   }
   $nodeRoot = Join-Path $DataDirectory "node-v$NodeVersion"
+  $nodeCandidateRoot = $null
   if (!$nodeBinary) {
-    $nodeArchitecture = Get-Architecture
-    $nodeArchiveName = "node-v$NodeVersion-win-$nodeArchitecture.zip"
-    $nodeBaseUrl = "https://nodejs.org/dist/v$NodeVersion"
-    $nodeArchive = Join-Path $tempDirectory $nodeArchiveName
-    $nodeChecksums = Join-Path $tempDirectory "SHASUMS256.txt"
-    Download "$nodeBaseUrl/$nodeArchiveName" $nodeArchive
-    Download "$nodeBaseUrl/SHASUMS256.txt" $nodeChecksums
-    $checksumLine = Select-String -LiteralPath $nodeChecksums -Pattern ([regex]::Escape($nodeArchiveName) + "$") | Select-Object -First 1
-    if (!$checksumLine) { Fail "Node.js checksum is missing for $nodeArchiveName" }
-    $expectedChecksum = ($checksumLine.Line -split "\s+")[0].ToLowerInvariant()
-    $actualChecksum = (Get-FileHash -LiteralPath $nodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($expectedChecksum -ne $actualChecksum) { Fail "Node.js checksum mismatch for $nodeArchiveName" }
-    $nodeExtract = Join-Path $tempDirectory "node"
-    Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeExtract -Force
-    $extractedNode = Join-Path $nodeExtract ("node-v$NodeVersion-win-$nodeArchitecture")
-    if (!(Test-Path -LiteralPath (Join-Path $extractedNode "node.exe") -PathType Leaf)) { Fail "downloaded Node.js archive is incomplete" }
-    if (Test-Path -LiteralPath $nodeRoot) { Remove-Item -LiteralPath $nodeRoot -Recurse -Force }
-    Move-Item -LiteralPath $extractedNode -Destination $nodeRoot
-    $nodeBinary = Join-Path $nodeRoot "node.exe"
+    $managedNode = Join-Path $nodeRoot "node.exe"
+    if (Test-NodeVersion $managedNode) {
+      $nodeBinary = $managedNode
+    } else {
+      $nodeArchitecture = Get-Architecture
+      $nodeArchiveName = "node-v$NodeVersion-win-$nodeArchitecture.zip"
+      $nodeBaseUrl = "https://nodejs.org/dist/v$NodeVersion"
+      $nodeArchive = Join-Path $tempDirectory $nodeArchiveName
+      $nodeChecksums = Join-Path $tempDirectory "SHASUMS256.txt"
+      Download "$nodeBaseUrl/$nodeArchiveName" $nodeArchive
+      Download "$nodeBaseUrl/SHASUMS256.txt" $nodeChecksums
+      $checksumLine = Select-String -LiteralPath $nodeChecksums -Pattern ([regex]::Escape($nodeArchiveName) + "$" ) | Select-Object -First 1
+      if (!$checksumLine) { Fail "Node.js checksum is missing for $nodeArchiveName" }
+      $expectedChecksum = ($checksumLine.Line -split "\s+")[0].ToLowerInvariant()
+      $actualChecksum = (Get-FileHash -LiteralPath $nodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($expectedChecksum -ne $actualChecksum) { Fail "Node.js checksum mismatch for $nodeArchiveName" }
+      $nodeExtract = Join-Path $tempDirectory "node"
+      Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeExtract -Force
+      $nodeCandidateRoot = Join-Path $nodeExtract ("node-v$NodeVersion-win-$nodeArchitecture")
+      if (!(Test-Path -LiteralPath (Join-Path $nodeCandidateRoot "node.exe") -PathType Leaf)) { Fail "downloaded Node.js archive is incomplete" }
+      $nodeBinary = Join-Path $nodeCandidateRoot "node.exe"
+    }
   }
   if (!(Test-NodeVersion $nodeBinary)) { Fail "Node.js $nodeBinary is older than the required 22.19.0" }
   $npmBinary = Join-Path (Split-Path $nodeBinary) "npm.cmd"
   if (!(Test-Path -LiteralPath $npmBinary -PathType Leaf)) { Fail "npm was not found beside Node.js" }
 
-  Write-Output "Installing Worker dependencies"
-  & $npmBinary ci --prefix $sourceCache
-  if ($LASTEXITCODE -ne 0) { Fail "npm ci failed" }
-
   $workerDirectory = Split-Path $WorkerExecutable -Parent
   New-Item -ItemType Directory -Force -Path $workerDirectory | Out-Null
+  $workerStopped = $false
+  if ($sourceCandidate -or !(Test-Path -LiteralPath (Join-Path $sourceForInstall "node_modules") -PathType Container)) {
+    if (!$sourceCandidate) {
+      Stop-ExistingWorkerSafely $nodeBinary $DataDirectory $WorkerExecutable $sourceCache $workerDirectory
+      $workerStopped = $true
+    }
+    Write-Output "Installing Worker dependencies"
+    & $npmBinary ci --prefix $sourceForInstall
+    if ($LASTEXITCODE -ne 0) { Fail "npm ci failed" }
+  }
+
+  if (!$workerStopped) {
+    Stop-ExistingWorkerSafely $nodeBinary $DataDirectory $WorkerExecutable $sourceCache $workerDirectory
+    $workerStopped = $true
+  }
+  if ($nodeCandidateRoot) {
+    if (Test-Path -LiteralPath $nodeRoot) { Remove-Item -LiteralPath $nodeRoot -Recurse -Force }
+    Move-Item -LiteralPath $nodeCandidateRoot -Destination $nodeRoot
+    $nodeBinary = Join-Path $nodeRoot "node.exe"
+  }
+  if ($sourceCandidate) {
+    if (Test-Path -LiteralPath $sourceCache) {
+      $sourceBackupPath = Join-Path $DataDirectory ("source.previous-" + [Guid]::NewGuid().ToString("N"))
+      Move-Item -LiteralPath $sourceCache -Destination $sourceBackupPath
+    }
+    try {
+      Move-Item -LiteralPath $sourceCandidate -Destination $sourceCache
+    } catch {
+      if ($sourceBackupPath -and (Test-Path -LiteralPath $sourceBackupPath) -and !(Test-Path -LiteralPath $sourceCache)) {
+        Move-Item -LiteralPath $sourceBackupPath -Destination $sourceCache
+        $sourceBackupPath = $null
+      }
+      throw
+    }
+  }
+
   $logPath = Join-Path $LogDirectory "worker.log"
   $launcher = @"
 @echo off
@@ -172,30 +276,37 @@ exit /b %workerExit%
   [IO.File]::WriteAllText($WorkerExecutable, $launcher, [Text.UTF8Encoding]::new($false))
 
   $principalUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $launchCommand = "`"$WorkerExecutable`" start --origin `"$Origin`" --data-dir `"$DataDirectory`""
-  $hiddenLauncherPath = Join-Path $workerDirectory "pai-worker-hidden.vbs"
-  $vbsCommand = $launchCommand.Replace('"', '""')
-  $hiddenLauncher = @"
-Set shell = CreateObject("WScript.Shell")
-exitCode = shell.Run("$vbsCommand", 0, True)
-WScript.Quit exitCode
+  $scheduledLauncherPath = Join-Path $workerDirectory "pai-worker-scheduled.ps1"
+  $scheduledLauncher = @"
+`$ErrorActionPreference = 'Stop'
+& $(PowerShellLiteral $WorkerExecutable) start --origin $(PowerShellLiteral $Origin) --data-dir $(PowerShellLiteral $DataDirectory)
+`$workerExit = `$LASTEXITCODE
+exit `$workerExit
 "@
-  [IO.File]::WriteAllText($hiddenLauncherPath, $hiddenLauncher, [Text.UTF8Encoding]::new($false))
-  $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR "System32\wscript.exe") -Argument "`"$hiddenLauncherPath`"" -WorkingDirectory $workerDirectory
+  [IO.File]::WriteAllText($scheduledLauncherPath, $scheduledLauncher, [Text.UTF8Encoding]::new($true))
+  $powershellExecutable = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $actionArguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scheduledLauncherPath`""
+  $action = New-ScheduledTaskAction -Execute $powershellExecutable -Argument $actionArguments -WorkingDirectory $workerDirectory
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $principalUser
   $principal = New-ScheduledTaskPrincipal -UserId $principalUser -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
   Start-ScheduledTask -TaskName $taskName
-  Start-Sleep -Seconds 3
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    $taskState = (Get-ScheduledTask -TaskName $taskName).State
+    if ($taskState -eq "Running") { break }
+    Start-Sleep -Seconds 1
+  }
   $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
-  $taskState = (Get-ScheduledTask -TaskName $taskName).State
   if ($taskState -ne "Running") {
     $logTail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join [Environment]::NewLine } else { "(worker log was not created)" }
     Fail "Scheduled Task is $taskState instead of Running. LastTaskResult=$($taskInfo.LastTaskResult). Log: $logPath`n$logTail"
   }
-  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; backgroundLauncher = $hiddenLauncherPath; source = $sourceCache; node = $nodeBinary; log = $logPath; runLevel = "Limited" })
+  $installSucceeded = $true
+  if ($sourceBackupPath -and (Test-Path -LiteralPath $sourceBackupPath)) { Remove-Item -LiteralPath $sourceBackupPath -Recurse -Force }
+  Write-Output (ConvertTo-Json @{ task = $taskName; origin = $Origin; dataDirectory = $DataDirectory; executable = $WorkerExecutable; backgroundLauncher = $scheduledLauncherPath; source = $sourceCache; node = $nodeBinary; log = $logPath; runLevel = "Limited" })
   Write-Output "Worker installed and started. Existing approved identities do not create a new pending enrollment."
 } finally {
+  if ($installSucceeded -and $sourceBackupPath -and (Test-Path -LiteralPath $sourceBackupPath)) { Remove-Item -LiteralPath $sourceBackupPath -Recurse -Force -ErrorAction SilentlyContinue }
   if (Test-Path -LiteralPath $tempDirectory) { Remove-Item -LiteralPath $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue }
 }

@@ -22,7 +22,16 @@ test("macOS Worker installer is a self-bootstrapping shell script", () => {
 
 test("Windows Worker installer bootstraps source, Node.js, launcher, and Scheduled Task", () => {
   const source = readFileSync(windowsInstaller, "utf8");
-  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "pai-worker-hidden.vbs", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "wscript.exe", "shell.Run", "0, True", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED", "PAI_CUA_ENABLED", "PAI_CUA_DRIVER_EXECUTABLE", "PAI_CUA_DRIVER_SOCKET", "PAI_CUA_DRIVER_MODE"]) {
+  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "pai-worker-scheduled.ps1", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "powershell.exe", "-WindowStyle Hidden", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "Get-ActiveWorkerAttemptCount", "worker.db", "ACCEPTED", "RUNNING", "taskkill.exe", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED", "PAI_CUA_ENABLED", "PAI_CUA_DRIVER_EXECUTABLE", "PAI_CUA_DRIVER_SOCKET", "PAI_CUA_DRIVER_MODE"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+  assert.doesNotMatch(source, /shell\.Run/);
+  const safeStop = source.indexOf("function Stop-ExistingWorkerSafely");
+  const activeAttemptGuard = source.indexOf("if ($activeAttempts -gt 0)", safeStop);
+  const scheduledTaskStop = source.indexOf("Stop-ScheduledTask", safeStop);
+  const postStopJournalCheck = source.indexOf("$activeAttempts = Get-ActiveWorkerAttemptCount $NodePath $Directory", scheduledTaskStop);
+  const sourceReplacement = source.indexOf("Move-Item -LiteralPath $sourceCandidate -Destination $sourceCache");
+  assert.ok(safeStop >= 0 && activeAttemptGuard > safeStop && scheduledTaskStop > activeAttemptGuard);
+  assert.ok(postStopJournalCheck > scheduledTaskStop, "journal must be checked again after stopping the Scheduled Task and before killing processes");
+  assert.ok(sourceReplacement > scheduledTaskStop, "source replacement must happen after idle journal verification and process cleanup");
 });
