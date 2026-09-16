@@ -27,6 +27,9 @@ services:
       PAI_INFORMATION_RADAR_HEALTH_PATH: ${PAI_INFORMATION_RADAR_HEALTH_PATH:-/health/ready}
       PAI_INFORMATION_RADAR_ENTRY_URL: ${PAI_INFORMATION_RADAR_ENTRY_URL:-https://gnest.taila77e5f.ts.net:8789/}
       PAI_REGISTRATION_ENABLED: ${PAI_REGISTRATION_ENABLED:-true}
+      # New work must use the typed v2 contract. Set only during an approved
+      # rollback window while migrating a legacy caller, then remove it.
+      PAI_LEGACY_TASK_INTAKE_ENABLED: ${PAI_LEGACY_TASK_INTAKE_ENABLED:-false}
       PAI_MAX_ARTIFACT_BYTES: ${PAI_MAX_ARTIFACT_BYTES:-1073741824}
     volumes:
       # Fresh v2 state lives beside, but outside, the legacy v1 data folders.

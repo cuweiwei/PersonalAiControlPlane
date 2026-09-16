@@ -14,6 +14,8 @@ import { createControlPlaneServer } from "../apps/control-plane/src/server.ts";
 import type { WorkerCoordinator } from "../apps/control-plane/src/workers/worker-channel.ts";
 
 test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and health", async () => {
+  const previousLegacyIntake = process.env.PAI_LEGACY_TASK_INTAKE_ENABLED;
+  process.env.PAI_LEGACY_TASK_INTAKE_ENABLED = "false";
   const directory = await mkdtemp(join(tmpdir(), "pai-control-plane-"));
   const db = new ControlPlaneDatabase(":memory:");
   const events = new EventHub();
@@ -60,7 +62,15 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     workers.heartbeat(workerId, { system: { os: "linux", architecture: "x64", cpu: 4 }, resources: { memory: { totalMb: 1024, freeMb: 512 } }, execution: { max_concurrency: 2 } });
     workers.updateCapabilities(workerId, [{ capability: "generic", status: "READY" }]);
 
-    const created = await jsonRequest("/api/v2/tasks", { method: "POST", body: JSON.stringify({ source: "hermes", correlation_id: "http-test", title: "HTTP task", task_type: "generic", instruction: "run", context: {}, payload: {}, execution: { capabilities: ["generic"], runtime: "auto", resources: {} }, limits: { timeout_seconds: 60, max_attempts: 2 }, priority: "normal", input_artifact_ids: [] }) });
+    const legacyPayload = { source: "hermes", correlation_id: "legacy-http-test", title: "Legacy HTTP task", task_type: "generic", instruction: "run", context: {}, payload: {}, execution: { capabilities: ["generic"], runtime: "auto", resources: {} }, limits: { timeout_seconds: 60, max_attempts: 2 }, priority: "normal", input_artifact_ids: [] };
+    const retired = await jsonRequest("/api/v2/tasks", { method: "POST", body: JSON.stringify(legacyPayload) });
+    assert.equal(retired.response.status, 410);
+    assert.equal(retired.body.error.code, "LEGACY_TASK_INTAKE_DISABLED");
+    process.env.PAI_LEGACY_TASK_INTAKE_ENABLED = "true";
+    const rollback = await jsonRequest("/api/v2/tasks", { method: "POST", headers: { "idempotency-key": "legacy-http-rollback-1" }, body: JSON.stringify(legacyPayload) });
+    assert.equal(rollback.response.status, 202);
+    process.env.PAI_LEGACY_TASK_INTAKE_ENABLED = "false";
+    const created = await jsonRequest("/api/v2/tasks", { method: "POST", headers: { "idempotency-key": "http-task-v2-1" }, body: JSON.stringify({ schema_version: 2, source: "hermes", idempotency_key: "http-task-v2-1", source_intent_ref: "http-intent-1", conversation_ref: "http-test", title: "HTTP task", task_type: "generic", description: "run", input: {}, requirements: { capabilities_all: [{ id: "generic", contract_version: 2 }] }, criteria: [], execution_timeout_seconds: 60, retry_policy: { max_attempts: 2, effect_class: "READ_ONLY" }, priority: "normal", input_artifact_ids: [] }) });
     assert.equal(created.response.status, 202);
     const taskId = created.body.task_id as string;
     const listing = await jsonRequest("/api/v2/tasks");
@@ -104,5 +114,7 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     db.close();
     await rm(directory, { recursive: true, force: true });
+    if (previousLegacyIntake === undefined) delete process.env.PAI_LEGACY_TASK_INTAKE_ENABLED;
+    else process.env.PAI_LEGACY_TASK_INTAKE_ENABLED = previousLegacyIntake;
   }
 });

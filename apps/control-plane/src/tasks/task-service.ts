@@ -295,7 +295,11 @@ export class TaskService {
       if (v2ReconciliationRequired) {
         this.db.run("UPDATE task_attempts SET status = 'LOST', occupancy = 'UNKNOWN', finished_at = ?, failure_code = ?, failure_message = ?, effect_state = 'UNKNOWN', stop_evidence_json = COALESCE(stop_evidence_json, ?), lease_expires_at = ? WHERE id = ?", now, code, message, JSON.stringify({ stop_state: "UNKNOWN", children_accounted_for: false, reason: code }), now, attemptId);
         this.db.run("UPDATE tasks SET failure_code = ?, failure_message = ?, updated_at = ?, revision = revision + 1, execution_certainty = 'UNKNOWN', waiting_reason = 'RECONCILIATION_REQUIRED', occupancy = 'UNKNOWN', effect_state = 'UNKNOWN', control_timeout = CASE WHEN ? = 1 THEN 'EXCEEDED' ELSE control_timeout END WHERE id = ?", code, message, now, code === "TASK_TIMEOUT" ? 1 : 0, taskId);
-        if (attempt.run_id) this.db.run("UPDATE task_runs SET status = 'UNKNOWN', failure_json = ? WHERE id = ?", JSON.stringify({ code, message, reconciliationRequired: true }), attempt.run_id);
+        // task_runs deliberately reuses the task-state enum and has no UNKNOWN
+        // value. Keep the run RUNNING until reconciliation confirms its terminal
+        // outcome; the task/attempt certainty and failure payload carry the
+        // non-terminal execution evidence.
+        if (attempt.run_id) this.db.run("UPDATE task_runs SET failure_json = ? WHERE id = ?", JSON.stringify({ code, message, reconciliationRequired: true }), attempt.run_id);
         this.bumpListRevision();
         this.appendEvent(taskId, "TASK_FAILED", attemptId, workerId, { code, message, reconciliationRequired: true }, now);
         this.events.publish({ type: "task.updated", taskId, status: task.status, workerId, attemptId, executionCertainty: "UNKNOWN" });

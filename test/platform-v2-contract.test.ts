@@ -111,6 +111,36 @@ test("platform v2 workspace cancellation stays UNKNOWN until stop evidence confi
   } finally { db.close(); }
 });
 
+test("platform v2 worker loss keeps the run non-terminal until reconciliation", () => {
+  const db = new ControlPlaneDatabase(":memory:");
+  const events = new EventHub();
+  const tasks = new TaskService(db, events, { callbackEnabled: false });
+  const workers = new WorkerService(db, events);
+  try {
+    const registration = workers.register({ name: "Loss Worker", registrationSecret: "loss-registration-secret-123", platform: "test", hardware: {} });
+    workers.approveRegistration(registration.registrationId);
+    const enrollment = workers.pollRegistration(registration.registrationId, "loss-registration-secret-123");
+    const workerId = String(enrollment.workerId);
+    workers.markConnected(workerId, 1000);
+    const created = tasks.delegate(input("hermes-op-loss-1"), "hermes:owner", 1000);
+    const assignment = tasks.assign(String(created.task_id), workerId, 1001, { workerId, runtime: "codex", workspaceId: "workspace-1" });
+    assert.ok(assignment);
+    assert.equal(tasks.started(String(created.task_id), assignment!.attemptId, workerId, 1002), true);
+    assert.equal(tasks.fail(String(created.task_id), assignment!.attemptId, workerId, "WORKER_DISCONNECTED", "connection lost", 1003, false), "FAILED");
+
+    const task = tasks.get(String(created.task_id)) as Record<string, any>;
+    const attempt = db.one<Record<string, any>>("SELECT * FROM task_attempts WHERE id = ?", assignment!.attemptId)!;
+    const run = db.one<Record<string, any>>("SELECT * FROM task_runs WHERE id = ?", created.run_id)!;
+    assert.equal(task.status, "RUNNING");
+    assert.equal(task.executionCertainty, "UNKNOWN");
+    assert.equal(task.waitingReason, "RECONCILIATION_REQUIRED");
+    assert.equal(attempt.status, "LOST");
+    assert.equal(attempt.occupancy, "UNKNOWN");
+    assert.equal(run.status, "RUNNING");
+    assert.deepEqual(JSON.parse(String(run.failure_json)), { code: "WORKER_DISCONNECTED", message: "connection lost", reconciliationRequired: true });
+  } finally { db.close(); }
+});
+
 test("platform v2 wait returns after a revision change", async () => {
   const db = new ControlPlaneDatabase(":memory:");
   const events = new EventHub();
