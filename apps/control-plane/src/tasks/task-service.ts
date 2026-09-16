@@ -18,7 +18,8 @@ function taskPublic(row: TaskRow, inputArtifactIds: string[] = []): Record<strin
   return { id: row.id, schemaVersion: Number(row.schema_version ?? 1), executionSemantics: row.execution_semantics ?? "legacy", source: row.source, sourceRef: parseJson(row.source_ref_json, null), sourceIntentRef: row.source_intent_ref ?? null, conversationRef: row.conversation_ref ?? row.correlation_id ?? null, correlationId: row.correlation_id ?? null, requestedBy: row.requested_by ?? "owner", workRef: parseJson(row.work_ref_json, null), groupId: row.group_id, parentTaskId: row.parent_task_id, title: row.title, taskType: row.task_type, purpose: row.purpose ?? "USER", ownerKind: row.owner_kind ?? "STANDALONE", missionExecutionId: row.mission_execution_id ?? null, instruction: row.instruction, context: parseJson(row.context_json), payload: parseJson(row.payload_json), execution, requirements: parseJson(row.requirements_json, null), criteria: parseJson(row.criteria_json, []), approvalRef: row.approval_ref ?? null, preferenceSnapshot: parseJson(row.preference_snapshot_json, null), inputArtifactIds, priority: row.priority >= 80 ? "high" : row.priority <= 20 ? "low" : "normal", status, currentAttemptId: row.current_attempt_id, currentRunId: row.current_run_id, revision: Number(row.revision ?? 1), createdSeq: row.created_seq ?? null, timeoutSeconds: row.timeout_seconds, maxAttempts: row.max_attempts, attemptCount: row.attempt_count, queueDeadlineAt: iso(row.queue_deadline_at), executionCertainty: defaultCertainty, waitingReason: row.waiting_reason ?? null, control: { cancel: row.control_cancel ?? "NONE", timeout: row.control_timeout ?? "NOT_EXCEEDED" }, occupancy, effectState: row.effect_state ?? "UNKNOWN", validation: { state: row.validation_state ?? "NOT_REQUESTED", ...(parseJson(row.validation_json, null) ?? {}) }, delivery: { state: row.delivery_state ?? "NOT_REQUESTED", ...(parseJson(row.delivery_json, null) ?? {}) }, result: parseJson(row.result_summary_json, null), failure: row.failure_code ? { code: row.failure_code, message: row.failure_message } : null, progress: parseJson(row.last_progress_json, null), createdAt: iso(row.created_at), assignedAt: iso(row.assigned_at), startedAt: iso(row.started_at), finishedAt: iso(row.finished_at), updatedAt: iso(row.updated_at) };
 }
 
-export type TaskServiceOptions = { callbackPath?: string; callbackEnabled?: boolean };
+export type TaskArtifactStorage = { exists(path: string): boolean; read(path: string): Uint8Array };
+export type TaskServiceOptions = { callbackPath?: string; callbackEnabled?: boolean; artifactStorage?: TaskArtifactStorage };
 export type TaskOwnership = { ownerKind: "STANDALONE" | "MISSION"; missionExecutionId?: string | null };
 export type TaskListFilters = { status?: string; workerId?: string; taskType?: string; search?: string; workspaceId?: string; purpose?: string; createdFrom?: number; createdTo?: number; finishedFrom?: number; finishedTo?: number; sort?: "created_desc" | "created_asc" | "finished_desc"; limit?: number; cursor?: string };
 export type TaskOperationOptions = { expectedRevision?: number; idempotencyKey?: string; principal?: string };
@@ -28,12 +29,14 @@ export class TaskService {
   private readonly events: EventHub;
   private readonly callbackPath: string;
   private readonly callbackEnabled: boolean;
+  private readonly artifactStorage?: TaskArtifactStorage;
 
   constructor(db: ControlPlaneDatabase, events = new EventHub(), options: TaskServiceOptions = {}) {
     this.db = db;
     this.events = events;
     this.callbackPath = options.callbackPath ?? process.env.PAI_HERMES_TASK_EVENT_PATH ?? "/api/internal/control-plane/task-events";
     this.callbackEnabled = options.callbackEnabled ?? true;
+    this.artifactStorage = options.artifactStorage;
   }
 
   create(input: CreateTaskInput, now = Date.now()): Record<string, unknown> {
@@ -429,8 +432,14 @@ export class TaskService {
     const artifacts = Array.isArray(input.artifacts) ? input.artifacts : [];
     for (const item of artifacts) {
       const artifactId = item && typeof item === "object" ? String((item as Record<string, unknown>).id ?? (item as Record<string, unknown>).artifact_id ?? "") : "";
-      const artifact = artifactId ? this.db.one<TaskRow>("SELECT id, attempt_id, storage_state FROM artifacts WHERE id = ? AND task_id = ?", artifactId, attempt.task_id) : undefined;
+      const artifact = artifactId ? this.db.one<TaskRow>("SELECT id, attempt_id, storage_state, sha256, storage_path FROM artifacts WHERE id = ? AND task_id = ?", artifactId, attempt.task_id) : undefined;
       if (!artifact || artifact.attempt_id !== attempt.id || String(artifact.storage_state ?? "AVAILABLE") !== "AVAILABLE") throw new Error("RESULT_ARTIFACT_NOT_READY");
+      const claimedHash = item && typeof item === "object" ? (item as Record<string, unknown>).sha256 ?? (item as Record<string, unknown>).digest : undefined;
+      if (claimedHash !== undefined && (typeof claimedHash !== "string" || claimedHash !== String(artifact.sha256))) throw new Error("ARTIFACT_CONTENT_CONFLICT");
+      if (this.artifactStorage) {
+        if (!this.artifactStorage.exists(String(artifact.storage_path))) throw new Error("ARTIFACT_MISSING");
+        if (sha256(this.artifactStorage.read(String(artifact.storage_path))) !== String(artifact.sha256)) throw new Error("ARTIFACT_CONTENT_CONFLICT");
+      }
     }
     const executionRecord = execution && typeof execution === "object" ? execution as Record<string, unknown> : {};
     const model = executionRecord.model && typeof executionRecord.model === "object" ? executionRecord.model as Record<string, unknown> : {};

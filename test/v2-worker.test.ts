@@ -9,6 +9,7 @@ import { WorkerLocalDatabase } from "../apps/worker/src/local-db.ts";
 import { OutboundWorkerRuntime, type WorkerTaskOffer } from "../apps/worker/src/runtime.ts";
 import { WorkerEnrollment } from "../apps/worker/src/enrollment.ts";
 import { WorkerDaemon } from "../apps/worker/src/daemon.ts";
+import { CommandExecutor } from "../apps/worker/src/executors/command.ts";
 
 const offer: WorkerTaskOffer = {
   task_id: "task-1",
@@ -144,4 +145,43 @@ test("worker recreates an expired enrollment and reset clears removed state", as
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("worker records an actual command child timeout without emitting a result", async () => {
+  const db = new WorkerLocalDatabase(":memory:");
+  const sent: Record<string, any>[] = [];
+  const executor = new CommandExecutor({ timeout: { command: [process.execPath, "-e", "setTimeout(function(){}, 5000)"], cwd: process.cwd(), allowedExecutables: [process.execPath], roots: [process.cwd()], maxRuntimeMs: 100, maxOutputBytes: 10_000 } }, true);
+  const runtime = new OutboundWorkerRuntime({ workerId: "worker-command-timeout", db, transport: { send: (message) => { sent.push(message); } }, executors: [executor] });
+  await runtime.handleOffer({ task_id: "command-timeout-task", attempt_id: "command-timeout-attempt", task_type: "command", instruction: "run bounded timeout profile", payload: { profile: "timeout" }, execution: { runtime: "command" }, limits: { timeout_seconds: 5 } });
+  assert.equal(db.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get("command-timeout-attempt")?.status, "FAILED");
+  assert.equal(sent.some((message) => message.type === "task.failed" && message.code === "COMMAND_TIMEOUT"), true);
+  assert.equal(sent.some((message) => message.type === "task.result"), false);
+  db.close();
+});
+
+test("worker records an actual command child crash and cancellation stop evidence", async () => {
+  const crashDb = new WorkerLocalDatabase(":memory:");
+  const crashSent: Record<string, any>[] = [];
+  const crashExecutor = new CommandExecutor({ crash: { command: [process.execPath, "-e", "process.exit(137)"], cwd: process.cwd(), allowedExecutables: [process.execPath], roots: [process.cwd()], maxRuntimeMs: 2_000, maxOutputBytes: 10_000 } }, true);
+  const crashRuntime = new OutboundWorkerRuntime({ workerId: "worker-command-crash", db: crashDb, transport: { send: (message) => { crashSent.push(message); } }, executors: [crashExecutor] });
+  await crashRuntime.handleOffer({ task_id: "command-crash-task", attempt_id: "command-crash-attempt", task_type: "command", instruction: "run crash profile", payload: { profile: "crash" }, execution: { runtime: "command" }, limits: { timeout_seconds: 5 } });
+  assert.equal(crashDb.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get("command-crash-attempt")?.status, "FAILED");
+  assert.equal(crashSent.some((message) => message.type === "task.failed" && message.code === "COMMAND_FAILED"), true);
+  assert.equal(crashSent.some((message) => message.type === "task.result"), false);
+  crashDb.close();
+
+  const cancelDb = new WorkerLocalDatabase(":memory:");
+  const cancelSent: Record<string, any>[] = [];
+  const cancelExecutor = new CommandExecutor({ hang: { command: [process.execPath, "-e", "setTimeout(function(){}, 5000)"], cwd: process.cwd(), allowedExecutables: [process.execPath], roots: [process.cwd()], maxRuntimeMs: 2_000, maxOutputBytes: 10_000 } }, true);
+  const cancelRuntime = new OutboundWorkerRuntime({ workerId: "worker-command-cancel", db: cancelDb, transport: { send: (message) => { cancelSent.push(message); } }, executors: [cancelExecutor] });
+  const running = cancelRuntime.handleOffer({ task_id: "command-cancel-task", attempt_id: "command-cancel-attempt", task_type: "command", instruction: "run cancellable profile", payload: { profile: "hang" }, execution: { runtime: "command" }, limits: { timeout_seconds: 5 } });
+  for (let index = 0; index < 100 && !cancelSent.some((message) => message.type === "task.started"); index += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  await cancelRuntime.handleCancel({ task_id: "command-cancel-task", attempt_id: "command-cancel-attempt" });
+  await running;
+  assert.equal(cancelDb.connection.prepare("SELECT status FROM assignments WHERE attempt_id = ?").get("command-cancel-attempt")?.status, "CANCELLED");
+  assert.equal(cancelDb.connection.prepare("SELECT state FROM process_registry WHERE attempt_id = ?").get("command-cancel-attempt")?.state, "UNKNOWN");
+  assert.equal(cancelSent.some((message) => message.type === "task.stop.receipt" && message.stop_state === "UNKNOWN" && message.effect_state === "UNKNOWN"), true);
+  assert.equal(cancelSent.some((message) => message.type === "task.cancelled"), true);
+  assert.equal(cancelSent.some((message) => message.type === "task.result"), false);
+  cancelDb.close();
 });

@@ -31,7 +31,7 @@ const bindAddress = process.env.PAI_LISTEN_ADDRESS ?? (process.env.NODE_ENV === 
 const events = new EventHub();
 const db = new ControlPlaneDatabase(join(dataDir, "controlplane.db"));
 const artifacts = new ArtifactStorage(artifactRoot);
-const tasks = new TaskService(db, events);
+const tasks = new TaskService(db, events, { artifactStorage: artifacts });
 const workers = new WorkerService(db, events);
 const settings = new SettingsService(db);
 const coordinator = new WorkerCoordinator(workers, tasks, events, artifacts, settings);
