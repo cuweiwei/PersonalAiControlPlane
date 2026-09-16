@@ -30,6 +30,18 @@ Windows 可直接使用一鍵 PowerShell 安裝腳本。腳本會準備 source�
 irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
 ```
 
+若要在 Windows 啟用 CUA，請在執行安裝器前設定 driver 的絕對路徑與已設定的本機 MCP endpoint。`cua-driver doctor` 顯示的 binary 健康不會自動替 Worker 啟用能力；安裝器會把設定寫入 Scheduled Task 使用的 launcher：
+
+```powershell
+$env:PAI_CUA_ENABLED = "true"
+$env:PAI_CUA_DRIVER_EXECUTABLE = "C:\Users\shohe\AppData\Local\Programs\Cua\cua-driver\bin\cua-driver.exe"
+$env:PAI_CUA_DRIVER_SOCKET = "\\.\pipe\cua-driver"
+$env:PAI_CUA_DRIVER_MODE = "mcp"
+irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
+```
+
+MCP endpoint 預設是 Cua Driver 在 Windows 的 `\\.\pipe\cua-driver`；若本機 daemon 使用其他 endpoint，再以環境變數覆寫。可先執行 `cua-driver status`，必要時在互動桌面執行 `cua-driver autostart kick`。重跑安裝器會沿用既有 Worker identity；重啟後到 Control Web 對 GoosePC 的 `computer.use` capability 執行 Grant。
+
 腳本預設連線到 `https://gnest.taila77e5f.ts.net`，使用 `%LOCALAPPDATA%\.personal-ai-worker` 保存 Worker runtime data，登入後會自動啟動。只有尚未核准的全新 identity 需要到 Control Web → Workers → Pending enrollment 按 Approve；重跑腳本會更新 source、依賴與 Scheduled Task，但沿用既有 Worker identity。啟動錯誤會寫入 `%LOCALAPPDATA%\.personal-ai-worker\logs\worker.log`。
 
 ```bash

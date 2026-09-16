@@ -53,6 +53,16 @@ $omlxEnabled = if ($env:PAI_OMLX_ENABLED) { $env:PAI_OMLX_ENABLED } else { "true
 $omlxApiKeyFile = if ($env:PAI_OMLX_API_KEY_FILE) { $env:PAI_OMLX_API_KEY_FILE } else { Join-Path $env:USERPROFILE ".omlx\settings.json" }
 $lmstudioEnabled = if ($env:PAI_LMSTUDIO_ENABLED) { $env:PAI_LMSTUDIO_ENABLED } else { "true" }
 $ollamaEnabled = if ($env:PAI_OLLAMA_ENABLED) { $env:PAI_OLLAMA_ENABLED } else { "true" }
+$cuaEnabled = if ($env:PAI_CUA_ENABLED) { $env:PAI_CUA_ENABLED } else { "false" }
+$cuaDriverExecutable = if ($env:PAI_CUA_DRIVER_EXECUTABLE) { $env:PAI_CUA_DRIVER_EXECUTABLE } else { "" }
+$cuaDriverSocket = if ($env:PAI_CUA_DRIVER_SOCKET) { $env:PAI_CUA_DRIVER_SOCKET } else { "\\.\pipe\cua-driver" }
+$cuaDriverMode = if ($env:PAI_CUA_DRIVER_MODE) { $env:PAI_CUA_DRIVER_MODE } else { "mcp" }
+
+if ($cuaEnabled -eq "true" -and [string]::IsNullOrWhiteSpace($cuaDriverExecutable)) {
+  $cuaCommand = Get-Command cua-driver.exe -ErrorAction SilentlyContinue
+  if (!$cuaCommand) { $cuaCommand = Get-Command cua-driver -ErrorAction SilentlyContinue }
+  if ($cuaCommand) { $cuaDriverExecutable = $cuaCommand.Source }
+}
 
 foreach ($entry in @(
   @{ Name = "Origin"; Value = $Origin },
@@ -62,11 +72,22 @@ foreach ($entry in @(
   @{ Name = "SourceRef"; Value = $SourceRef },
   @{ Name = "NodeVersion"; Value = $NodeVersion },
   @{ Name = "LogDirectory"; Value = $LogDirectory },
-  @{ Name = "OmlxApiKeyFile"; Value = $omlxApiKeyFile }
+  @{ Name = "OmlxApiKeyFile"; Value = $omlxApiKeyFile },
+  @{ Name = "CuaDriverExecutable"; Value = $cuaDriverExecutable },
+  @{ Name = "CuaDriverSocket"; Value = $cuaDriverSocket }
 )) { Assert-SafeValue $entry.Name $entry.Value }
 if ($omlxEnabled -notin @("true", "false")) { Fail "PAI_OMLX_ENABLED must be true or false" }
 if ($lmstudioEnabled -notin @("true", "false")) { Fail "PAI_LMSTUDIO_ENABLED must be true or false" }
 if ($ollamaEnabled -notin @("true", "false")) { Fail "PAI_OLLAMA_ENABLED must be true or false" }
+if ($cuaEnabled -notin @("true", "false")) { Fail "PAI_CUA_ENABLED must be true or false" }
+if ($cuaDriverMode -notin @("mcp", "cli")) { Fail "PAI_CUA_DRIVER_MODE must be mcp or cli" }
+if ($cuaEnabled -eq "true") {
+  if ([string]::IsNullOrWhiteSpace($cuaDriverExecutable)) { Fail "PAI_CUA_DRIVER_EXECUTABLE is required when CUA is enabled; set it to the absolute cua-driver.exe path" }
+  if (![IO.Path]::IsPathRooted($cuaDriverExecutable)) { Fail "PAI_CUA_DRIVER_EXECUTABLE must be an absolute path when CUA is enabled" }
+  if (!(Test-Path -LiteralPath $cuaDriverExecutable -PathType Leaf)) { Fail "CUA driver executable was not found: $cuaDriverExecutable" }
+  if ($cuaDriverMode -eq "mcp" -and [string]::IsNullOrWhiteSpace($cuaDriverSocket)) { Fail "PAI_CUA_DRIVER_SOCKET is required in MCP mode; configure the local CUA daemon endpoint explicitly" }
+  if ($cuaDriverMode -eq "mcp" -and ![IO.Path]::IsPathRooted($cuaDriverSocket) -and !$cuaDriverSocket.StartsWith("\\\\")) { Fail "PAI_CUA_DRIVER_SOCKET must be an absolute path or named pipe in MCP mode" }
+}
 if (!(Test-Path -LiteralPath $DataDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null }
 if (!(Test-Path -LiteralPath $LogDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null }
 
@@ -137,6 +158,10 @@ set "PAI_OMLX_ENABLED=$(CmdLiteral $omlxEnabled)"
 set "PAI_OMLX_API_KEY_FILE=$(CmdLiteral $omlxApiKeyFile)"
 set "PAI_LMSTUDIO_ENABLED=$(CmdLiteral $lmstudioEnabled)"
 set "PAI_OLLAMA_ENABLED=$(CmdLiteral $ollamaEnabled)"
+set "PAI_CUA_ENABLED=$(CmdLiteral $cuaEnabled)"
+set "PAI_CUA_DRIVER_EXECUTABLE=$(CmdLiteral $cuaDriverExecutable)"
+set "PAI_CUA_DRIVER_SOCKET=$(CmdLiteral $cuaDriverSocket)"
+set "PAI_CUA_DRIVER_MODE=$(CmdLiteral $cuaDriverMode)"
 set "PAI_WORKER_LOG=$(CmdLiteral $logPath)"
 echo [%date% %time%] Worker launcher starting>>"%PAI_WORKER_LOG%"
 "$(CmdLiteral $nodeBinary)" --experimental-strip-types "$(CmdLiteral (Join-Path $sourceCache 'apps\worker\src\cli.ts'))" %* >>"%PAI_WORKER_LOG%" 2>&1

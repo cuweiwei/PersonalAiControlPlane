@@ -15,6 +15,8 @@ PAI_CUA_DRIVER_SOCKET=/absolute/path/to/driver.sock
 PAI_CUA_DRIVER_MODE=mcp
 ```
 
+Windows 安裝器會把上述環境變數寫入 Worker 的 scheduled-task launcher。啟用 CUA 時，`PAI_CUA_DRIVER_EXECUTABLE` 必須是 `cua-driver doctor` 顯示的絕對 `cua-driver.exe` 路徑；MCP 模式預設使用 Cua Driver 的 Windows named pipe `\\.\pipe\cua-driver`，也可用 `PAI_CUA_DRIVER_SOCKET` 明確覆寫。安裝器不會讓模型或任務提供 endpoint。設定環境變數後重新執行 `packaging/windows/install-worker.ps1`，它會沿用既有 Worker identity 並重啟工作。
+
 Worker 以固定 executable 與 argv 啟動一個長駐 `cua-driver mcp --socket <configured-endpoint>` stdio client，並在該 process 生命週期內重用 MCP session；不接受任務提供 executable、socket 或任意 tool。`PAI_CUA_DRIVER_MODE=cli` 僅供隔離測試的 bounded one-shot fallback。支援 `observe`、`list_windows`、`click`、`move`、`drag`、`scroll`、`type_text`、`press_key`、`hotkey`、`launch_app`、`focus_window`。shell、clipboard、recording、replay、driver 設定和任意 MCP passthrough 不在能力範圍內。
 
 正式 MCP 模式必須設定 `PAI_CUA_DRIVER_SOCKET`；缺少 endpoint 時執行會回報 `DRIVER_ENDPOINT_REQUIRED`，不會自行啟動未受控 daemon。`list_windows` 的 driver PID/window ID 只在 Worker 內轉換成帶 session 綁定的 `window_ref`；Hermes 後續只能提交該 opaque reference。
