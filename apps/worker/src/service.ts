@@ -10,6 +10,7 @@ import { OllamaExecutor } from "./executors/ollama.ts";
 import { CodexExecutor } from "./executors/codex.ts";
 import { PythonExecutor } from "./executors/python.ts";
 import { CommandExecutor, type CommandProfile } from "./executors/command.ts";
+import { CuaDriverExecutor } from "./executors/cua.ts";
 import { configPath, readWorkerConfig } from "./config.ts";
 
 function flag(name: string, fallback = false): boolean { return process.env[name] === undefined ? fallback : process.env[name] === "true"; }
@@ -17,7 +18,7 @@ function mapEnv(name: string): Record<string, string> { try { const value = JSON
 export type WorkerServiceOptions = { dataDir: string; origin: string; name?: string; workspaces?: Record<string, string>; pollIntervalMs?: number; heartbeatIntervalMs?: number };
 function providerReports(): Array<Record<string, string>> {
   const providers: Array<[string, string, boolean]> = [
-    ["omlx", "PAI_OMLX_ENABLED", true], ["lmstudio", "PAI_LMSTUDIO_ENABLED", true], ["ollama", "PAI_OLLAMA_ENABLED", true], ["codex", "PAI_CODEX_ENABLED", false], ["python", "PAI_PYTHON_ENABLED", false], ["command", "PAI_COMMAND_ENABLED", false],
+    ["omlx", "PAI_OMLX_ENABLED", true], ["lmstudio", "PAI_LMSTUDIO_ENABLED", true], ["ollama", "PAI_OLLAMA_ENABLED", true], ["codex", "PAI_CODEX_ENABLED", false], ["python", "PAI_PYTHON_ENABLED", false], ["command", "PAI_COMMAND_ENABLED", false], ["cua-driver", "PAI_CUA_ENABLED", false],
   ];
   return providers.filter(([, flagName, fallback]) => flag(flagName, fallback)).map(([provider]) => ({ provider, evidence_level: "implemented_local" }));
 }
@@ -35,6 +36,7 @@ export function createWorkerDaemon(options: WorkerServiceOptions): { daemon: Wor
     new CodexExecutor(workspaces, process.env.PAI_CODEX_EXECUTABLE ?? "codex", configured("PAI_CODEX_ENABLED")),
     new PythonExecutor(workspaces, configured("PAI_PYTHON_ENABLED")),
     new CommandExecutor((() => { try { return JSON.parse(process.env.PAI_COMMAND_PROFILES_JSON ?? "{}") as Record<string, CommandProfile>; } catch { return {}; } })(), configured("PAI_COMMAND_ENABLED")),
+    new CuaDriverExecutor({ executable: process.env.PAI_CUA_DRIVER_EXECUTABLE ?? "cua-driver", socket: process.env.PAI_CUA_DRIVER_SOCKET, mode: process.env.PAI_CUA_DRIVER_MODE === "cli" ? "cli" : "mcp", enabled: configured("PAI_CUA_ENABLED") }),
   ];
   let runtime: OutboundWorkerRuntime | undefined;
   const runtimeWorkspaces = Object.fromEntries(Object.entries(workspaces).map(([id, path]) => [id, { name: config.workspaces[id]?.name ?? id, path }]));

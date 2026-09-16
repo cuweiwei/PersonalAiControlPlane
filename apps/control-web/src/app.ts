@@ -14,6 +14,7 @@ const nav = [
   ["/attention", "待處理"],
   ["/tasks", "任務"],
   ["/workers", "執行裝置"],
+  ["/computers", "Computer Use"],
   ["/models", "模型"],
   ["/systems", "系統"],
   ["/settings", "設定"],
@@ -222,6 +223,22 @@ function Workers({ refreshVersion }: { refreshVersion: number }) {
   );
 }
 
+function Computers({ refreshVersion }: { refreshVersion: number }) {
+  const [data, setData] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null); const [selected, setSelected] = useState(""); const [session, setSession] = useState<Item | null>(null); const [busy, setBusy] = useState(false);
+  const reload = useCallback(() => { request("/api/v2/computers").then((value) => { setData(value); if (!selected && value.items?.[0]?.workerId) setSelected(value.items[0].workerId); }).catch(setError); }, [selected]);
+  useEffect(() => { void reload(); }, [refreshVersion]);
+  const open = async () => { if (!selected) return; setBusy(true); try { const result = await request("/api/v2/computer-sessions", { method: "POST", headers: { "idempotency-key": `computer-session-${selected}-${Date.now()}` }, body: JSON.stringify({ worker_id: selected, desktop_kind: "desktop", capture_scope: "desktop", allowed_operations: ["observe", "list_windows", "click", "move", "drag", "scroll", "type_text", "press_key", "hotkey", "launch_app", "focus_window"], allowed_apps: ["*"], delivery_modes: ["background"], model: { provider: "hermes", id: "configured" } }) }); setSession(await request(`/api/v2/computer-sessions/${result.id}`)); } catch (reason) { setError(reason); } finally { setBusy(false); } };
+  const act = async (path: string, body: Item) => { setBusy(true); try { setSession(await request(path, { method: "POST", headers: { "idempotency-key": `computer-control-${Date.now()}` }, body: JSON.stringify(body) })); } catch (reason) { setError(reason); } finally { setBusy(false); } };
+  if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
+  const items = data.items ?? [];
+  return h(React.Fragment, null,
+    h(PageHeader, { eyebrow: "COMPUTER USE", title: "Computer Use", description: "先核准 Worker 桌面 session；Hermes 只會在有效 scope、期限與操作證據內執行。" }),
+    error ? h(ErrorPanel, { error }) : null,
+    h("section", { className: "card-grid" }, items.map((item: Item) => h("article", { className: "card", key: item.workerId }, h("div", { className: "card-title-row" }, h("h2", null, item.name), h(Status, { value: item.online ? "ONLINE" : item.status })), h("p", null, `${item.platform} · ${item.capabilities?.map((capability: Item) => `${capability.capability} ${capability.grantStatus}`).join(", ") || "尚未授權 computer.use"}`), h("p", null, `桌面：${(item.desktops ?? []).map((desktop: Item) => `${desktop.desktopId} (${desktop.state})`).join(", ") || "—"}`), h("button", { type: "button", disabled: busy || !item.online || !item.capabilities?.some((capability: Item) => capability.capability === "computer.use" && capability.grantStatus === "GRANTED" && capability.evidenceState === "VERIFIED"), onClick: () => { setSelected(item.workerId); void open(); } }, "建立桌面 session")))),
+    session ? h("section", { className: "card" }, h("h2", null, `Session ${session.id}`), h(Status, { value: session.state }), h(Details, { item: { workerId: session.workerId, desktopId: session.desktopId, desktopEpoch: session.desktopEpoch, scope: session.scope, model: session.model, scopeHash: session.scope?.scope_hash ?? session.scopeHash, expiresAt: time(session.expiresAt), revision: session.revision, lock: session.lock } }), session.state === "PENDING_APPROVAL" ? h("button", { type: "button", disabled: busy, onClick: () => void act(`/api/v2/computer-sessions/${session.id}/approve`, { scope_hash: session.scope?.scope_hash ?? session.scopeHash }) }, "核准此 scope") : ["ACTIVE", "PAUSED"].includes(session.state) ? h("div", { className: "actions" }, h("button", { type: "button", disabled: busy, onClick: () => void act(`/api/v2/computer-sessions/${session.id}/control`, { action: session.state === "PAUSED" ? "resume" : "pause", expected_revision: session.revision }) }, session.state === "PAUSED" ? "Resume" : "Pause"), h("button", { type: "button", disabled: busy, onClick: () => void act(`/api/v2/computer-sessions/${session.id}/control`, { action: "close", expected_revision: session.revision }) }, "Close"), h("button", { className: "danger", type: "button", disabled: busy, onClick: () => void act(`/api/v2/computer-sessions/${session.id}/control`, { action: "revoke", expected_revision: session.revision }) }, "Revoke")) : null) : null,
+  );
+}
+
 function WorkerDetail({ id, refreshVersion }: { id: string; refreshVersion: number }) {
   const [item, setItem] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState(false);
   useEffect(() => { request(`/api/v2/workers/${encodeURIComponent(id)}`).then(setItem).catch(setError); }, [id, refreshVersion]);
@@ -234,7 +251,7 @@ function WorkerDetail({ id, refreshVersion }: { id: string; refreshVersion: numb
     h("td", null, capability.grantStatus),
     h("td", null, h(Status, { value: capability.status })),
     h("td", null, h("code", null, capability.descriptorHash ?? "—")),
-    h("td", null, capability.grantStatus === "REQUIRES_REVIEW" ? h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/grant`) }, "Grant") : h("button", { type: "button", disabled: busy || capability.grantStatus === "REVOKED", onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/revoke`) }, "Revoke"))));
+    h("td", null, ["DISCOVERED", "REQUIRES_REVIEW"].includes(String(capability.grantStatus)) ? h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/grant`) }, "Grant") : capability.grantStatus === "GRANTED" ? h("button", { type: "button", disabled: busy, onClick: () => void run(`/api/v2/workers/${id}/capabilities/${capability.id}/revoke`) }, "Revoke") : h("span", null, "—"))));
   const capabilityTable = (item.capabilities ?? []).length === 0 ? h("p", null, "尚未回報 capability") : h("div", { className: "table-wrap" }, h("table", null,
     h("thead", null, h("tr", null, ["Capability", "Runtime", "Grant", "Health", "Descriptor", "Action"].map((header) => h("th", { key: header }, header)))),
     h("tbody", null, capabilityRows)));
@@ -254,7 +271,7 @@ function WorkerOnboarding() {
   const create = async (event: React.FormEvent) => { event.preventDefault(); try { const result = await request("/api/v2/worker-onboarding", { method: "POST", body: JSON.stringify({ platform: platformChoice, selected_capabilities: capabilities }) }); setItem(result); } catch (reason) { setError(reason); } };
   if (error) return h(React.Fragment, null, h(ErrorPanel, { error }), h("button", { type: "button", onClick: () => setError(null) }, "重新開始"));
   if (item) return h(React.Fragment, null, h(PageHeader, { eyebrow: "WORKER ONBOARDING", title: "安裝導引", description: `導引 ID：${item.id}` }), h("section", { className: "card" }, h("h2", null, `目前步驟：${item.inferredStep}`), h("p", null, "請在本機完成安裝；完成依據以 Worker 回報為準。"), h("a", { className: "button-link", href: `/api/v2/worker-installer?platform=${platformChoice}&onboarding_id=${item.id}`, target: "_blank", rel: "noreferrer" }, "取得安裝資訊"), h("p", null, h("a", { href: `/api/v2/worker-onboarding/${item.id}` }, "重新整理導引狀態（API）"))), h("p", null, h("a", { href: "/workers" }, "← 回到執行裝置")));
-  return h(React.Fragment, null, h(PageHeader, { eyebrow: "WORKER ONBOARDING", title: "Worker 安裝導引", description: "只選擇這台裝置需要的能力；未選擇的 executor 不會被要求設定。" }), h("form", { className: "editor", onSubmit: create }, h("label", null, "平台", h("select", { value: platformChoice, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setPlatformChoice(event.target.value) }, h("option", { value: "darwin" }, "macOS"), h("option", { value: "win32" }, "Windows"), h("option", { value: "linux" }, "Linux"))), h("label", null, "能力", h("span", null, h("input", { type: "checkbox", checked: capabilities.includes("llm.inference"), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCapabilities(event.target.checked ? ["llm.inference"] : []) }), " 本機模型推論"), h("span", null, h("input", { type: "checkbox", checked: capabilities.includes("codex"), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCapabilities((current) => event.target.checked ? [...new Set([...current, "codex"])] : current.filter((value) => value !== "codex")) }), " Codex 專案工作")), h("button", { type: "submit" }, "建立安裝導引")));
+  return h(React.Fragment, null, h(PageHeader, { eyebrow: "WORKER ONBOARDING", title: "Worker 安裝導引", description: "只選擇這台裝置需要的能力；未選擇的 executor 不會被要求設定。" }), h("form", { className: "editor", onSubmit: create }, h("label", null, "平台", h("select", { value: platformChoice, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setPlatformChoice(event.target.value) }, h("option", { value: "darwin" }, "macOS"), h("option", { value: "win32" }, "Windows"), h("option", { value: "linux" }, "Linux"))), h("label", null, "能力", h("span", null, h("input", { type: "checkbox", checked: capabilities.includes("llm.inference"), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCapabilities(event.target.checked ? ["llm.inference"] : []) }), " 本機模型推論"), h("span", null, h("input", { type: "checkbox", checked: capabilities.includes("codex"), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCapabilities((current) => event.target.checked ? [...new Set([...current, "codex"])] : current.filter((value) => value !== "codex")) }), " Codex 專案工作"), h("span", null, h("input", { type: "checkbox", checked: capabilities.includes("computer.use"), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCapabilities((current) => event.target.checked ? [...new Set([...current, "computer.use"])] : current.filter((value) => value !== "computer.use")) }), " Computer Use")), h("button", { type: "submit" }, "建立安裝導引")));
 }
 
 function Models({ refreshVersion }: { refreshVersion: number }) {
@@ -386,6 +403,7 @@ export function App({ initialPath = currentPath() }: { initialPath?: string }) {
     if (parts[0] === "missions" && parts[1]) return h(MissionDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "missions") return h(MissionList, { refreshVersion });
     if (["skills", "goals", "routines", "attention", "browser-sessions"].includes(parts[0] ?? "")) return h(AgentWorkPage, { kind: (parts[0] ?? "skills") as "skills" | "goals" | "routines" | "attention" | "browser-sessions", refreshVersion });
+    if (parts[0] === "computers") return h(Computers, { refreshVersion });
     if (parts[0] === "workers" && parts[1] === "new") return h(WorkerOnboarding);
     if (parts[0] === "workers" && parts[1]) return h(WorkerDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "workers") return h(Workers, { refreshVersion });

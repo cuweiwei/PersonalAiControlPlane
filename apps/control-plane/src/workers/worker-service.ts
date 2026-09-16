@@ -32,6 +32,12 @@ function safeDescriptor(value: unknown): Record<string, unknown> {
   return {
     capability: boundedString(item.capability ?? item.kind, 120), runtime: boundedString(item.runtime, 120), runtimeVersion: boundedString(item.runtime_version ?? item.runtimeVersion, 80), version: boundedString(item.version, 80),
     status: boundedString(item.status, 32), maxConcurrency: boundedNumber(item.max_concurrency ?? item.maxConcurrency, 1, 256),
+    driverVersion: boundedString(item.driver_version ?? item.driverVersion, 120), schemaVersion: boundedNumber(item.schema_version ?? item.schemaVersion, 1, 100),
+    operations: Array.isArray(item.operations) ? item.operations.slice(0, 32).map((entry) => boundedString(entry, 80)).filter(Boolean) : [],
+    desktopKinds: Array.isArray(item.desktop_kinds ?? item.desktopKinds) ? (item.desktop_kinds ?? item.desktopKinds).slice(0, 8).map((entry: unknown) => boundedString(entry, 40)).filter(Boolean) : [],
+    captureScopes: Array.isArray(item.capture_scopes ?? item.captureScopes) ? (item.capture_scopes ?? item.captureScopes).slice(0, 8).map((entry: unknown) => boundedString(entry, 40)).filter(Boolean) : [],
+    deliveryModes: Array.isArray(item.delivery_modes ?? item.deliveryModes) ? (item.delivery_modes ?? item.deliveryModes).slice(0, 8).map((entry: unknown) => boundedString(entry, 40)).filter(Boolean) : [],
+    manifestHash: boundedString(item.manifest_hash ?? item.manifestHash, 200),
     properties: { workspaceIds: Array.isArray(properties.workspaceIds) ? properties.workspaceIds.slice(0, 100).map((id) => boundedString(id, 200)).filter(Boolean) : [] },
   };
 }
@@ -202,6 +208,14 @@ export class WorkerService {
         const verificationRef = effectiveEvidence === "VERIFIED" ? boundedString(value.verification_ref ?? value.verificationRef ?? `worker:${workerId}:${now}`, 240) : prior?.verification_ref ?? null;
         const contractVersion = Math.max(1, Math.min(20, Math.floor(Number(value.contract_version ?? value.contractVersion ?? 1))));
         this.db.run("INSERT INTO worker_capabilities(worker_id, capability, runtime, runtime_version, max_concurrency, descriptor_json, descriptor_hash, grant_status, superseded_at, status, updated_at, contract_version, evidence_state, verified_at, verification_expires_at, verification_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id, capability, runtime) DO UPDATE SET runtime_version = excluded.runtime_version, max_concurrency = excluded.max_concurrency, descriptor_json = excluded.descriptor_json, descriptor_hash = excluded.descriptor_hash, grant_status = excluded.grant_status, superseded_at = excluded.superseded_at, status = excluded.status, updated_at = excluded.updated_at, contract_version = excluded.contract_version, evidence_state = excluded.evidence_state, verified_at = excluded.verified_at, verification_expires_at = excluded.verification_expires_at, verification_ref = excluded.verification_ref", workerId, item.capability, item.runtime, boundedString(value.runtime_version ?? value.runtimeVersion, 80), maxConcurrency, JSON.stringify(item.descriptor), descriptorHash, grantStatus, descriptorChanged ? now : null, status, now, contractVersion, effectiveEvidence, verifiedAt, verificationExpiresAt, verificationRef);
+        if (item.capability === "computer.use" && item.runtime === "cua-driver") {
+          const desktopEpoch = Math.max(1, Math.min(2_147_483_647, Math.floor(Number(value.desktop_epoch ?? value.desktopEpoch ?? 1))));
+          const desktopKind = ["desktop", "window"].includes(String(value.desktop_kind ?? value.desktopKind)) ? String(value.desktop_kind ?? value.desktopKind) : "desktop";
+          const displayId = boundedString(value.display_id ?? value.displayId ?? (desktopKind === "desktop" ? "primary" : ""), 80) || null;
+          const driverVersion = boundedString(value.driver_version ?? value.driverVersion ?? item.descriptor.driverVersion, 120) || null;
+          const permissions = record(value.permissions); const permissionSnapshot = { accessibility: boundedString(permissions.accessibility, 32), screenRecording: boundedString(permissions.screen_recording ?? permissions.screenRecording, 32), status: boundedString(permissions.status, 32) };
+          this.db.run("INSERT INTO computer_desktops(worker_id, desktop_id, desktop_kind, display_id, desktop_epoch, state, permissions_json, driver_version, descriptor_hash, metadata_json, updated_at) VALUES (?, 'primary', ?, ?, ?, ?, ?, ?, ?, '{}', ?) ON CONFLICT(worker_id, desktop_id) DO UPDATE SET desktop_kind = excluded.desktop_kind, display_id = excluded.display_id, desktop_epoch = excluded.desktop_epoch, state = excluded.state, permissions_json = excluded.permissions_json, driver_version = excluded.driver_version, descriptor_hash = excluded.descriptor_hash, updated_at = excluded.updated_at", workerId, desktopKind, displayId, desktopEpoch, status === "READY" ? "READY" : "UNKNOWN", JSON.stringify(permissionSnapshot), driverVersion, descriptorHash, now);
+        }
         const workspaceIds = (record(item.descriptor.properties).workspaceIds ?? []) as unknown[];
         for (const workspaceId of workspaceIds.filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(id))) this.upsertWorkspace(workerId, { workspaceId, capabilities: [item.capability], state: status === "UNAVAILABLE" ? "UNKNOWN" : "READY" }, now);
       }

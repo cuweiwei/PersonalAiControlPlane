@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS process_registry (
   state TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS computer_operations (
+  operation_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  attempt_id TEXT NOT NULL UNIQUE,
+  operation TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL,
+  effect_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  receipt_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(session_id, sequence)
+);
 `;
 
 export class WorkerLocalDatabase {

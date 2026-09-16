@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, createReadStream, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { sha256, uuidv7 } from "../../../../packages/contracts/src/index.ts";
 
@@ -23,6 +23,7 @@ export class ArtifactStorage {
   read(path: string): Buffer { return readFileSync(path); }
   stream(path: string) { return createReadStream(path); }
   exists(path: string): boolean { try { return statSync(path).isFile(); } catch { return false; } }
+  remove(path: string): void { try { unlinkSync(path); } catch { /* cleanup is best effort; storage state remains expired */ } }
   isWritable(): boolean { try { accessSync(this.root, constants.W_OK); return true; } catch { return false; } }
   static digest(bytes: Uint8Array): string { return `sha256:${createHash("sha256").update(bytes).digest("hex")}`; }
 }

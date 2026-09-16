@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-export const TASK_TYPES = ["llm.inference", "codex", "python", "command", "generic"] as const;
+export const TASK_TYPES = ["llm.inference", "codex", "python", "command", "computer.use", "generic"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATES = ["QUEUED", "ASSIGNED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"] as const;
 export type TaskState = (typeof TASK_STATES)[number];

@@ -1,6 +1,6 @@
 # v2 實作狀態與證據
 
-更新：2026-09-09
+更新：2026-09-16
 
 ## 本機 repository evidence
 
@@ -13,6 +13,7 @@
 | Worker management projection | `implemented_local` | connection/dispatch/activity/credential/provider/diagnostics aggregate、search/filter/detail、rename、drain/resume、capability revoke |
 | Worker purge/audit | `implemented_local` | busy-safe idempotent purge、credential/inventory cleanup、minimal tombstone、append-only audit chain |
 | Worker WS/runtime durability | `implemented_local` | hello acknowledgement、outbound WS、local assignment/result persistence、cancel fencing、result ack/resend、artifact protocol |
+| Worker CUA Computer Use | `implemented_local` with live gates | `computer.use` capability/feature negotiation、長駐 Cua Driver MCP adapter、opaque window refs、session scope/revision/lease、desktop lock、UNKNOWN effect 對帳、24 小時 observation artifact、Hermes computer tools；實體 Worker/VM、OS permission、vision provider 與 NAS live E2E 尚未宣告 |
 | Scheduler filtering/scoring | `implemented_local` | capability/runtime/model/resource/load rules 與 core tests |
 | Artifact storage | `implemented_local` | task-scoped storage、digest、worker-authenticated upload/download 與 HTTP test |
 | Hermes callback outbox | `live_verified` | claim、at-least-once POST、bounded retry；live Hermes callback receiver 回 `202 accepted` |
@@ -24,7 +25,7 @@
 | Virtual Office UI | `implemented_local` | `/office`、`/office/members`、`/missions`、`/missions/new`、`/missions/:id` routes with intake, plan/run projection, controls, timeline and results |
 | Cross-service recovery and acceptance probe | `implemented_local` | Recovery mode/authority epoch API and fail-closed `scripts/production-acceptance.mjs`; live restart, real Worker, Hermes provider and backup/restore evidence remain required |
 | CI/release compose | `implemented_local` | immutable image workflow、digest-pinned compose、`/healthz`/`/readyz` |
-| Local checks | `implemented_local` | 本次執行 `npm run check`、strict `npm run typecheck`、38 Node tests、`npm run build:web` 與 AiSecretaryChloe CI dependency 下的 24 Python tests |
+| Local checks | `implemented_local` | 本次執行 `npm run check`、strict `npm run typecheck`、79 Node tests、`npm run build:web`、Hermes `compileall`/secret scan；完整 Python unittest 仍受環境缺少 `aiohttp` 阻擋 |
 | NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |

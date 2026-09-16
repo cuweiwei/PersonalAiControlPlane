@@ -98,6 +98,7 @@ export class ResourceScheduler {
     if (!this.coordinator.isConnected(String(worker.id)) || worker.status !== "ONLINE") return { code: "WORKER_OFFLINE", count: 1, message: "等待指定裝置重新連線" };
     const preferences = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", worker.id);
     const features = parse(worker.protocol_features_json, []);
+    if (task.task_type === "computer.use" && (!Array.isArray(features) || !features.includes("computer_session_v1"))) return { code: "WORKER_UPDATE_REQUIRED", count: 1, message: "Worker 需要更新才能執行 computer.use" };
     if (task.execution_semantics === "platform_v2" || task.owner_kind === "MISSION" || (Array.isArray(features) && features.length > 0)) {
       const requiredFeatures = new Set(["resolved_execution_v1", "task_run_v1"]);
       if (task.task_type === "codex") requiredFeatures.add("workspace_inventory_v1");
@@ -111,6 +112,7 @@ export class ResourceScheduler {
         requiredFeatures.add("durable_result_ack_v1");
         if (requirement.workspaceId) requiredFeatures.add("workspace_lock_v1");
       }
+      if (task.task_type === "computer.use") requiredFeatures.add("computer_session_v1");
       if (preferences && (preferences.mode === "IDLE_ONLY" || preferences.pause_id || Number(preferences.pause_indefinite ?? 0) === 1)) { requiredFeatures.add("availability_v1"); requiredFeatures.add("settings_apply_v1"); }
       if ([...requiredFeatures].some((feature) => !features.includes(feature))) return { code: "WORKER_UPDATE_REQUIRED", count: 1, message: "Worker 需要更新才能執行此工作" };
     }

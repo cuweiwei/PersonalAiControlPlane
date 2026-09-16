@@ -300,6 +300,7 @@ export class TaskService {
         // outcome; the task/attempt certainty and failure payload carry the
         // non-terminal execution evidence.
         if (attempt.run_id) this.db.run("UPDATE task_runs SET failure_json = ? WHERE id = ?", JSON.stringify({ code, message, reconciliationRequired: true }), attempt.run_id);
+        if (task.task_type === "computer.use") this.db.run("UPDATE computer_operations SET state = 'FAILED', effect_state = 'UNKNOWN', receipt_json = COALESCE(receipt_json, ?), updated_at = ? WHERE task_id = ?", JSON.stringify({ code, message, reconciliationRequired: true }), now, taskId);
         this.bumpListRevision();
         this.appendEvent(taskId, "TASK_FAILED", attemptId, workerId, { code, message, reconciliationRequired: true }, now);
         this.events.publish({ type: "task.updated", taskId, status: task.status, workerId, attemptId, executionCertainty: "UNKNOWN" });
@@ -310,6 +311,7 @@ export class TaskService {
       const nextStatus = shouldRetry ? "QUEUED" : "FAILED";
       this.db.run("UPDATE tasks SET status = ?, current_attempt_id = ?, failure_code = ?, failure_message = ?, finished_at = ?, updated_at = ?, revision = revision + 1, execution_certainty = CASE WHEN execution_semantics = 'platform_v2' THEN CASE WHEN ? = 1 THEN 'NOT_STARTED' ELSE 'TERMINAL_CONFIRMED' END ELSE execution_certainty END, waiting_reason = NULL, occupancy = CASE WHEN execution_semantics = 'platform_v2' THEN 'RELEASED' ELSE occupancy END WHERE id = ?", nextStatus, shouldRetry ? null : task.current_attempt_id, code, message, shouldRetry ? null : now, now, shouldRetry ? 1 : 0, taskId);
       if (attempt.run_id) this.db.run("UPDATE task_runs SET status = ?, finished_at = ?, failure_json = ? WHERE id = ?", nextStatus, shouldRetry ? null : now, JSON.stringify({ code, message }), attempt.run_id);
+      if (task.task_type === "computer.use") this.db.run("UPDATE computer_operations SET state = 'FAILED', effect_state = CASE WHEN effect_state = 'NONE_CONFIRMED' THEN effect_state ELSE 'UNKNOWN' END, receipt_json = COALESCE(receipt_json, ?), updated_at = ? WHERE task_id = ?", JSON.stringify({ code, message }), now, taskId);
       this.releaseWorkspaceLock(attempt, now, "RELEASED");
       this.bumpListRevision();
       this.appendEvent(taskId, shouldRetry ? "TASK_REQUEUED" : "TASK_FAILED", attemptId, workerId, { code, message }, now);
@@ -459,8 +461,8 @@ export class TaskService {
     const executionRecord = execution && typeof execution === "object" ? execution as Record<string, unknown> : {};
     const model = executionRecord.model && typeof executionRecord.model === "object" ? executionRecord.model as Record<string, unknown> : {};
     const target = { worker_id: executionRecord.workerId ?? executionRecord.worker_id ?? null, runtime: executionRecord.runtime ?? null, model_id: model.name ?? executionRecord.model_id ?? null, workspace_id: executionRecord.workspaceId ?? executionRecord.workspace_id ?? null };
-    const kindByTaskType: Record<string, string> = { "llm.inference": "TEXT", codex: "CODEX", python: "PYTHON", command: "COMMAND", generic: "GENERIC" };
-    const kind = ["TEXT", "CODEX", "PYTHON", "COMMAND", "GENERIC"].includes(String(input.kind)) ? String(input.kind) : kindByTaskType[taskType] ?? "GENERIC";
+    const kindByTaskType: Record<string, string> = { "llm.inference": "TEXT", codex: "CODEX", python: "PYTHON", command: "COMMAND", "computer.use": "COMPUTER_USE", generic: "GENERIC" };
+    const kind = ["TEXT", "CODEX", "PYTHON", "COMMAND", "COMPUTER_USE", "GENERIC"].includes(String(input.kind)) ? String(input.kind) : kindByTaskType[taskType] ?? "GENERIC";
     const text = typeof input.text === "string" ? input.text : typeof result.text === "string" ? result.text : typeof result.stdout === "string" ? result.stdout : null;
     let changes: unknown = input.changes ?? { state: "NOT_PROVIDED", files: [], diff_artifact_id: null, attribution: "UNKNOWN" };
     if (changes && typeof changes === "object" && typeof (changes as Record<string, unknown>).diff_artifact_key === "string") {

@@ -20,6 +20,7 @@ import { PlanService } from "./missions/plan-service.ts";
 import { MissionCommandDispatcher } from "./missions/command-dispatcher.ts";
 import { MissionCoordinator } from "./missions/coordinator.ts";
 import { AgentWorkService } from "./agent-work/agent-work-service.ts";
+import { ComputerSessionService } from "./computers/computer-session-service.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
 function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -43,6 +44,8 @@ const onboarding = new OnboardingService(db);
 const office = new OfficeService(db, events, settings);
 const missions = new MissionService(db, events, settings);
 const agentWork = new AgentWorkService({ db, events, settings, artifacts, missions });
+const computers = new ComputerSessionService(db, coordinator);
+coordinator.setComputerSessionService(computers);
 const plans = new PlanService(db, events, missions);
 const missionCommands = new MissionCommandDispatcher(db);
 const missionCoordinator = new MissionCoordinator(db, events, tasks, missions, plans, missionCommands, coordinator);
@@ -53,7 +56,7 @@ let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, computers, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }
@@ -66,10 +69,12 @@ const staleTimer = setInterval(() => { try { scheduler.staleSweep(Date.now(), nu
 const healthTimer = setInterval(() => { void health.checkOnce().catch((error) => console.error(JSON.stringify({ event: "system.health_error", message: error instanceof Error ? error.message : "HEALTH_CHECK_FAILED" }))); }, numberEnv("PAI_SYSTEM_HEALTH_INTERVAL_SECONDS", 30, 10, 86_400) * 1_000);
 const callbackTimer = setInterval(() => { void callback.dispatchOnce().catch((error) => console.error(JSON.stringify({ event: "hermes.callback_error", message: error instanceof Error ? error.message : "CALLBACK_FAILED" }))); }, 2_000);
 const readinessTimer = setInterval(() => { databaseReady = db.isWritable(); artifactReady = artifacts.isWritable(); }, 15_000);
+const computerArtifactTimer = setInterval(() => { try { for (const path of computers.expireObservationArtifacts()) artifacts.remove(path); } catch (error) { console.error(JSON.stringify({ event: "computer.artifact_cleanup_error", message: error instanceof Error ? error.message : "COMPUTER_ARTIFACT_CLEANUP_FAILED" })); } }, 60_000);
+const computerLeaseTimer = setInterval(() => { try { computers.renewLeases(); } catch (error) { console.error(JSON.stringify({ event: "computer.lease_error", message: error instanceof Error ? error.message : "COMPUTER_LEASE_FAILED" })); } }, 5_000);
 
 server.listen(port, bindAddress, () => console.log(JSON.stringify({ event: "control-plane.started", version: "2.0.0", port, bindAddress, dataDir, artifactRoot })));
 
 let stopping = false;
-async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); missionCoordinator.close(); coordinator.close(); await close(server); db.close(); }
+async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); clearInterval(computerArtifactTimer); clearInterval(computerLeaseTimer); missionCoordinator.close(); coordinator.close(); await close(server); db.close(); }
 function signal(): void { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); }
 process.once("SIGINT", signal); process.once("SIGTERM", signal);

@@ -444,6 +444,83 @@ CREATE TABLE IF NOT EXISTS model_test_cases (
   PRIMARY KEY(batch_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS computer_desktops (
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  desktop_id TEXT NOT NULL,
+  desktop_kind TEXT NOT NULL CHECK (desktop_kind IN ('desktop', 'window')),
+  display_id TEXT,
+  desktop_epoch INTEGER NOT NULL DEFAULT 1,
+  state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  permissions_json TEXT NOT NULL DEFAULT '{}',
+  driver_version TEXT,
+  descriptor_hash TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(worker_id, desktop_id)
+);
+CREATE TABLE IF NOT EXISTS computer_sessions (
+  id TEXT PRIMARY KEY,
+  principal TEXT NOT NULL,
+  work_ref_json TEXT,
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  desktop_id TEXT NOT NULL,
+  desktop_epoch INTEGER NOT NULL,
+  descriptor_hash TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  model_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('PENDING_APPROVAL', 'OPENING', 'ACTIVE', 'PAUSED', 'CLOSING', 'CLOSED', 'REVOKED', 'EXPIRED', 'FAILED')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  expires_at INTEGER NOT NULL,
+  idle_expires_at INTEGER NOT NULL,
+  max_actions INTEGER NOT NULL DEFAULT 100,
+  action_count INTEGER NOT NULL DEFAULT 0,
+  stop_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  created_at INTEGER NOT NULL,
+  approved_at INTEGER,
+  closed_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_computer_sessions_worker_state ON computer_sessions(worker_id, state, expires_at);
+CREATE TABLE IF NOT EXISTS computer_resource_locks (
+  worker_id TEXT NOT NULL REFERENCES workers(id),
+  desktop_id TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES computer_sessions(id),
+  desktop_epoch INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('HELD', 'RELEASING', 'UNKNOWN', 'RELEASED')),
+  stop_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  acquired_at INTEGER NOT NULL,
+  released_at INTEGER,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(worker_id, desktop_id)
+);
+CREATE TABLE IF NOT EXISTS computer_operations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES computer_sessions(id),
+  sequence INTEGER NOT NULL,
+  task_id TEXT REFERENCES tasks(id),
+  operation TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'PREPARED',
+  effect_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  observation_id TEXT,
+  receipt_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(session_id, sequence),
+  UNIQUE(session_id, request_hash)
+);
+CREATE TABLE IF NOT EXISTS computer_observations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES computer_sessions(id),
+  sequence INTEGER NOT NULL,
+  target_json TEXT NOT NULL,
+  artifact_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(session_id, sequence)
+);
+
 `;
 
 export type SqlRow = Record<string, unknown>;
