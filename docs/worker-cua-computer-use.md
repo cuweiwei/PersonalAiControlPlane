@@ -2,9 +2,21 @@
 
 狀態：已實作本機垂直切片；實體 Worker、Hermes provider 與 NAS live 驗收仍須另行完成。
 
-## Worker 設定
+## Worker 安裝與桌面需求
 
-Worker 使用已安裝的 Cua Driver。CUA 預設關閉，啟用時設定：
+Windows、macOS、Linux 安裝器預設會安裝缺少的 Cua Driver、設定本機 endpoint，並啟動對應使用者工作階段中的 driver service 與 Worker。若不需要 computer use，可在執行安裝器前設定 `PAI_CUA_ENABLED=false`。既有 driver 會沿用；只有 driver 不存在時才會安裝。可選擇以 `PAI_CUA_DRIVER_VERSION` 指定 driver 發行版本。
+
+安裝器使用者態安裝 Cua Driver，不會替 driver 放寬權限政策或自動授與 CP capability。Windows 必須從已登入的互動桌面執行，driver 以互動式登入工作啟動；macOS 由 `CuaDriver.app` LaunchAgent 啟動以保留 TCC 身分，使用者仍須在系統設定核准 Accessibility 與 Screen Recording。Linux 安裝器支援 Worker x64/arm64；CUA Driver Linux 圖形桌面目前以 x86_64 為支援基線，需要登入中的 X11/XWayland 或 driver 支援的 Wayland session、AT-SPI 2 與 systemd user manager。Debian/Ubuntu 缺少 `libxi6` 或 `at-spi2-core` 時，安裝器會使用 sudo 安裝套件。
+
+Linux 可直接執行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/linux/install-worker.sh | bash
+```
+
+Linux CUA daemon 與 Worker 都使用 user-level systemd services；安裝器不啟用 linger、不以 root 執行 CUA，也不把 headless server 假報成可用桌面。狀態與日誌可用 `systemctl --user status cua-driver.service personal-ai-worker.service` 及 `journalctl --user -u cua-driver.service -u personal-ai-worker.service` 檢查。
+
+若需覆寫預設值，可在執行安裝器前設定：
 
 ```bash
 PAI_CUA_ENABLED=true
@@ -15,11 +27,11 @@ PAI_CUA_DRIVER_SOCKET=/absolute/path/to/driver.sock
 PAI_CUA_DRIVER_MODE=mcp
 ```
 
-Windows 安裝器會把上述環境變數寫入 Worker 的 scheduled-task launcher。啟用 CUA 時，`PAI_CUA_DRIVER_EXECUTABLE` 必須是 `cua-driver doctor` 顯示的絕對 `cua-driver.exe` 路徑；MCP 模式預設使用 Cua Driver 的 Windows named pipe `\\.\pipe\cua-driver`，也可用 `PAI_CUA_DRIVER_SOCKET` 明確覆寫。安裝器不會讓模型或任務提供 endpoint。設定環境變數後重新執行 `packaging/windows/install-worker.ps1`，它會沿用既有 Worker identity 並重啟工作。
+Windows 一鍵安裝固定使用 Cua Driver 預設 named pipe `\\.\pipe\cua-driver`；自訂 Windows daemon endpoint 必須另外管理，安裝器會拒絕不相符的 endpoint。Linux 預設使用 `$XDG_RUNTIME_DIR/cua-driver.sock`；macOS 預設使用 `~/Library/Caches/cua-driver/cua-driver.sock`，這兩個平台可用 `PAI_CUA_DRIVER_SOCKET` 覆寫，Worker 與 daemon 會共用該值。安裝器不會讓模型或任務提供 executable 或 endpoint。
 
 Worker 以固定 executable 與 argv 啟動一個長駐 `cua-driver mcp --socket <configured-endpoint>` stdio client，並在該 process 生命週期內重用 MCP session；不接受任務提供 executable、socket 或任意 tool。`PAI_CUA_DRIVER_MODE=cli` 僅供隔離測試的 bounded one-shot fallback。支援 `observe`、`list_windows`、`click`、`move`、`drag`、`scroll`、`type_text`、`press_key`、`hotkey`、`launch_app`、`focus_window`。shell、clipboard、recording、replay、driver 設定和任意 MCP passthrough 不在能力範圍內。
 
-正式 MCP 模式必須設定 `PAI_CUA_DRIVER_SOCKET`；缺少 endpoint 時執行會回報 `DRIVER_ENDPOINT_REQUIRED`，不會自行啟動未受控 daemon。`list_windows` 的 driver PID/window ID 只在 Worker 內轉換成帶 session 綁定的 `window_ref`；Hermes 後續只能提交該 opaque reference。
+正式 MCP 模式必須有明確 endpoint；安裝器會建立並啟動受控本機 daemon service。缺少 endpoint 時執行會回報 `DRIVER_ENDPOINT_REQUIRED`，不會自行啟動未受控 daemon。`list_windows` 的 driver PID/window ID 只在 Worker 內轉換成帶 session 綁定的 `window_ref`；Hermes 後續只能提交該 opaque reference。
 
 CUA capability 只有在 driver manifest 可讀、且本機 permission probe 回報 Accessibility 與 Screen Recording 均已授權時才是 `READY/VERIFIED`；否則保留 `DEGRADED/ADVERTISED` 或 `UNAVAILABLE`。必須先在 Control Web 對 `computer.use` capability 執行 Grant，才可建立 session。
 

@@ -13,6 +13,7 @@ EOF
 }
 
 die() { echo "install-worker: $*" >&2; exit 1; }
+escape_sed() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
 
 if [[ $# -gt 4 ]]; then usage; exit 2; fi
 [[ "$(uname -s)" == "Darwin" ]] || die "this installer only supports macOS"
@@ -28,14 +29,15 @@ omlx_enabled=${PAI_OMLX_ENABLED:-true}
 omlx_api_key_file=${PAI_OMLX_API_KEY_FILE:-"$HOME/.omlx/settings.json"}
 lmstudio_enabled=${PAI_LMSTUDIO_ENABLED:-true}
 ollama_enabled=${PAI_OLLAMA_ENABLED:-true}
-cua_enabled=${PAI_CUA_ENABLED:-false}
+cua_enabled=${PAI_CUA_ENABLED:-true}
 cua_driver_executable=${PAI_CUA_DRIVER_EXECUTABLE:-"$HOME/.local/bin/cua-driver"}
 cua_driver_socket=${PAI_CUA_DRIVER_SOCKET:-"$HOME/Library/Caches/cua-driver/cua-driver.sock"}
 cua_driver_mode=${PAI_CUA_DRIVER_MODE:-mcp}
+cua_driver_version=${PAI_CUA_DRIVER_VERSION:-}
 refresh_source=${PAI_WORKER_REFRESH_SOURCE:-true}
 label=com.personal-ai.worker
 
-for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$cua_enabled" "$cua_driver_executable" "$cua_driver_socket" "$cua_driver_mode" "$refresh_source"; do
+for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$cua_enabled" "$cua_driver_executable" "$cua_driver_socket" "$cua_driver_mode" "$cua_driver_version" "$refresh_source"; do
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "arguments must not contain newlines"
 done
 [[ "$omlx_enabled" == "true" || "$omlx_enabled" == "false" ]] || die "PAI_OMLX_ENABLED must be true or false"
@@ -45,6 +47,7 @@ done
 [[ "$cua_driver_mode" == "mcp" || "$cua_driver_mode" == "cli" ]] || die "PAI_CUA_DRIVER_MODE must be mcp or cli"
 if [[ "$cua_enabled" == "true" ]]; then
   [[ "$cua_driver_executable" == /* ]] || die "PAI_CUA_DRIVER_EXECUTABLE must be an absolute path when CUA is enabled"
+  [[ -z "$cua_driver_version" || "$cua_driver_version" =~ ^[A-Za-z0-9._-]+$ ]] || die "PAI_CUA_DRIVER_VERSION contains unsupported characters"
   if [[ "$cua_driver_mode" == "mcp" ]]; then
     [[ "$cua_driver_socket" == /* ]] || die "PAI_CUA_DRIVER_SOCKET must be an absolute path in MCP mode"
   fi
@@ -61,7 +64,7 @@ if [[ -n "$script_path" ]]; then
 fi
 cached_source_root="$data_directory/source"
 has_worker_source() {
-  [[ -f "$1/package.json" && -f "$1/package-lock.json" && -f "$1/apps/worker/src/cli.ts" && -f "$1/packaging/macos/com.personal-ai.worker.plist" ]]
+  [[ -f "$1/package.json" && -f "$1/package-lock.json" && -f "$1/apps/worker/src/cli.ts" && -f "$1/packaging/macos/com.personal-ai.worker.plist" && -f "$1/packaging/macos/com.trycua.cua-driver.plist" ]]
 }
 
 tmp_directory=$(mktemp -d "${TMPDIR:-/tmp}/pai-worker-install.XXXXXX")
@@ -88,6 +91,42 @@ else
   mkdir -p "$data_directory"
   if [[ -e "$source_root" ]]; then rm -rf "$source_root"; fi
   mv "$tmp_directory/$archive_root" "$source_root"
+fi
+
+if [[ "$cua_enabled" == "true" ]]; then
+  if [[ ! -x "$cua_driver_executable" ]]; then
+    command -v curl >/dev/null 2>&1 || die "curl is required to install CUA Driver"
+    cua_installer="$tmp_directory/cua-driver-install.sh"
+    echo "Downloading the official CUA Driver installer"
+    curl --fail --location --silent --show-error --retry 3 https://cua.ai/driver/install.sh -o "$cua_installer"
+    if [[ -n "$cua_driver_version" ]]; then
+      CUA_DRIVER_RS_VERSION="$cua_driver_version" /bin/bash "$cua_installer"
+    else
+      /bin/bash "$cua_installer"
+    fi
+  fi
+  [[ -x "$cua_driver_executable" ]] || die "CUA Driver installer completed but executable was not found: $cua_driver_executable"
+  driver_app_executable=/Applications/CuaDriver.app/Contents/MacOS/cua-driver
+  [[ -x "$driver_app_executable" ]] || die "CuaDriver.app was not found at /Applications/CuaDriver.app; reinstall CUA Driver from the signed-in desktop account"
+  driver_launch_agents="$HOME/Library/LaunchAgents"
+  driver_plist="$driver_launch_agents/com.trycua.cua-driver.plist"
+  driver_log_directory="$HOME/Library/Logs/CuaDriver"
+  mkdir -p "$driver_launch_agents" "$driver_log_directory" "$(dirname -- "$cua_driver_socket")"
+  sed \
+    -e "s|REPLACE_CUA_DRIVER_APP_EXECUTABLE|$(escape_sed "$driver_app_executable")|g" \
+    -e "s|REPLACE_CUA_DRIVER_SOCKET|$(escape_sed "$cua_driver_socket")|g" \
+    -e "s|REPLACE_CUA_DRIVER_LOG_DIRECTORY|$(escape_sed "$driver_log_directory")|g" \
+    "$source_root/packaging/macos/com.trycua.cua-driver.plist" > "$driver_plist"
+  chmod 600 "$driver_plist"
+  /usr/bin/plutil -lint "$driver_plist" >/dev/null
+  uid=$(id -u)
+  /bin/launchctl bootout "gui/$uid/com.trycua.cua-driver" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap "gui/$uid" "$driver_plist" || die "launchctl could not bootstrap the CUA Driver LaunchAgent"
+  /bin/launchctl kickstart -k "gui/$uid/com.trycua.cua-driver" || die "launchctl could not start CUA Driver"
+  if ! "$cua_driver_executable" status >/dev/null 2>&1; then
+    echo "warning: CUA Driver daemon is not ready yet; check ~/Library/Logs/CuaDriver and the macOS privacy permissions" >&2
+  fi
+  echo "CUA Driver installed and configured. macOS Accessibility and Screen Recording still require user approval in System Settings."
 fi
 
 node_version_ok() {
@@ -155,7 +194,6 @@ template="$source_root/packaging/macos/com.personal-ai.worker.plist"
 launch_agents="$HOME/Library/LaunchAgents"
 plist_path="$launch_agents/$label.plist"
 mkdir -p "$launch_agents" "$data_directory" "$log_directory"
-escape_sed() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
 sed \
   -e "s|REPLACE_WORKER_EXECUTABLE|$(escape_sed "$worker_executable")|g" \
   -e "s|REPLACE_ORIGIN|$(escape_sed "$origin")|g" \

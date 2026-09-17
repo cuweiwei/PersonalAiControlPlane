@@ -147,15 +147,17 @@ $omlxEnabled = if ($env:PAI_OMLX_ENABLED) { $env:PAI_OMLX_ENABLED } else { "true
 $omlxApiKeyFile = if ($env:PAI_OMLX_API_KEY_FILE) { $env:PAI_OMLX_API_KEY_FILE } else { Join-Path $env:USERPROFILE ".omlx\settings.json" }
 $lmstudioEnabled = if ($env:PAI_LMSTUDIO_ENABLED) { $env:PAI_LMSTUDIO_ENABLED } else { "true" }
 $ollamaEnabled = if ($env:PAI_OLLAMA_ENABLED) { $env:PAI_OLLAMA_ENABLED } else { "true" }
-$cuaEnabled = if ($env:PAI_CUA_ENABLED) { $env:PAI_CUA_ENABLED } else { "false" }
+$cuaEnabled = if ($env:PAI_CUA_ENABLED) { $env:PAI_CUA_ENABLED } else { "true" }
 $cuaDriverExecutable = if ($env:PAI_CUA_DRIVER_EXECUTABLE) { $env:PAI_CUA_DRIVER_EXECUTABLE } else { "" }
 $cuaDriverSocket = if ($env:PAI_CUA_DRIVER_SOCKET) { $env:PAI_CUA_DRIVER_SOCKET } else { "\\.\pipe\cua-driver" }
 $cuaDriverMode = if ($env:PAI_CUA_DRIVER_MODE) { $env:PAI_CUA_DRIVER_MODE } else { "mcp" }
+$cuaDriverVersion = if ($env:PAI_CUA_DRIVER_VERSION) { $env:PAI_CUA_DRIVER_VERSION } else { "" }
 
 if ($cuaEnabled -eq "true" -and [string]::IsNullOrWhiteSpace($cuaDriverExecutable)) {
-  $cuaCommand = Get-Command cua-driver.exe -ErrorAction SilentlyContinue
-  if (!$cuaCommand) { $cuaCommand = Get-Command cua-driver -ErrorAction SilentlyContinue }
+  $cuaCommand = Get-Command cua-driver.exe -CommandType Application -ErrorAction SilentlyContinue
+  if (!$cuaCommand) { $cuaCommand = Get-Command cua-driver -CommandType Application -ErrorAction SilentlyContinue }
   if ($cuaCommand) { $cuaDriverExecutable = $cuaCommand.Source }
+  else { $cuaDriverExecutable = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin\cua-driver.exe" }
 }
 
 foreach ($entry in @(
@@ -168,7 +170,8 @@ foreach ($entry in @(
   @{ Name = "LogDirectory"; Value = $LogDirectory },
   @{ Name = "OmlxApiKeyFile"; Value = $omlxApiKeyFile },
   @{ Name = "CuaDriverExecutable"; Value = $cuaDriverExecutable },
-  @{ Name = "CuaDriverSocket"; Value = $cuaDriverSocket }
+  @{ Name = "CuaDriverSocket"; Value = $cuaDriverSocket },
+  @{ Name = "CuaDriverVersion"; Value = $cuaDriverVersion }
 )) { Assert-SafeValue $entry.Name $entry.Value }
 if ($omlxEnabled -notin @("true", "false")) { Fail "PAI_OMLX_ENABLED must be true or false" }
 if ($lmstudioEnabled -notin @("true", "false")) { Fail "PAI_LMSTUDIO_ENABLED must be true or false" }
@@ -178,9 +181,10 @@ if ($cuaDriverMode -notin @("mcp", "cli")) { Fail "PAI_CUA_DRIVER_MODE must be m
 if ($cuaEnabled -eq "true") {
   if ([string]::IsNullOrWhiteSpace($cuaDriverExecutable)) { Fail "PAI_CUA_DRIVER_EXECUTABLE is required when CUA is enabled; set it to the absolute cua-driver.exe path" }
   if (![IO.Path]::IsPathRooted($cuaDriverExecutable)) { Fail "PAI_CUA_DRIVER_EXECUTABLE must be an absolute path when CUA is enabled" }
-  if (!(Test-Path -LiteralPath $cuaDriverExecutable -PathType Leaf)) { Fail "CUA driver executable was not found: $cuaDriverExecutable" }
+  if ($cuaDriverVersion -and $cuaDriverVersion -notmatch '^[A-Za-z0-9._-]+$') { Fail "PAI_CUA_DRIVER_VERSION contains unsupported characters" }
   if ($cuaDriverMode -eq "mcp" -and [string]::IsNullOrWhiteSpace($cuaDriverSocket)) { Fail "PAI_CUA_DRIVER_SOCKET is required in MCP mode; configure the local CUA daemon endpoint explicitly" }
   if ($cuaDriverMode -eq "mcp" -and ![IO.Path]::IsPathRooted($cuaDriverSocket) -and !$cuaDriverSocket.StartsWith("\\\\")) { Fail "PAI_CUA_DRIVER_SOCKET must be an absolute path or named pipe in MCP mode" }
+  if ($cuaDriverSocket -ne "\\.\pipe\cua-driver") { Fail "the one-click Windows CUA service uses the Cua Driver default named pipe \\.\pipe\cua-driver; custom daemon endpoints must be managed separately" }
 }
 if (!(Test-Path -LiteralPath $DataDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null }
 if (!(Test-Path -LiteralPath $LogDirectory -PathType Container)) { New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null }
@@ -190,6 +194,39 @@ New-Item -ItemType Directory -Force -Path $tempDirectory | Out-Null
 $installSucceeded = $false
 $sourceBackupPath = $null
 try {
+  if ($cuaEnabled -eq "true") {
+    if (!(Test-Path -LiteralPath $cuaDriverExecutable -PathType Leaf)) {
+      $cuaInstaller = Join-Path $tempDirectory "cua-driver-install.ps1"
+      Download "https://cua.ai/driver/install.ps1" $cuaInstaller
+      $powershellInstaller = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+      if (!(Test-Path -LiteralPath $powershellInstaller -PathType Leaf)) { Fail "Windows PowerShell was not found to install CUA Driver" }
+      $previousCuaVersion = $env:CUA_DRIVER_RS_VERSION
+      try {
+        if ($cuaDriverVersion) { $env:CUA_DRIVER_RS_VERSION = $cuaDriverVersion }
+        & $powershellInstaller -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cuaInstaller -NoPathUpdate
+        if ($LASTEXITCODE -ne 0) { Fail "CUA Driver installer exited with code $LASTEXITCODE" }
+      } finally {
+        if ($null -eq $previousCuaVersion) { Remove-Item Env:CUA_DRIVER_RS_VERSION -ErrorAction SilentlyContinue }
+        else { $env:CUA_DRIVER_RS_VERSION = $previousCuaVersion }
+      }
+    }
+    if (!(Test-Path -LiteralPath $cuaDriverExecutable -PathType Leaf)) { Fail "CUA Driver installer completed but executable was not found: $cuaDriverExecutable" }
+    & $cuaDriverExecutable doctor | Out-Host
+    if ($LASTEXITCODE -ne 0) { Fail "CUA Driver doctor failed; resolve the local desktop requirements and retry" }
+    & $cuaDriverExecutable autostart enable
+    if ($LASTEXITCODE -ne 0) { Fail "CUA Driver could not register its interactive-user autostart task; run the installer from the signed-in desktop session" }
+    & $cuaDriverExecutable autostart kick
+    if ($LASTEXITCODE -ne 0) { Fail "CUA Driver autostart task could not be started" }
+    $driverReady = $false
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+      $driverStatus = (& $cuaDriverExecutable status 2>&1 | Out-String).Trim()
+      if ($LASTEXITCODE -eq 0 -and $driverStatus -match "daemon is running") { $driverReady = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (!$driverReady) { Fail "CUA Driver daemon did not become ready in the current interactive session: $driverStatus" }
+    Write-Output "CUA Driver ready: $cuaDriverExecutable ($cuaDriverSocket)"
+  }
+
   $sourceCache = Join-Path $DataDirectory "source"
   $sourceCandidate = $null
   if (!(Test-WorkerSource $sourceCache) -or $refresh) {

@@ -16,31 +16,36 @@ npm start
 
 Worker 由裝置主動連到 Control Plane；server 不主動連入裝置。
 
-macOS Worker 可直接使用一鍵安裝腳本。腳本會在使用者目錄準備 source 與 Node.js 22.19+，安裝依賴，建立 LaunchAgent 並立即啟動，不需要先手動執行其他準備指令：
+macOS Worker 可直接使用一鍵安裝腳本。腳本會在使用者目錄準備 source 與 Node.js 22.19+、安裝依賴及 Cua Driver、建立 Worker 與 driver LaunchAgent 並立即啟動：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/macos/install-worker.sh | bash
 ```
 
-預設連線到 `https://gnest.taila77e5f.ts.net`；若要指定其他 origin，可在同一個腳本命令後以 `bash -s -- "https://example.invalid"` 傳入。啟動後到 Control Web → Workers → Pending enrollment 按 Approve。重跑腳本是冪等的，會重新載入 LaunchAgent。
+預設連線到 `https://gnest.taila77e5f.ts.net`；若要指定其他 origin，可在同一個腳本命令後以 `bash -s -- "https://example.invalid"` 傳入。第一次需在 macOS 系統設定核准 CuaDriver.app 的 Accessibility 與 Screen Recording。啟動後到 Control Web → Workers → Pending enrollment 按 Approve，並對 `computer.use` 執行 Grant。重跑腳本會沿用既有 Worker identity 和 Cua Driver。
 
-Windows 可直接使用一鍵 PowerShell 安裝腳本。腳本會準備 source、Node.js 22.19+ 與依賴，建立 `pai-worker.cmd`，註冊目前登入使用者的 Scheduled Task 並立即啟動，不需要先手動 clone repo、安裝 Node.js 或建立 launcher：
+Windows 可直接使用一鍵 PowerShell 安裝腳本。腳本會準備 source、Node.js 22.19+、依賴與 Cua Driver，為目前登入使用者註冊互動式 CUA Driver 啟動工作及 Worker Scheduled Task，不需要先手動設定 driver 路徑、named pipe 或環境變數：
 
 ```powershell
 irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
 ```
 
-若要在 Windows 啟用 CUA，請在執行安裝器前設定 driver 的絕對路徑與已設定的本機 MCP endpoint。`cua-driver doctor` 顯示的 binary 健康不會自動替 Worker 啟用能力；安裝器會把設定寫入 Scheduled Task 使用的 launcher：
+若要停用安裝器對 CUA 的設定，可在執行前設定 `PAI_CUA_ENABLED=false`。若 driver 不存在，安裝器會從官方 CUA installer 安裝使用者態版本；已存在的 driver 不會被自動更新。CUA Driver 必須在已登入的互動桌面執行：
 
 ```powershell
-$env:PAI_CUA_ENABLED = "true"
-$env:PAI_CUA_DRIVER_EXECUTABLE = "C:\Users\shohe\AppData\Local\Programs\Cua\cua-driver\bin\cua-driver.exe"
-$env:PAI_CUA_DRIVER_SOCKET = "\\.\pipe\cua-driver"
-$env:PAI_CUA_DRIVER_MODE = "mcp"
+$env:PAI_CUA_ENABLED = "false"
 irm https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/windows/install-worker.ps1 | iex
 ```
 
-MCP endpoint 預設是 Cua Driver 在 Windows 的 `\\.\pipe\cua-driver`；若本機 daemon 使用其他 endpoint，再以環境變數覆寫。可先執行 `cua-driver status`，必要時在互動桌面執行 `cua-driver autostart kick`。重跑安裝器會沿用既有 Worker identity；重啟後到 Control Web 對 GoosePC 的 `computer.use` capability 執行 Grant。
+重跑安裝器會沿用既有 Worker identity；到 Control Web → Workers 按 Approve（僅新 identity 需要），並對 `computer.use` capability 執行 Grant。
+
+Linux x86_64/arm64 Worker 可使用一鍵 Bash 安裝器；CUA Driver 桌面控制目前要求支援的 x86_64 圖形 session。腳本會建立 systemd user services，不啟用 linger，也不以 root 執行桌面 driver：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cuweiwei/PersonalAiControlPlane/main/packaging/linux/install-worker.sh | bash
+```
+
+Linux CUA 需在登入中的圖形桌面執行，並具有 X11/XWayland 或受支援的 Wayland session 與 AT-SPI 2。Debian/Ubuntu 缺少 `libxi6`、`at-spi2-core` 時，安裝器會透過 sudo 安裝；其他發行版若健康檢查失敗，依 `cua-driver doctor` 提示安裝對應 runtime package。使用 `journalctl --user -u cua-driver.service -u personal-ai-worker.service` 查看日誌。
 
 腳本預設連線到 `https://gnest.taila77e5f.ts.net`，使用 `%LOCALAPPDATA%\.personal-ai-worker` 保存 Worker runtime data，登入後會自動啟動。只有尚未核准的全新 identity 需要到 Control Web → Workers → Pending enrollment 按 Approve；重跑腳本會更新 source、依賴與 Scheduled Task，但沿用既有 Worker identity。啟動錯誤會寫入 `%LOCALAPPDATA%\.personal-ai-worker\logs\worker.log`。
 

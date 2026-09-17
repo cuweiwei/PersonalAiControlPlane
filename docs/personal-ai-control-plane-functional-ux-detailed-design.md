@@ -965,7 +965,7 @@ Hermes 新增 `GET /api/internal/control-plane/features`，回 `{features, obser
 - [Worker runtime](../apps/worker/src/runtime.ts)、[Codex executor](../apps/worker/src/executors/codex.ts)、[Worker service](../apps/worker/src/service.ts)、[CLI](../apps/worker/src/cli.ts)。
 - [Settings service](../apps/control-plane/src/settings/settings-service.ts)、[server routes](../apps/control-plane/src/server.ts)、[entrypoint](../apps/control-plane/src/index.ts)。
 - [Callback outbox](../apps/control-plane/src/callbacks/outbox.ts)、[artifact storage](../apps/control-plane/src/artifacts/artifact-storage.ts)、[Control Web](../apps/control-web/src/app.ts)。
-- [macOS installer](../packaging/macos/install-worker.sh)、[Windows installer](../packaging/windows/install-worker.ps1)。
+- [macOS installer](../packaging/macos/install-worker.sh)、[Windows installer](../packaging/windows/install-worker.ps1)、[Linux installer](../packaging/linux/install-worker.sh)。
 
 Hermes 依據為 AiSecretaryChloe repository 的 `apps/chloe-linebot/adapters/hermes/scripts/pai_control_plane.py`、`services/hermes_evidence/evidence_proxy.py`、`tests/test_evidence_proxy.py`。本次只讀取相關整合程式，未修改該 repository。
 

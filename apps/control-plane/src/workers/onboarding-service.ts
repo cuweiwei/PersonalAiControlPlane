@@ -36,9 +36,16 @@ export class OnboardingService {
   }
   createForWorker(workerId: string, now = Date.now()): Record<string, unknown> { const worker = this.db.one<Row>("SELECT platform FROM workers WHERE id = ? AND removed_at IS NULL", workerId); if (!worker) throw new Error("WORKER_NOT_FOUND"); return this.create(String(worker.platform), [], now, workerId); }
   installer(platform: string, onboardingId: string | null): Record<string, unknown> {
-    if (!["darwin", "win32"].includes(platform)) throw new Error("INVALID_ONBOARDING_PLATFORM");
-    if (onboardingId && !this.get(onboardingId)) throw new Error("ONBOARDING_NOT_FOUND");
-    const platformKey = platform === "darwin" ? "DARWIN" : "WIN32"; const url = process.env[`PAI_WORKER_RELEASE_URL_${platformKey}`] ?? process.env.PAI_WORKER_RELEASE_URL ?? null;
-    return { platform, onboardingId, releaseVersion: process.env.PAI_WORKER_RELEASE_VERSION ?? "2.0.0", downloadUrl: url, origin: process.env.PAI_CONTROL_PLANE_ORIGIN ?? null, checks: ["node_version", "worker_executable", "control_plane_origin"], installCommand: platform === "darwin" ? "install-worker.sh" : "install-worker.ps1", instructions: platform === "darwin" ? ["執行一鍵 Worker 安裝腳本", "確認 Control Plane origin", "登入後啟用常駐服務"] : ["執行一鍵 PowerShell 安裝腳本", "確認 Control Plane origin", "登入後啟用登入後常駐的 Scheduled Task"] };
+    if (!["darwin", "win32", "linux"].includes(platform)) throw new Error("INVALID_ONBOARDING_PLATFORM");
+    const onboarding = onboardingId ? this.get(onboardingId) : undefined;
+    if (onboardingId && !onboarding) throw new Error("ONBOARDING_NOT_FOUND");
+    const platformKey = platform === "darwin" ? "DARWIN" : platform === "win32" ? "WIN32" : "LINUX"; const url = process.env[`PAI_WORKER_RELEASE_URL_${platformKey}`] ?? process.env.PAI_WORKER_RELEASE_URL ?? null;
+    const installCommand = platform === "win32" ? "install-worker.ps1" : "install-worker.sh";
+    const instructions = platform === "darwin"
+      ? ["執行一鍵 Worker 安裝腳本；安裝器會準備 CUA Driver 與登入後服務", "在 macOS 系統設定核准 Accessibility 與 Screen Recording", "到 Control Web Approve 新 Worker，並 Grant computer.use"]
+      : platform === "win32"
+        ? ["從已登入的互動桌面執行一鍵 PowerShell 安裝腳本；安裝器會準備 CUA Driver 與互動式啟動工作", "到 Control Web Approve 新 Worker，並 Grant computer.use"]
+        : ["從已登入的 Linux 圖形桌面執行一鍵安裝腳本；安裝器會設定 CUA Driver 與 systemd user service", "CUA Driver Linux 圖形桌面目前以 x86_64 為支援基線；確認 X11/XWayland 或支援的 Wayland 桌面", "到 Control Web Approve 新 Worker，並 Grant computer.use"];
+    return { platform, onboardingId, selectedCapabilities: onboarding?.selectedCapabilities ?? [], releaseVersion: process.env.PAI_WORKER_RELEASE_VERSION ?? "2.0.0", downloadUrl: url, origin: process.env.PAI_CONTROL_PLANE_ORIGIN ?? null, checks: ["node_version", "worker_executable", "control_plane_origin", ...(platform === "linux" ? ["graphical_session", "systemd_user"] : []), ...(platform === "darwin" ? ["macos_privacy_permissions"] : [])], installCommand, instructions };
   }
 }
