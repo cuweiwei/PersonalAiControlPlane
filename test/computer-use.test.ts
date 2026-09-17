@@ -53,6 +53,27 @@ test("CUA adapter binds opaque window refs and uses the installed driver coordin
   assert.equal(drag[1], "drag"); assert.equal(dragInput.pid, 42); assert.equal(dragInput.window_id, 7); assert.equal(dragInput.from_x, 1); assert.equal(dragInput.from_y, 2); assert.equal(dragInput.to_x, 3); assert.equal(dragInput.to_y, 4); assert.equal("x" in dragInput, false);
 });
 
+test("CUA list_windows filters legacy and unidentified windows against the approved app scope", async () => {
+  const executor = new CuaDriverExecutor({ enabled: true, mode: "cli", platform: "win32", runner: async (args) => {
+    if (args[1] === "list_windows") return { stdout: JSON.stringify({ windows: [], _legacy_windows: [
+      { pid: 10, window_id: 1, app_name: "Notepad", title: "Allowed window" },
+      { pid: 11, window_id: 2, process_name: "C:\\Program Files\\Notepad\\notepad.exe", title: "Allowed by executable" },
+      { pid: 12, window_id: 3, app_name: "Browser", title: "Out of scope" },
+      { pid: 13, window_id: 4, title: "Identity unavailable" },
+    ] }), stderr: "" };
+    throw new Error(`unexpected driver call: ${args[1] ?? args[0]}`);
+  } });
+  const events: any[] = [];
+  for await (const event of executor.execute({ task_id: "t", attempt_id: "scoped-list", task_type: "computer.use", instruction: "list scoped windows", payload: {
+    operation: "list_windows", session_id: "cs", sequence: 1, target: { kind: "window" },
+    session: { state: "ACTIVE", expires_at: Date.now() + 60_000, allowed_operations: ["list_windows"], allowed_apps: ["Notepad", "notepad.exe"], capture_scope: "window" },
+  } }, { emit: async (event) => { events.push(event); } })) events.push(event);
+  const output = events.at(-1)?.result?.output;
+  assert.deepEqual(output?.windows, []);
+  assert.deepEqual(output?._legacy_windows?.map((window: Record<string, unknown>) => window.title), ["Allowed window", "Allowed by executable"]);
+  assert.doesNotMatch(JSON.stringify(output), /Out of scope|Identity unavailable/);
+});
+
 test("Windows CUA discovery verifies the interactive desktop without macOS TCC permissions", async () => {
   const calls: string[][] = [];
   const healthReport = {

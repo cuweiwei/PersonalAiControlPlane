@@ -199,11 +199,16 @@ export class CuaDriverExecutor implements WorkerExecutor {
     if (Array.isArray(value)) return value.map((item) => this.bindWindowRefs(sessionId, item, allowedApps)).filter((item) => item !== undefined);
     if (!value || typeof value !== "object") return value;
     const objectValue = value as Record<string, unknown>;
-    const appName = typeof objectValue.app_name === "string" ? objectValue.app_name : typeof objectValue.appName === "string" ? objectValue.appName : undefined;
-    if (appName && allowedApps.length > 0 && !allowedApps.includes("*") && !allowedApps.includes(appName)) return undefined;
+    const appName = ["app_name", "appName", "application_name", "applicationName", "process_name", "processName", "executable_name", "executableName", "executable_path", "executablePath"]
+      .map((key) => objectValue[key]).find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    const pid = Number(objectValue.pid);
+    const windowId = Number(objectValue.window_id ?? objectValue.windowId);
+    const isWindow = Number.isInteger(pid) && pid >= 0 && Number.isInteger(windowId) && windowId >= 0;
+    const normalizeApp = (name: string) => name.trim().split(/[\\/]/).at(-1)!.toLocaleLowerCase("en-US");
+    const allowedNames = new Set(allowedApps.map(normalizeApp));
+    if (isWindow && allowedApps.length > 0 && !allowedNames.has("*") && (!appName || !allowedNames.has(normalizeApp(appName)))) return undefined;
     const bound = Object.fromEntries(Object.entries(objectValue).map(([key, item]) => [key, this.bindWindowRefs(sessionId, item, allowedApps)]));
-    const pid = Number(bound.pid); const windowId = Number(bound.window_id ?? bound.windowId);
-    if (Number.isInteger(pid) && pid >= 0 && Number.isInteger(windowId) && windowId >= 0) bound.window_ref = this.windowRef(sessionId, pid, windowId, typeof bound.app_name === "string" ? bound.app_name : undefined, typeof bound.title === "string" ? bound.title : undefined);
+    if (isWindow) bound.window_ref = this.windowRef(sessionId, pid, windowId, appName, typeof bound.title === "string" ? bound.title : undefined);
     return bound;
   }
 
