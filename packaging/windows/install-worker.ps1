@@ -80,14 +80,21 @@ try {
   db.close();
 }
 '@
+  $stdoutPath = "$probePath.out"
+  $stderrPath = "$probePath.err"
   [IO.File]::WriteAllText($probePath, $probe, [Text.UTF8Encoding]::new($false))
   try {
-    $output = & $NodePath $probePath $journal 2>$null
-    $probeExitCode = $LASTEXITCODE
+    $probeArguments = '"' + $probePath + '" "' + $journal + '"'
+    $probeProcess = Start-Process -FilePath $NodePath -ArgumentList $probeArguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $probeExitCode = $probeProcess.ExitCode
+    $output = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+    $diagnostic = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw).Trim() } else { "" }
   } finally {
-    if (Test-Path -LiteralPath $probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
+    foreach ($path in @($probePath, $stdoutPath, $stderrPath)) {
+      if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    }
   }
-  if ($probeExitCode -ne 0) { Fail "could not inspect the Worker journal at $journal; no processes were stopped" }
+  if ($probeExitCode -ne 0) { Fail "could not inspect the Worker journal at $journal; no processes were stopped. $diagnostic" }
   $countText = ($output | Out-String).Trim()
   if ($countText -notmatch '^\d+$') { Fail "Worker journal returned an invalid active-attempt count; no processes were stopped" }
   return [int]$countText
