@@ -69,9 +69,25 @@ function Get-WorkerProcesses([string]$Directory, [string]$Executable, [string]$S
 function Get-ActiveWorkerAttemptCount([string]$NodePath, [string]$Directory) {
   $journal = Join-Path $Directory "worker.db"
   if (!(Test-Path -LiteralPath $journal -PathType Leaf)) { return 0 }
-  $probe = 'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync(process.argv[1],{readOnly:true}); try { const row=db.prepare("SELECT COUNT(*) AS count FROM assignments WHERE status IN (''ACCEPTED'',''RUNNING'')").get(); console.log(row.count); } finally { db.close(); }'
-  $output = & $NodePath -e $probe $journal 2>$null
-  if ($LASTEXITCODE -ne 0) { Fail "could not inspect the Worker journal at $journal; no processes were stopped" }
+  $probePath = Join-Path ([IO.Path]::GetTempPath()) ("pai-worker-journal-" + [Guid]::NewGuid().ToString("N") + ".cjs")
+  $probe = @'
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[2], { readOnly: true });
+try {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM assignments WHERE status IN ('ACCEPTED','RUNNING')").get();
+  console.log(row.count);
+} finally {
+  db.close();
+}
+'@
+  [IO.File]::WriteAllText($probePath, $probe, [Text.UTF8Encoding]::new($false))
+  try {
+    $output = & $NodePath $probePath $journal 2>$null
+    $probeExitCode = $LASTEXITCODE
+  } finally {
+    if (Test-Path -LiteralPath $probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
+  }
+  if ($probeExitCode -ne 0) { Fail "could not inspect the Worker journal at $journal; no processes were stopped" }
   $countText = ($output | Out-String).Trim()
   if ($countText -notmatch '^\d+$') { Fail "Worker journal returned an invalid active-attempt count; no processes were stopped" }
   return [int]$countText
