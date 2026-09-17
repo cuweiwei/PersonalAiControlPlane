@@ -1,6 +1,6 @@
 # Worker CUA Computer Use
 
-狀態：session 直接建立與手動撤銷已實作；實體 Worker、Hermes provider 與 NAS live 驗收仍須另行完成。
+狀態：CP 與 Hermes 已於 2026-09-17 部署；GoosePC 目前回報 ONLINE、computer.use READY/GRANTED/VERIFIED，Hermes MCP 已發現 34 個工具。此次尚未在實體桌面執行 observe 或輸入操作，因此不宣稱 CUA end-to-end 驗收完成。
 
 ## Worker 安裝與桌面需求
 
@@ -65,3 +65,11 @@ npm test
 Hermes `chloe_v2` MCP server 提供 `computer_list`、`computer_session_open`、`computer_observe`、`computer_act`、`computer_reconcile` 與 `computer_session_control`；`computer_session_open` 可在 capability Grant 後直接建立或重用無期限 session，並回傳 `nextSequence`；`computer_observe` 會驗證 SHA-256 後回傳 MCP image content。尚未完成的 live gate 是目標 Worker 的實際 Cua Driver daemon、OS 權限、指定 Hermes vision model provider receipt，以及實體桌面／VM 的 end-to-end 操作證據。
 
 `test/computer-use.test.ts` 涵蓋 driver allowlist、截圖 artifact、capability grant、桌面獨占、observation 綁定與 stale rejection。
+
+## Production evidence (2026-09-17)
+
+- Control Plane source commit `f1c0499` passed [CI run 35214979254](https://github.com/cuweiwei/PersonalAiControlPlane/actions/runs/35214979254); pinned image `sha256:8de83c6ec7d8c2495d0fd628d8e7fcc84a1364fc3f7985e708b0915bc2f9b1b5` is running. `/healthz` and `/readyz` both returned HTTP 200.
+- Hermes source commit `6a6bf81` passed [CI run 35214979889](https://github.com/cuweiwei/AiSecretaryChloe/actions/runs/35214979889); pinned image `sha256:6966c9b58039732d29c109ebfcaf33d477332fb0bc6b729fd4a4b091a4f41195` is running, and `/api/health` reports the same commit and digest. `hermes mcp test AI_control_plane` connected and discovered 34 tools.
+- GoosePC is online and its current capability row reports `READY`, `GRANTED`, and `VERIFIED`. A live session was not opened during deployment verification, and no physical desktop interaction was performed.
+- Pre-deploy Control Plane data archive: `/volume1/docker/PersonalAiControlPlane/backups/pai-control-plane-pre-cua-session-20260917-192243.tar.gz`; SHA-256 manifest `/volume1/docker/PersonalAiControlPlane/backups/pai-control-plane-pre-cua-session-20260917-192243.sha256` was verified.
+- Pre-deploy Hermes data and secrets archives: `/volume1/docker/hermes/backups/hermes-data-pre-computer-session-20260917-192753.tar.gz` and `/volume1/docker/hermes/backups/hermes-secrets-pre-computer-session-20260917-192753.tar.gz`; both tar streams and the SHA-256 manifest were verified.
