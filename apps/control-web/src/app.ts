@@ -225,8 +225,10 @@ function Workers({ refreshVersion }: { refreshVersion: number }) {
 
 function Computers({ refreshVersion }: { refreshVersion: number }) {
   const [data, setData] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null); const [selected, setSelected] = useState(""); const [session, setSession] = useState<Item | null>(null); const [busy, setBusy] = useState(false);
+  const requestedSessionId = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("session_id") ?? "";
   const reload = useCallback(() => { request("/api/v2/computers").then((value) => { setData(value); if (!selected && value.items?.[0]?.workerId) setSelected(value.items[0].workerId); }).catch(setError); }, [selected]);
   useEffect(() => { void reload(); }, [refreshVersion]);
+  useEffect(() => { if (!requestedSessionId) return; setBusy(true); request(`/api/v2/computer-sessions/${encodeURIComponent(requestedSessionId)}`).then((value) => { setSession(value); setError(null); }).catch(setError).finally(() => setBusy(false)); }, [requestedSessionId, refreshVersion]);
   const open = async () => { if (!selected) return; setBusy(true); try { const result = await request("/api/v2/computer-sessions", { method: "POST", headers: { "idempotency-key": `computer-session-${selected}-${Date.now()}` }, body: JSON.stringify({ worker_id: selected, desktop_kind: "desktop", capture_scope: "desktop", allowed_operations: ["observe", "list_windows", "click", "move", "drag", "scroll", "type_text", "press_key", "hotkey", "launch_app", "focus_window"], allowed_apps: ["*"], delivery_modes: ["background"], model: { provider: "hermes", id: "configured" } }) }); setSession(await request(`/api/v2/computer-sessions/${result.id}`)); } catch (reason) { setError(reason); } finally { setBusy(false); } };
   const act = async (path: string, body: Item) => { setBusy(true); try { setSession(await request(path, { method: "POST", headers: { "idempotency-key": `computer-control-${Date.now()}` }, body: JSON.stringify(body) })); } catch (reason) { setError(reason); } finally { setBusy(false); } };
   if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
