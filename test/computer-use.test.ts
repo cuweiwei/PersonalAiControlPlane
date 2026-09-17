@@ -10,7 +10,7 @@ import { TaskService } from "../apps/control-plane/src/tasks/task-service.ts";
 
 test("CUA executor invokes only the allowlisted driver tool and returns an observation artifact", async () => {
   const calls: string[][] = [];
-  const executor = new CuaDriverExecutor({ enabled: true, socket: "/tmp/cua-test.sock", runner: async (args) => {
+  const executor = new CuaDriverExecutor({ enabled: true, socket: "/tmp/cua-test.sock", platform: "darwin", runner: async (args) => {
     calls.push(args);
     if (args[0] === "--version") return { stdout: "cua-driver 0.22.1", stderr: "" };
     if (args[0] === "manifest") return { stdout: "{}", stderr: "" };
@@ -32,7 +32,7 @@ test("CUA executor invokes only the allowlisted driver tool and returns an obser
 
 test("CUA adapter binds opaque window refs and uses the installed driver coordinate contracts", async () => {
   const calls: string[][] = [];
-  const executor = new CuaDriverExecutor({ enabled: true, mode: "cli", socket: "/tmp/cua-test.sock", runner: async (args) => {
+  const executor = new CuaDriverExecutor({ enabled: true, mode: "cli", socket: "/tmp/cua-test.sock", platform: "darwin", runner: async (args) => {
     calls.push(args);
     if (args[0] === "--version") return { stdout: "cua-driver 0.22.1", stderr: "" };
     if (args[0] === "manifest") return { stdout: "{}", stderr: "" };
@@ -51,6 +51,60 @@ test("CUA adapter binds opaque window refs and uses the installed driver coordin
   for await (const _event of executor.execute({ task_id: "t", attempt_id: "drag", task_type: "computer.use", instruction: "drag", payload: { operation: "drag", session_id: "cs", sequence: 2, target: { kind: "window", window_ref: ref }, arguments: { x: 1, y: 2, to_x: 3, to_y: 4 }, session: { state: "ACTIVE", expires_at: Date.now() + 60_000, allowed_operations: ["list_windows", "drag"], allowed_apps: ["Editor"] } } }, { emit: async () => {} })) {}
   const drag = calls.at(-1)!; const dragInput = JSON.parse(drag[2] ?? "{}");
   assert.equal(drag[1], "drag"); assert.equal(dragInput.pid, 42); assert.equal(dragInput.window_id, 7); assert.equal(dragInput.from_x, 1); assert.equal(dragInput.from_y, 2); assert.equal(dragInput.to_x, 3); assert.equal(dragInput.to_y, 4); assert.equal("x" in dragInput, false);
+});
+
+test("Windows CUA discovery verifies the interactive desktop without macOS TCC permissions", async () => {
+  const calls: string[][] = [];
+  const healthReport = {
+    schema_version: "1", platform: "win32", driver_version: "0.28.2", overall: "ok",
+    checks: [
+      { name: "binary_version", status: "pass" },
+      { name: "platform_supported", status: "pass" },
+      { name: "session_active", status: "pass" },
+      { name: "ax_capability", status: "pass" },
+      { name: "screen_capture_capability", status: "pass" },
+    ],
+  };
+  const executor = new CuaDriverExecutor({
+    enabled: true, platform: "win32", mode: "cli", socket: "\\\\.\\pipe\\cua-driver",
+    healthReportProbe: async () => healthReport,
+    runner: async (args) => {
+      calls.push(args);
+      if (args[0] === "--version") return { stdout: "cua-driver 0.28.2", stderr: "" };
+      if (args[0] === "manifest") return { stdout: "{}", stderr: "" };
+      if (args[0] === "list-tools") return { stdout: "get_window_state: Observe\nlist_windows: List\nclick: Click", stderr: "" };
+      if (args[0] === "doctor") return { stdout: JSON.stringify({ ok: true, probes: [
+        { label: "interactive session", status: "ok", message: "session 1 attached" },
+        { label: "UI Automation", status: "ok", message: "UIA available" },
+        { label: "EnumWindows visible", status: "ok", message: "6 windows" },
+      ] }), stderr: "" };
+      throw new Error(`unexpected probe: ${args.join(" ")}`);
+    },
+  });
+
+  const discovered = await executor.discover();
+  assert.equal(discovered.capabilities[0]?.status, "READY");
+  assert.equal(discovered.capabilities[0]?.evidence_state, "VERIFIED");
+  assert.equal((discovered.capabilities[0]?.permissions as any)?.screen_recording, "not_applicable");
+  assert.equal(calls.some((args) => args[0] === "permissions"), false);
+
+  const lockedExecutor = new CuaDriverExecutor({
+    enabled: true, platform: "win32", mode: "cli", socket: "\\\\.\\pipe\\cua-driver",
+    healthReportProbe: async () => healthReport,
+    runner: async (args) => {
+      if (args[0] === "--version") return { stdout: "cua-driver 0.28.2", stderr: "" };
+      if (args[0] === "manifest") return { stdout: "{}", stderr: "" };
+      if (args[0] === "list-tools") return { stdout: "get_window_state: Observe", stderr: "" };
+      if (args[0] === "doctor") return { stdout: JSON.stringify({ ok: true, probes: [
+        { label: "interactive session", status: "warn", message: "desktop locked" },
+        { label: "UI Automation", status: "ok", message: "UIA available" },
+      ] }), stderr: "" };
+      throw new Error(`unexpected probe: ${args.join(" ")}`);
+    },
+  });
+  const locked = await lockedExecutor.discover();
+  assert.equal(locked.capabilities[0]?.status, "DEGRADED");
+  assert.equal(locked.capabilities[0]?.evidence_state, "ADVERTISED");
 });
 
 test("computer sessions require a granted verified capability, serialize the desktop, and bind actions to fresh observations", () => {

@@ -25,9 +25,18 @@ const TOOLS: Record<string, string> = {
 };
 
 type Runner = (args: string[], signal?: AbortSignal) => Promise<{ stdout: string; stderr: string }>;
-export type CuaExecutorOptions = { executable?: string; socket?: string; enabled?: boolean; runner?: Runner; mode?: "mcp" | "cli" };
+export type CuaExecutorOptions = {
+  executable?: string;
+  socket?: string;
+  enabled?: boolean;
+  runner?: Runner;
+  mode?: "mcp" | "cli";
+  /** Test seams for platform-specific, read-only health probes. */
+  platform?: NodeJS.Platform;
+  healthReportProbe?: () => Promise<unknown>;
+};
 
-type MpcResponse = { structuredContent?: unknown; content?: unknown[]; error?: { code?: unknown; message?: unknown } };
+type MpcResponse = { structuredContent?: unknown; content?: unknown[]; error?: { code?: unknown; message?: unknown }; isError?: boolean };
 
 /** One long-lived MCP stdio client per Worker executor. */
 class CuaDriverMcpClient {
@@ -107,6 +116,18 @@ function parseOutput(stdout: string): unknown {
   try { return JSON.parse(text); } catch { return { text: text.slice(0, 32_000) }; }
 }
 
+function checkStatus(report: Record<string, any>, name: string): string | undefined {
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  const check = checks.find((item: unknown) => object(item).name === name);
+  return check ? boundedText(object(check).status, 16).toLowerCase() : undefined;
+}
+
+function doctorStatus(report: Record<string, any>, label: string): string | undefined {
+  const probes = Array.isArray(report.probes) ? report.probes : [];
+  const probe = probes.find((item: unknown) => object(item).label === label);
+  return probe ? boundedText(object(probe).status, 16).toLowerCase() : undefined;
+}
+
 function finiteNumber(value: unknown, field: string, min: number, max: number): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number < min || number > max) throw new Error(`CUA_${field.toUpperCase()}_OUT_OF_RANGE`);
@@ -125,6 +146,8 @@ export class CuaDriverExecutor implements WorkerExecutor {
   private readonly run: Runner;
   private readonly mode: "mcp" | "cli";
   private readonly mcp?: CuaDriverMcpClient;
+  private readonly platform: NodeJS.Platform;
+  private readonly healthReportProbe?: () => Promise<unknown>;
   private readonly configError?: string;
   private readonly windows = new Map<string, { sessionId: string; pid: number; windowId: number; appName?: string; title?: string }>();
   private supportedOperations = new Set(OPERATIONS);
@@ -136,6 +159,8 @@ export class CuaDriverExecutor implements WorkerExecutor {
     this.enabled = options.enabled === true;
     this.run = options.runner ?? ((args, signal) => execFileAsync(this.executable, args, { signal, maxBuffer: 12 * 1024 * 1024 }));
     this.mode = options.mode ?? (options.runner ? "cli" : "mcp");
+    this.platform = options.platform ?? process.platform;
+    this.healthReportProbe = options.healthReportProbe;
     if (this.enabled && !options.runner && !isAbsolute(this.executable)) this.configError = "CUA_EXECUTABLE_ABSOLUTE_REQUIRED";
     if (this.mode === "mcp" && this.socket) this.mcp = new CuaDriverMcpClient(this.executable, this.socket);
   }
@@ -148,6 +173,20 @@ export class CuaDriverExecutor implements WorkerExecutor {
   }
 
   close(): void { this.mcp?.close(); }
+
+  private async readHealthReport(): Promise<Record<string, any>> {
+    let value: unknown;
+    if (this.healthReportProbe) value = await this.healthReportProbe();
+    else {
+      if (!this.mcp) throw new Error("DRIVER_HEALTH_REPORT_UNAVAILABLE");
+      const response = await this.mcp.call("health_report", {});
+      if (response.isError) throw new Error("DRIVER_HEALTH_REPORT_FAILED");
+      value = response.structuredContent;
+    }
+    const report = object(value);
+    if (report.schema_version !== "1" || !Array.isArray(report.checks)) throw new Error("DRIVER_HEALTH_REPORT_UNSUPPORTED");
+    return report;
+  }
 
   private windowRef(sessionId: string, pid: number, windowId: number, appName?: string, title?: string): string {
     const digest = createHash("sha256").update(`${sessionId}:${pid}:${windowId}:${appName ?? ""}:${title ?? ""}`).digest("hex").slice(0, 24);
@@ -203,15 +242,61 @@ export class CuaDriverExecutor implements WorkerExecutor {
       }
       if (toolNames.size > 0) this.supportedOperations = new Set([...OPERATIONS].filter((operation) => operation === "observe" ? toolNames.has("get_window_state") || toolNames.has("get_desktop_state") : toolNames.has(TOOLS[operation])));
       let permissionState: Record<string, any> = {};
-      try { permissionState = object(parseOutput((await this.run(["permissions", "status", "--json"])).stdout)); } catch { /* permission probe is best effort and remains explicit */ }
-      const isGranted = (value: unknown): boolean => value === true || value === "granted" || value === "GRANTED";
-      const accessibilityGranted = isGranted(permissionState.accessibility);
-      const screenRecordingGranted = isGranted(permissionState.screen_recording) || isGranted(permissionState.screenRecording);
-      const permissionsGranted = accessibilityGranted && screenRecordingGranted;
-      const permissionLabel = (value: unknown, granted: boolean): string => granted ? "granted" : boundedText(value == null ? "unknown" : String(value), 32);
-      const status = permissionsGranted && this.supportedOperations.has("observe") ? "READY" : "DEGRADED";
+      let healthReady = false;
+      let healthError: string | undefined;
+      if (this.platform === "darwin") {
+        // Accessibility and Screen Recording are macOS TCC grants. They do
+        // not exist on Windows or Linux and must never gate those runtimes.
+        try { permissionState = object(parseOutput((await this.run(["permissions", "status", "--json"])).stdout)); } catch { /* permission probe is best effort and remains explicit */ }
+        const isGranted = (value: unknown): boolean => value === true || value === "granted" || value === "GRANTED";
+        const accessibilityGranted = isGranted(permissionState.accessibility);
+        const screenRecordingGranted = isGranted(permissionState.screen_recording) || isGranted(permissionState.screenRecording);
+        healthReady = accessibilityGranted && screenRecordingGranted;
+        permissionState = {
+          accessibility: accessibilityGranted ? "granted" : boundedText(permissionState.accessibility ?? "unknown", 32),
+          screen_recording: screenRecordingGranted ? "granted" : boundedText(permissionState.screen_recording ?? permissionState.screenRecording ?? "unknown", 32),
+          status: healthReady ? "ready" : boundedText(permissionState.status ?? "unknown", 32),
+        };
+      } else {
+        try {
+          const report = await this.readHealthReport();
+          const expectedPlatform = this.platform === "win32" ? "win32" : this.platform === "linux" ? "linux" : "darwin";
+          const requiredChecks = ["binary_version", "platform_supported", "session_active", "ax_capability", "screen_capture_capability"];
+          const healthChecksReady = report.platform === expectedPlatform && ["ok", "degraded"].includes(String(report.overall)) && requiredChecks.every((name) => checkStatus(report, name) === "pass");
+          let desktopReady = true;
+          if (this.platform === "win32") {
+            const doctor = object(parseOutput((await this.run(["doctor", "--json"])).stdout));
+            // The Windows health_report session check is MCP-session scoped;
+            // doctor additionally verifies the attached interactive desktop.
+            const interactiveSessionReady = doctorStatus(doctor, "interactive session") === "ok";
+            const uiAutomationReady = doctorStatus(doctor, "UI Automation") === "ok";
+            desktopReady = doctor.ok === true && interactiveSessionReady && uiAutomationReady;
+            permissionState = {
+              accessibility: checkStatus(report, "ax_capability") === "pass" && uiAutomationReady ? "available" : "unavailable",
+              screen_capture: checkStatus(report, "screen_capture_capability") === "pass" ? "available" : "unavailable",
+              screen_recording: "not_applicable",
+              interactive_session: interactiveSessionReady ? "ready" : "unavailable",
+              status: boundedText(report.overall, 32),
+            };
+          } else {
+            permissionState = {
+              accessibility: checkStatus(report, "ax_capability") === "pass" ? "available" : "unavailable",
+              screen_capture: checkStatus(report, "screen_capture_capability") === "pass" ? "available" : "unavailable",
+              interactive_session: checkStatus(report, "session_active") === "pass" ? "ready" : "unavailable",
+              status: boundedText(report.overall, 32),
+            };
+          }
+          healthReady = healthChecksReady && desktopReady;
+          if (!healthReady) healthError = "DRIVER_DESKTOP_HEALTHCHECK_FAILED";
+        } catch (error) {
+          healthError = error instanceof Error ? boundedText(error.message, 64) : "DRIVER_HEALTH_REPORT_FAILED";
+          permissionState = { accessibility: "unknown", screen_capture: "unknown", screen_recording: "not_applicable", interactive_session: "unknown", status: "unknown" };
+        }
+      }
+      const ready = healthReady && this.supportedOperations.has("observe");
+      const status = ready ? "READY" : "DEGRADED";
       const manifestHash = `sha256:${createHash("sha256").update(JSON.stringify({ manifest, toolList })).digest("hex")}`;
-      return { capabilities: [{ capability: "computer.use", runtime: "cua-driver", contract_version: 1, status, evidence_state: permissionsGranted && this.supportedOperations.has("observe") ? "VERIFIED" : "ADVERTISED", permissions: { accessibility: permissionLabel(permissionState.accessibility, accessibilityGranted), screen_recording: permissionLabel(permissionState.screen_recording ?? permissionState.screenRecording, screenRecordingGranted), status: boundedText(permissionState.status ?? "granted", 32) }, max_concurrency: 1, descriptor: { capability: "computer.use", runtime: "cua-driver", runtime_version: versionText, driver_version: versionText, schema_version: 1, operations: [...this.supportedOperations], desktop_kinds: ["desktop", "window"], capture_scopes: ["window", "desktop"], delivery_modes: ["background", "foreground"], manifest_hash: manifestHash } }], models: [] };
+      return { capabilities: [{ capability: "computer.use", runtime: "cua-driver", contract_version: 1, status, evidence_state: ready ? "VERIFIED" : "ADVERTISED", ...(healthError ? { error_code: healthError } : {}), permissions: permissionState, max_concurrency: 1, descriptor: { capability: "computer.use", runtime: "cua-driver", runtime_version: versionText, driver_version: versionText, schema_version: 1, operations: [...this.supportedOperations], desktop_kinds: ["desktop", "window"], capture_scopes: ["window", "desktop"], delivery_modes: ["background", "foreground"], manifest_hash: manifestHash } }], models: [] };
     } catch (error) {
       const message = error instanceof Error ? error.message : "DRIVER_UNAVAILABLE";
       return { capabilities: [{ capability: "computer.use", runtime: "cua-driver", status: "UNAVAILABLE", evidence_state: "ADVERTISED", error_code: boundedText(message, 120) }], models: [] };
