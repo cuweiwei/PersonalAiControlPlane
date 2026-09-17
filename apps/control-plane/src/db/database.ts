@@ -469,6 +469,8 @@ CREATE TABLE IF NOT EXISTS computer_sessions (
   scope_json TEXT NOT NULL,
   model_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('PENDING_APPROVAL', 'OPENING', 'ACTIVE', 'PAUSED', 'CLOSING', 'CLOSED', 'REVOKED', 'EXPIRED', 'FAILED')),
+  persistent INTEGER NOT NULL DEFAULT 0,
+  authorization_mode TEXT NOT NULL DEFAULT 'SESSION_APPROVAL',
   revision INTEGER NOT NULL DEFAULT 1,
   expires_at INTEGER NOT NULL,
   idle_expires_at INTEGER NOT NULL,
@@ -478,6 +480,7 @@ CREATE TABLE IF NOT EXISTS computer_sessions (
   created_at INTEGER NOT NULL,
   approved_at INTEGER,
   closed_at INTEGER,
+  deleted_at INTEGER,
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_computer_sessions_worker_state ON computer_sessions(worker_id, state, expires_at);
@@ -633,6 +636,10 @@ export class ControlPlaneDatabase {
       ensureColumn("worker_capabilities", "verified_at", "INTEGER");
       ensureColumn("worker_capabilities", "verification_expires_at", "INTEGER");
       ensureColumn("worker_capabilities", "verification_ref", "TEXT");
+      ensureColumn("computer_sessions", "persistent", "INTEGER NOT NULL DEFAULT 0");
+      ensureColumn("computer_sessions", "authorization_mode", "TEXT NOT NULL DEFAULT 'SESSION_APPROVAL'");
+      ensureColumn("computer_sessions", "deleted_at", "INTEGER");
+      this.connection.exec("UPDATE computer_sessions SET persistent = 1, max_actions = 0 WHERE state IN ('ACTIVE', 'PAUSED') AND persistent = 0");
       this.connection.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_mission_execution ON tasks(mission_execution_id) WHERE mission_execution_id IS NOT NULL");
       this.connection.exec(`
         CREATE TABLE IF NOT EXISTS task_runs (

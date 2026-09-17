@@ -315,8 +315,10 @@ export class CuaDriverExecutor implements WorkerExecutor {
     if (!this.supportedOperations.has(operation)) throw new Error("DRIVER_SCHEMA_UNSUPPORTED");
     const session = object(payload.session);
     if (String(session.state ?? "") !== "ACTIVE") throw new Error("SESSION_NOT_ACTIVE");
-    const expiresAt = Number(session.expires_at ?? 0);
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("SESSION_EXPIRED");
+    if (session.persistent !== true) {
+      const expiresAt = Number(session.expires_at ?? 0);
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("SESSION_EXPIRED");
+    }
     const args = object(payload.arguments);
     const target = object(payload.target);
     const sessionId = boundedText(payload.session_id, 200);

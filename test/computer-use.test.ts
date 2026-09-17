@@ -8,7 +8,7 @@ import { CuaDriverExecutor } from "../apps/worker/src/executors/cua.ts";
 import { EventHub } from "../apps/control-plane/src/events/event-hub.ts";
 import { TaskService } from "../apps/control-plane/src/tasks/task-service.ts";
 
-test("CUA executor invokes only the allowlisted driver tool and returns an observation artifact", async () => {
+test("CUA executor invokes the allowlisted driver and accepts a persistent session without expiry", async () => {
   const calls: string[][] = [];
   const executor = new CuaDriverExecutor({ enabled: true, socket: "/tmp/cua-test.sock", platform: "darwin", runner: async (args) => {
     calls.push(args);
@@ -22,7 +22,7 @@ test("CUA executor invokes only the allowlisted driver tool and returns an obser
   const discovered = await executor.discover();
   assert.equal(discovered.capabilities[0]?.status, "READY");
   const events: any[] = [];
-  for await (const event of executor.execute({ task_id: "t", attempt_id: "a", task_type: "computer.use", instruction: "observe", payload: { operation: "observe", session_id: "cs", sequence: 1, target: { kind: "desktop", display_id: "primary" }, session: { state: "ACTIVE", expires_at: Date.now() + 60_000, allowed_operations: ["observe"] } } }, { emit: async (event) => { events.push(event); } })) events.push(event);
+  for await (const event of executor.execute({ task_id: "t", attempt_id: "a", task_type: "computer.use", instruction: "observe", payload: { operation: "observe", session_id: "cs", sequence: 1, target: { kind: "desktop", display_id: "primary" }, session: { state: "ACTIVE", persistent: true, expires_at: null, allowed_operations: ["observe"] } } }, { emit: async (event) => { events.push(event); } })) events.push(event);
   assert.equal(calls.at(-1)?.[1], "get_desktop_state");
   assert.equal(calls.at(-1)?.includes("--socket"), true);
   assert.equal(events.some((event) => event.type === "artifact" && event.artifact.media_type === "image/png"), true);
@@ -128,30 +128,51 @@ test("Windows CUA discovery verifies the interactive desktop without macOS TCC p
   assert.equal(locked.capabilities[0]?.evidence_state, "ADVERTISED");
 });
 
-test("computer sessions require a granted verified capability, serialize the desktop, and bind actions to fresh observations", () => {
+test("computer sessions start directly after capability Grant, persist until revoked, and bind actions to fresh observations", () => {
   const now = Date.now(); const db = new ControlPlaneDatabase(":memory:"); const workers = new WorkerService(db);
   const registration = workers.register({ name: "CUA Worker", registrationSecret: "computer-use-secret-123", platform: "linux", hardware: {} }, now);
   const approved = workers.approveRegistration(registration.registrationId, "owner", now); const workerId = String(approved.workerId);
   workers.updateCapabilities(workerId, [{ capability: "computer.use", runtime: "cua-driver", status: "READY", evidence_state: "VERIFIED", verification_expires_at: now + 60_000, descriptor: { capability: "computer.use", runtime: "cua-driver", operations: ["observe", "click"] } }], now);
   const capabilityId = Number(db.one<{ id: number }>("SELECT id FROM worker_capabilities WHERE worker_id = ?", workerId)?.id); workers.grantCapability(workerId, capabilityId, "owner", now);
+  db.run("UPDATE workers SET status = 'ONLINE' WHERE id = ?", workerId);
   const computers = new ComputerSessionService(db);
-  const pending = computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe", "click"] }, "session-key", now);
-  assert.equal(pending.state, "PENDING_APPROVAL");
-  const active = computers.approve(String(pending.id), String(pending.scopeHash), "owner", now);
+  db.run("UPDATE workers SET drain = 1 WHERE id = ?", workerId);
+  assert.throws(() => computers.create({ principal: "owner", workerId }, "session-key", now), /COMPUTER_WORKER_UNAVAILABLE/);
+  db.run("UPDATE workers SET drain = 0 WHERE id = ?", workerId);
+  const active = computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe", "click"] }, "session-key", now);
   assert.equal(active.state, "ACTIVE");
-  const observeInput: any = { taskType: "computer.use", payload: { operation: "observe", session_id: pending.id, sequence: 1 } , execution: {}, requestedBy: "owner" };
-  const preparedObserve = computers.prepareTask(observeInput, "owner", now); const task = new TaskService(db, new EventHub(), { callbackEnabled: false }).create({ source: "hermes", title: "observe", taskType: "computer.use", instruction: "observe", context: {}, payload: preparedObserve.payload as any, execution: preparedObserve.execution as any, limits: { timeoutSeconds: 60, maxAttempts: 1 }, priority: "normal", inputArtifactIds: [] }, now); computers.recordOperation(String(pending.id), String(task.id), preparedObserve.payload as any, now);
-  db.run("INSERT INTO computer_observations(id, session_id, sequence, target_json, expires_at, created_at) VALUES ('obs-1', ?, 1, '{}', ?, ?)", pending.id, now + 86_400_000, now);
-  const preparedClick = computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: pending.id, sequence: 2, observation_id: "obs-1" }, execution: {}, requestedBy: "owner" } as any, "owner", now);
+  assert.equal(active.persistent, true);
+  assert.equal(active.expiresAt, null);
+  assert.equal(active.idleExpiresAt, null);
+  assert.equal(active.maxActions, null);
+  const reused = computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe", "click"] }, "session-key-reuse", now + 1);
+  assert.equal(reused.id, active.id);
+  assert.equal(reused.reused, true);
+  const observeInput: any = { taskType: "computer.use", payload: { operation: "observe", session_id: active.id, sequence: 1 } , execution: {}, requestedBy: "owner" };
+  const preparedObserve = computers.prepareTask(observeInput, "owner", now); const task = new TaskService(db, new EventHub(), { callbackEnabled: false }).create({ source: "hermes", title: "observe", taskType: "computer.use", instruction: "observe", context: {}, payload: preparedObserve.payload as any, execution: preparedObserve.execution as any, limits: { timeoutSeconds: 60, maxAttempts: 1 }, priority: "normal", inputArtifactIds: [] }, now); computers.recordOperation(String(active.id), String(task.id), preparedObserve.payload as any, now);
+  db.run("INSERT INTO computer_observations(id, session_id, sequence, target_json, expires_at, created_at) VALUES ('obs-1', ?, 1, '{}', ?, ?)", active.id, now + 86_400_000, now);
+  db.run("UPDATE computer_sessions SET action_count = 100 WHERE id = ?", active.id);
+  const preparedClick = computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: active.id, sequence: 2, observation_id: "obs-1" }, execution: {}, requestedBy: "owner" } as any, "owner", now);
   assert.equal((preparedClick.execution as any).workerId, workerId);
-  assert.throws(() => computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: pending.id, sequence: 2, observation_id: "obs-1", sensitive: true }, execution: {}, requestedBy: "owner" } as any, "owner", now), /APPROVAL_REQUIRED/);
-  assert.throws(() => computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: pending.id, sequence: 2, observation_id: "obs-1" }, execution: {} } as any, "owner", now + 11_000), /OBSERVATION_STALE/);
-  const second = computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe"] }, "session-key-2", now);
-  assert.throws(() => computers.approve(String(second.id), String(second.scopeHash), "owner", now), /DESKTOP_BUSY/);
+  assert.throws(() => computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: active.id, sequence: 2, observation_id: "obs-1", sensitive: true }, execution: {}, requestedBy: "owner" } as any, "owner", now), /APPROVAL_REQUIRED/);
+  assert.throws(() => computers.prepareTask({ taskType: "computer.use", payload: { operation: "click", session_id: active.id, sequence: 2, observation_id: "obs-1" }, execution: {} } as any, "owner", now + 11_000), /OBSERVATION_STALE/);
+  assert.throws(() => computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe"] }, "session-key-2", now), /DESKTOP_BUSY/);
+  assert.equal(computers.get(String(active.id), now + 365 * 86_400_000)?.state, "ACTIVE");
   const closing = computers.control(String(active.id), "close", Number(active.revision), "owner", now);
   assert.equal(closing.state, "CLOSING");
   const closed = computers.recordStopReceipt(String(active.id), workerId, "CONFIRMED", now);
   assert.equal(closed.state, "CLOSED"); assert.equal((closed.lock as any).state, "RELEASED");
-  assert.equal(computers.approve(String(second.id), String(second.scopeHash), "owner", now).state, "ACTIVE");
+  const second = computers.create({ principal: "owner", workerId, desktopId: "primary", desktopKind: "desktop", captureScope: "desktop", allowedOperations: ["observe"] }, "session-key-2", now);
+  assert.equal(second.state, "ACTIVE");
+  assert.equal(computers.listSessions("owner").length, 2);
+  const deleted = computers.deleteSession(String(second.id), Number(second.revision), "owner", now + 1);
+  assert.equal(deleted.state, "REVOKED");
+  assert.ok(deleted.deletedAt);
+  assert.equal((deleted.lock as any).state, "UNKNOWN");
+  assert.equal(computers.listSessions("owner").some((item) => item.id === second.id), true);
+  assert.throws(() => computers.prepareTask({ taskType: "computer.use", payload: { operation: "observe", session_id: second.id, sequence: 1 }, execution: {} } as any, "owner", now + 2), /SESSION_NOT_ACTIVE/);
+  computers.recordStopReceipt(String(second.id), workerId, "CONFIRMED", now + 3);
+  assert.equal(computers.listSessions("owner").some((item) => item.id === second.id), false);
+  assert.equal(computers.get(String(second.id), now + 4)?.state, "REVOKED");
   db.close();
 });

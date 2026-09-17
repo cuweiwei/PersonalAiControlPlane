@@ -1,6 +1,6 @@
 # Worker CUA Computer Use
 
-狀態：已實作本機垂直切片；實體 Worker、Hermes provider 與 NAS live 驗收仍須另行完成。
+狀態：session 直接建立與手動撤銷已實作；實體 Worker、Hermes provider 與 NAS live 驗收仍須另行完成。
 
 ## Worker 安裝與桌面需求
 
@@ -33,22 +33,26 @@ Worker 以固定 executable 與 argv 啟動一個長駐 `cua-driver mcp --socket
 
 正式 MCP 模式必須有明確 endpoint；安裝器會建立並啟動受控本機 daemon service。缺少 endpoint 時執行會回報 `DRIVER_ENDPOINT_REQUIRED`，不會自行啟動未受控 daemon。`list_windows` 的 driver PID/window ID 只在 Worker 內轉換成帶 session 綁定的 `window_ref`；Hermes 後續只能提交該 opaque reference。
 
-CUA capability 只有在 driver manifest 可讀、且本機 permission probe 回報 Accessibility 與 Screen Recording 均已授權時才是 `READY/VERIFIED`；否則保留 `DEGRADED/ADVERTISED` 或 `UNAVAILABLE`。必須先在 Control Web 對 `computer.use` capability 執行 Grant，才可建立 session。
+CUA capability 只有在 driver manifest 可讀、且本機 permission probe 回報 Accessibility 與 Screen Recording 均已授權時才是 `READY/VERIFIED`；否則保留 `DEGRADED/ADVERTISED` 或 `UNAVAILABLE`。必須先在 Control Web 對 `computer.use` capability 執行一次 Grant。Grant 後，Hermes 可直接建立或重用 session，不再逐次等待 CP 核准 scope。
 
 ## Control Plane API
 
 - `GET /api/v2/computers`：Worker、CUA capability、桌面與目前占用。
-- `POST /api/v2/computer-sessions`：建立 `PENDING_APPROVAL` session；需要 `Idempotency-Key`。
-- `POST /api/v2/computer-sessions/:id/approve`：以 `scope_hash` 核准並取得桌面鎖。
+- `GET /api/v2/computer-sessions`：列出目前 principal 的 session，供 Control Web 管理。
+- `POST /api/v2/computer-sessions`：以已 Grant 且已驗證的 `computer.use` capability 建立 `ACTIVE` session，並原子取得桌面鎖；需要 `Idempotency-Key`。同桌面已有同 principal、同 scope 的 active session 時會重用；scope 不同時回 `DESKTOP_BUSY`。
+- `POST /api/v2/computer-sessions/:id/approve`：保留給升級前留下的舊 `PENDING_APPROVAL` session；新 session 不再使用此步驟。
+- `DELETE /api/v2/computer-sessions/:id`：撤銷 session 並要求 Worker 停止；保留稽核與操作證據，未確認停止時繼續隔離桌面，並留在清單顯示停止未確認；停止確認後從活動清單隱藏。
 - `GET /api/v2/computer-sessions/:id`：session、lock、operation、observation 證據。
 - `POST /api/v2/computer-sessions/:id/control`：以 `expected_revision` 執行 `pause`、`resume`、`close` 或 `revoke`。
 - `GET /api/v2/computer-sessions/:id/observations/:observation_id` 與 `/download`：讀取仍在 TTL 內的 observation metadata/bytes；下載回應為 `no-store`。
 - `POST /api/v2/computer-sessions/:id/operations/:sequence/reconcile`：以操作後 observation 對帳一筆 `UNKNOWN` effect，解除後續寫入阻擋。
 - `POST /api/v2/tasks`：`task_type: "computer.use"`；每個 Task 只執行一個 primitive，payload 必須含 `session_id`、`session_revision`、`desktop_epoch`、`sequence`、`operation`。
 
+Computer session 不設時間或閒置到期；由使用者在 Control Web 刪除／撤銷，或因 Worker/OS 桌面身分變更與控制 lease 中斷而停止。單一桌面仍只准一個 session；Hermes 開啟相同 scope 時重用 session，改變 scope 前需先停止並由使用者刪除舊 session。`max_actions` 未指定時不設動作數上限；若明確指定正數則依該數量限制。
+
 輸入操作必須引用最近 10 秒內同一 session 的 observation。Hermes 對送出訊息、提交表單、刪除資料等外部變更標記 `sensitive=true` 並提供既有 approval reference；CP 與 Worker 都會拒絕缺少 reference 的請求。相同 idempotency key 會重播既有 Task；相同 sequence 的不同內容會拒絕。driver timeout、Worker crash 或停止未確認時，effect/lock 保持 `UNKNOWN`，不會自動重做輸入。
 
-畫面 artifact 只給授權 session 使用，暫存 24 小時；授權也固定 model provider/id 與 data policy。稽核保留操作 hash、狀態與證據 reference，不記錄明文輸入。Hermes 必須自行判斷操作後狀態，Task `SUCCEEDED` 不代表使用者目標已完成。
+畫面 artifact 只給授權 session 使用，仍暫存 24 小時；session 無期限不延長畫面與 AX 資料保存。授權固定 model provider/id 與 data policy。稽核保留操作 hash、狀態與證據 reference，不記錄明文輸入。Hermes 必須自行判斷操作後狀態，Task `SUCCEEDED` 不代表使用者目標已完成。
 
 ## 驗證
 
@@ -58,6 +62,6 @@ npm run build:web
 npm test
 ```
 
-Hermes `chloe_v2` MCP server 提供 `computer_list`、`computer_session_open`、`computer_observe`、`computer_act`、`computer_reconcile` 與 `computer_session_control`；`computer_observe` 會驗證 SHA-256 後回傳 MCP image content。尚未完成的 live gate 是目標 Worker 的實際 Cua Driver daemon、OS 權限、指定 Hermes vision model provider receipt，以及實體桌面／VM 的 end-to-end 操作證據。
+Hermes `chloe_v2` MCP server 提供 `computer_list`、`computer_session_open`、`computer_observe`、`computer_act`、`computer_reconcile` 與 `computer_session_control`；`computer_session_open` 可在 capability Grant 後直接建立或重用無期限 session，並回傳 `nextSequence`；`computer_observe` 會驗證 SHA-256 後回傳 MCP image content。尚未完成的 live gate 是目標 Worker 的實際 Cua Driver daemon、OS 權限、指定 Hermes vision model provider receipt，以及實體桌面／VM 的 end-to-end 操作證據。
 
 `test/computer-use.test.ts` 涵蓋 driver allowlist、截圖 artifact、capability grant、桌面獨占、observation 綁定與 stale rejection。
