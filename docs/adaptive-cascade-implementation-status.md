@@ -1,6 +1,6 @@
 # Adaptive Cascade Dispatch Engine：實作與驗收狀態
 
-日期：2026-09-21。此表依本機 source／tests 維護，不代表 NAS 已部署。設計基準：[HLD](adaptive-cascade-dispatch-engine-hld.md)、[Detailed Design](adaptive-cascade-dispatch-engine-detailed-design.md)。
+日期：2026-09-21。此表依 source／tests 與本次 NAS deployment evidence 維護。設計基準：[HLD](adaptive-cascade-dispatch-engine-hld.md)、[Detailed Design](adaptive-cascade-dispatch-engine-detailed-design.md)。
 
 ## 本輪補齊範圍
 
@@ -14,8 +14,8 @@
 
 | 領域 | 本機程式狀態 | 尚需證據 |
 | --- | --- | --- |
-| CP Tier 0 | typed health operation、prepare/commit、source key 與持久 receipt | NAS 真實服務、running digest 與權限边界驗收 |
-| Hermes boundary | journal、CP client、固定 renderer、reconciliation、CP effective toggle consumer | gateway hook 接線測試與正式頻道 delivery receipt |
+| CP Tier 0 | typed health operation、prepare/commit、source key 與持久 receipt | NAS `/healthz`、`/readyz`、running digest 與權限邊界已驗收 |
+| Hermes boundary | journal、CP client、固定 renderer、reconciliation、CP effective toggle consumer | NAS `/api/health` 與 running digest 已驗收；沒有發 Telegram |
 | CP/Hermes contract | 跨程序測試以真 CP HTTP server 與 Hermes Python client 執行 | fixture health result 不等於真實服務 health；沒有發 Telegram |
 | Semantic provider | 可選 HTTP provider 的私有 endpoint、固定 bundle/rule provenance、response schema、deadline 與 calibration binding 已實作並有 targeted tests；模型仍可替換 | 真實 inference bundle、校準 corpus/profile、precision、CPU/RSS |
 | Rule lifecycle | curated rule 的人工狀態與 release 切換可測 | curated 人工操作不是自動學習或統計品質證明 |
@@ -44,4 +44,15 @@ HERMES_SOURCE_ROOT=/absolute/path/to/AiSecretaryChloe \
 
 ## 後續正式啟用順序
 
-先完成本機 gateway hook與restart/reconcile測試，再走資料＋secret/config備份、immutable CI image、deployment gateway 與真實 Telegram/Web驗收。部署需獨立授權，本輪不執行。語意層與自動學習須各自通過品質 gate 才啟用；不能因 Tier 0 已通而一起打開。
+## 本次 NAS release evidence
+
+2026-09-21 已完成資料＋secret/config 備份、immutable CI、deployment gateway 與 running health 驗證。CP commit `b8604d85d83afda1a65c9e0b075c497e1b667669` 使用 image `ghcr.io/cuweiwei/personal-ai-control-plane@sha256:9a90b0c40d2ff1fb5fe71fc121d8dec17958cca22b96270641d7da294a7bcf82`；Hermes commit `fbdebfbc813404b2d5ea9e46df984c2c77b2e248` 使用 image `ghcr.io/cuweiwei/hermes-agent@sha256:035e3ac1772590de0889c251a4c217fb442aca7ce0183af0eae715a4fa4ff417`，release metadata 同步為 Hermes commit/digest。兩者 Compose 均經 `/usr/local/bin/deployment` validate/deploy，實際 container state 為 `running/healthy`。
+
+本次部署前 backup archive 已完成 SHA-256 與 tar listing 驗證：
+
+- CP：`/volume1/docker/PersonalAiControlPlane/backups/adaptive-dispatch-predeploy-20260921T122540Z/personal-ai-control-plane-data-config-20260921T122540Z.tar.gz`，manifest 同目錄 `SHA256SUMS`。
+- Hermes：`/volume1/docker/hermes/backups/adaptive-dispatch-predeploy-20260921T122540Z/hermes-data-secrets-config-20260921T122540Z.tar.gz`，manifest 同目錄 `SHA256SUMS`。
+
+Live CP Settings `/settings` 的 `dispatch_enabled=false`、`dispatch_semantic_enabled=false`，`GET /api/v2/dispatch/effective` 回報 `source=control_plane_settings`、`settings_version=1`；Hermes `/api/health` 回報同一 effective state 且 `environment_guard=true`。因此本次 release 最終維持關閉，無需手動編輯 Hermes env 或重啟來切換。沒有送出 Telegram 使用者訊息，正式頻道 delivery receipt 尚未驗收。
+
+語意層、真實 inference bundle／校準 corpus、precision、RSS 與自動學習仍須各自通過品質 gate 才能啟用；不能因 Tier 0 已通而一起打開。
