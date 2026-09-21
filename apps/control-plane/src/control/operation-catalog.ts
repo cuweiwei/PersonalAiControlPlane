@@ -26,8 +26,9 @@ const write = (operationId: string, group: string, action: string, effectClass: 
  * request and route through the owning service; the catalog never grants scope
  * or exposes an arbitrary HTTP/shell escape hatch.
  */
-export function operationCatalog(options: { artifacts: boolean; modelTests: boolean; modelPreferences: boolean; onboarding: boolean; agentWork?: boolean }): OperationDescriptor[] {
+export function operationCatalog(options: { artifacts: boolean; modelTests: boolean; modelPreferences: boolean; onboarding: boolean; agentWork?: boolean; dispatch?: boolean }): OperationDescriptor[] {
   return [
+    read("service.health_check", "service", "health_check", ["service_ref"], options.dispatch === true, options.dispatch === true ? undefined : "DISPATCH_UNAVAILABLE"),
     read("control.missions.list", "control.missions", "list"),
     read("control.missions.get", "control.missions", "get", ["mission_id"]),
     read("control.missions.events", "control.missions", "events", ["mission_id"], false, "MISSION_EVENTS_USE_PUBLIC_ROUTE"),

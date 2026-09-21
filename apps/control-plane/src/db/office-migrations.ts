@@ -371,4 +371,190 @@ CREATE TABLE IF NOT EXISTS teaching_sessions (
   capture_hash TEXT, error_code TEXT, created_at INTEGER NOT NULL
 );
 `,],
+  [14, "adaptive-cascade-dispatch-engine-v1", `
+CREATE TABLE IF NOT EXISTS dispatch_requests (
+  id TEXT PRIMARY KEY,
+  subject_ref TEXT NOT NULL,
+  ingress_key TEXT NOT NULL,
+  body_hash TEXT NOT NULL,
+  source_json TEXT NOT NULL,
+  decision_json TEXT NOT NULL,
+  release_id TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(subject_ref, ingress_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_requests_created ON dispatch_requests(created_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_proposals (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES dispatch_requests(id),
+  action_json TEXT NOT NULL,
+  action_hash TEXT NOT NULL,
+  operation_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('PREPARED', 'ACCEPTED', 'RELEASED', 'EXPIRED', 'REJECTED')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  expires_at INTEGER NOT NULL,
+  release_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(request_id, operation_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_proposals_status_expiry ON dispatch_proposals(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_operations (
+  id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES dispatch_proposals(id),
+  operation_key TEXT NOT NULL,
+  execution_owner TEXT NOT NULL CHECK(execution_owner IN ('CP_TASK', 'SERVICE_ADAPTER')),
+  task_id TEXT,
+  native_receipt_ref TEXT,
+  status TEXT NOT NULL CHECK(status IN ('ACCEPTED', 'EXECUTING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')),
+  certainty TEXT NOT NULL CHECK(certainty IN ('NOT_STARTED', 'KNOWN', 'UNKNOWN')),
+  result_json TEXT,
+  result_ref TEXT,
+  validation_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+  delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(proposal_id, operation_key),
+  UNIQUE(operation_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_operations_status_updated ON dispatch_operations(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_outbox (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL REFERENCES dispatch_operations(id),
+  event_kind TEXT NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL,
+  available_at INTEGER NOT NULL,
+  lease_until INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  ack_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_outbox_due ON dispatch_outbox(ack_at, available_at, lease_until);
+
+CREATE TABLE IF NOT EXISTS dispatch_rules (
+  id TEXT PRIMARY KEY,
+  current_revision INTEGER NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_rule_revisions (
+  rule_id TEXT NOT NULL REFERENCES dispatch_rules(id),
+  revision INTEGER NOT NULL,
+  body_json TEXT NOT NULL,
+  body_hash TEXT NOT NULL,
+  origin TEXT NOT NULL CHECK(origin IN ('curated', 'learned')),
+  evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(rule_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_rule_states (
+  rule_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('CANDIDATE', 'SHADOW', 'ACTIVE', 'DISABLED', 'ARCHIVED')),
+  state_revision INTEGER NOT NULL DEFAULT 1,
+  last_evaluated_at INTEGER,
+  PRIMARY KEY(rule_id, revision),
+  FOREIGN KEY(rule_id, revision) REFERENCES dispatch_rule_revisions(rule_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_rule_events (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  from_state TEXT,
+  to_state TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_ref TEXT,
+  policy_revision INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(rule_id, revision) REFERENCES dispatch_rule_revisions(rule_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_rule_events_rule_created ON dispatch_rule_events(rule_id, created_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_releases (
+  id TEXT PRIMARY KEY,
+  manifest_json TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL UNIQUE,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_active_release (
+  singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+  release_id TEXT NOT NULL REFERENCES dispatch_releases(id),
+  revision INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_emergency_denials (
+  rule_id TEXT NOT NULL,
+  revision INTEGER,
+  reason TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(rule_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_observations (
+  id TEXT PRIMARY KEY,
+  source_event_key TEXT NOT NULL UNIQUE,
+  request_id TEXT,
+  actual_action_json TEXT NOT NULL,
+  actual_action_hash TEXT NOT NULL,
+  action_signature TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  evidence_ref TEXT,
+  label_state TEXT NOT NULL DEFAULT 'UNLABELED',
+  occurred_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_observations_signature_time ON dispatch_observations(action_signature, occurred_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_shadow_results (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  candidate_rule_id TEXT NOT NULL,
+  candidate_revision INTEGER NOT NULL,
+  release_id TEXT NOT NULL,
+  predicted_action_hash TEXT NOT NULL,
+  observation_id TEXT,
+  comparison TEXT NOT NULL,
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE(request_id, candidate_rule_id, candidate_revision, release_id)
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_evaluations (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  dataset_ref TEXT,
+  dataset_hash TEXT,
+  split_manifest_json TEXT,
+  bundle_id TEXT,
+  report_ref TEXT,
+  state TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_evaluations_state ON dispatch_evaluations(state, created_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_labels (
+  id TEXT PRIMARY KEY,
+  observation_id TEXT NOT NULL REFERENCES dispatch_observations(id),
+  label TEXT NOT NULL,
+  source TEXT NOT NULL,
+  reviewer TEXT,
+  supersedes_id TEXT,
+  evidence_ref TEXT,
+  created_at INTEGER NOT NULL
+);
+`,],
+  [15, "adaptive-cascade-dispatch-commit-binding-v1", `
+ALTER TABLE dispatch_operations ADD COLUMN ownership_ref TEXT;
+ALTER TABLE dispatch_operations ADD COLUMN session_revision INTEGER;
+`,],
 ];

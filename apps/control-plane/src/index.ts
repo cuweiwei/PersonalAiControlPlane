@@ -21,6 +21,9 @@ import { MissionCommandDispatcher } from "./missions/command-dispatcher.ts";
 import { MissionCoordinator } from "./missions/coordinator.ts";
 import { AgentWorkService } from "./agent-work/agent-work-service.ts";
 import { ComputerSessionService } from "./computers/computer-session-service.ts";
+import { DispatchService } from "./dispatch/dispatch-service.ts";
+import { SystemHealthCheckAdapter } from "./dispatch/dispatch-policy.ts";
+import { createPrivateHttpSemanticRouterProvider } from "./dispatch/providers/private-http-provider.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(process.env[name] ?? fallback); if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be a bounded integer`); return value; }
 function close(server: Server): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -51,12 +54,22 @@ const missionCommands = new MissionCommandDispatcher(db);
 const missionCoordinator = new MissionCoordinator(db, events, tasks, missions, plans, missionCommands, coordinator);
 const health = new HealthMonitor(db, events);
 health.seed();
+const semanticProvider = createPrivateHttpSemanticRouterProvider();
+const dispatch = new DispatchService(db, {
+  enabled: () => Boolean(settings.get().dispatch_enabled),
+  semanticEnabled: () => Boolean(settings.get().dispatch_semantic_enabled),
+  routingBudgetMs: () => Number(settings.get().dispatch_routing_budget_ms),
+  proposalTtlMs: Number(settings.get().dispatch_proposal_ttl_ms),
+  provider: semanticProvider,
+  adapters: [new SystemHealthCheckAdapter(db)],
+});
+dispatch.recoverPending();
 
 let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, computers, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, computers, dispatch, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }
@@ -75,6 +88,6 @@ const computerLeaseTimer = setInterval(() => { try { computers.renewLeases(); } 
 server.listen(port, bindAddress, () => console.log(JSON.stringify({ event: "control-plane.started", version: "2.0.0", port, bindAddress, dataDir, artifactRoot })));
 
 let stopping = false;
-async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); clearInterval(computerArtifactTimer); clearInterval(computerLeaseTimer); missionCoordinator.close(); coordinator.close(); await close(server); db.close(); }
+async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); clearInterval(computerArtifactTimer); clearInterval(computerLeaseTimer); missionCoordinator.close(); coordinator.close(); await semanticProvider?.close(); await close(server); db.close(); }
 function signal(): void { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); }
 process.once("SIGINT", signal); process.once("SIGTERM", signal);
