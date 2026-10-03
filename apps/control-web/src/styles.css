@@ -117,6 +117,28 @@ p { color: var(--muted); font-size: .78rem; }
 .attention-panel { padding: 1.4rem 1.3rem; }
 .attention-panel h2 { margin-bottom: .35rem; }
 .attention-row { align-items: start; gap: .55rem; padding: .8rem 0; }
+.attention-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: .7rem; margin: 0 0 .8rem; }
+.attention-toolbar label { display: grid; gap: .3rem; color: #657568; font-size: .7rem; }
+.attention-toolbar select, .attention-toolbar input[type="search"] { min-height: 36px; padding: .45rem .65rem; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 5px; }
+.attention-search { flex: 1 1 250px; }
+.attention-search input { width: 100%; }
+.attention-checkbox { display: flex !important; min-height: 36px; align-items: center; gap: .45rem !important; padding: 0 .35rem; }
+.attention-checkbox input { accent-color: var(--green); }
+.attention-count { margin: .6rem 0; }
+.attention-list { display: grid; gap: .8rem; margin: 1rem 0 1.5rem; }
+.attention-item { display: grid; gap: .65rem; }
+.attention-item h2 { margin: 0; font-size: 1rem; }
+.attention-item-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.attention-item-heading code { display: inline-block; margin-top: .25rem; color: #7e897c; font-size: .65rem; }
+.attention-subject { margin: 0; overflow-wrap: anywhere; }
+.attention-item-meta { display: flex; flex-wrap: wrap; gap: .5rem 1rem; color: var(--muted); font-size: .68rem; }
+.attention-severity { display: inline-flex; align-items: center; min-height: 25px; padding: .2rem .5rem; border: 1px solid var(--line); border-radius: 4px; color: #657568; background: #eef0e8; font-size: .68rem; white-space: nowrap; }
+.severity-critical { color: #884a3d; background: #f1e1d5; border-color: #e2c9b7; }
+.severity-high { color: #896a3c; background: var(--amber-soft); border-color: #e4d0a9; }
+.attention-detail-grid { align-items: start; }
+.attention-evidence { min-height: 6rem; }
+.attention-actions-card { margin: 1rem 0; }
+.attention-unknown-source { margin: .5rem 0 0; }
 .full-action { width: 100%; margin-top: 1rem; }
 .result-heading { margin-top: 1.4rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .result-row { display: block; padding: .65rem 0; }

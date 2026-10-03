@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AttentionPage } from "./attention/attention-page.ts";
 import { OfficePage } from "./office/office-page.ts";
 
 type Item = Record<string, any>;
@@ -327,10 +328,10 @@ function Settings({ refreshVersion }: { refreshVersion: number }) {
   return h(React.Fragment, null, h(PageHeader, { eyebrow: "CONTROL ROOM SETTINGS", title: "設定", description: "只送出有變更的欄位；環境變數鎖定的欄位不能在此修改。" }), dirty ? h("p", { className: "notice", role: "status" }, "目前有未保存草稿；背景同步已暫停。") : null, h("form", { className: "editor", onSubmit: save }, fields.map((field) => { const value = draft[field.key]; const locked = field.editable === false; return h("label", { key: field.key }, `${field.label}${field.unit ? `（${field.unit}）` : ""}`, h("small", null, `${field.description} · 來源：${field.source} · 套用：${field.applyScope}`), h("input", { type: field.type === "boolean" ? "checkbox" : field.type === "integer" ? "number" : "text", disabled: locked, checked: field.type === "boolean" ? Boolean(value) : undefined, value: field.type !== "boolean" ? value ?? "" : undefined, min: field.min ?? undefined, max: field.max ?? undefined, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { setDirty(true); setDraft({ ...draft, [field.key]: field.type === "boolean" ? event.target.checked : field.type === "integer" ? Number(event.target.value) : event.target.value }); } })); }), h("button", { type: "submit" }, "保存設定"), message ? h("p", { className: "notice", role: "status" }, message) : null));
 }
 
-function AgentWorkPage({ kind, refreshVersion }: { kind: "skills" | "goals" | "routines" | "attention" | "browser-sessions"; refreshVersion: number }) {
-  const labels: Record<string, string> = { skills: "工作技能", goals: "長期目標", routines: "例行工作", attention: "待處理事項", "browser-sessions": "工作電腦" };
+function AgentWorkPage({ kind, refreshVersion }: { kind: "skills" | "goals" | "routines" | "browser-sessions"; refreshVersion: number }) {
+  const labels: Record<string, string> = { skills: "工作技能", goals: "長期目標", routines: "例行工作", "browser-sessions": "工作電腦" };
   const [data, setData] = useState<Item | null>(null); const [error, setError] = useState<unknown>(null);
-  useEffect(() => { const listPath = kind === "browser-sessions" ? "/api/v2/browser-sessions" : `/api/v2/${kind}`; Promise.all([request(listPath), request("/api/v2/agent-work/capabilities")]).then(([items, capabilities]) => setData({ items: items.items ?? [], capabilities })).catch(setError); }, [kind, refreshVersion]);
+  useEffect(() => { const listPath = kind === "browser-sessions" ? "/api/v2/browser-sessions" : kind === "routines" ? "/api/v2/routine-bindings" : `/api/v2/${kind}`; Promise.all([request(listPath), request("/api/v2/agent-work/capabilities")]).then(([items, capabilities]) => setData({ items: items.items ?? [], capabilities })).catch(setError); }, [kind, refreshVersion]);
   if (!data) return error ? h(ErrorPanel, { error }) : h(Loading);
   const capability = data.capabilities?.[kind === "browser-sessions" ? "browser" : kind] ?? null; const items = data.items as Item[];
   return h(React.Fragment, null,
@@ -416,7 +417,8 @@ export function App({ initialPath = currentPath() }: { initialPath?: string }) {
     if (parts[0] === "missions" && parts[1] === "new") return h(MissionIntake);
     if (parts[0] === "missions" && parts[1]) return h(MissionDetail, { id: parts[1], refreshVersion });
     if (parts[0] === "missions") return h(MissionList, { refreshVersion });
-    if (["skills", "goals", "routines", "attention", "browser-sessions"].includes(parts[0] ?? "")) return h(AgentWorkPage, { kind: (parts[0] ?? "skills") as "skills" | "goals" | "routines" | "attention" | "browser-sessions", refreshVersion });
+    if (parts[0] === "attention") return h(AttentionPage, { attentionId: parts[1], refreshVersion, key: parts[1] ?? "attention-list" });
+    if (["skills", "goals", "routines", "browser-sessions"].includes(parts[0] ?? "")) return h(AgentWorkPage, { kind: (parts[0] ?? "skills") as "skills" | "goals" | "routines" | "browser-sessions", refreshVersion });
     if (parts[0] === "computers") return h(Computers, { refreshVersion });
     if (parts[0] === "workers" && parts[1] === "new") return h(WorkerOnboarding);
     if (parts[0] === "workers" && parts[1]) return h(WorkerDetail, { id: parts[1], refreshVersion });

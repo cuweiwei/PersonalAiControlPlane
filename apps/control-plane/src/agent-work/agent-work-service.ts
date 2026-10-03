@@ -224,9 +224,117 @@ export class AgentWorkService {
 
   chargeBudget(reservationId: string, chargeKey: string, amount: number, evidence: JsonObject, now = Date.now()): Record<string, unknown> { if (!Number.isInteger(amount) || amount < 0) throw new Error("INVALID_FIELD:amount"); let result!: Record<string, unknown>; this.db.transaction(() => { const reservation = this.db.one<Row>("SELECT * FROM goal_budget_reservations WHERE id = ?", reservationId); if (!reservation) throw new Error("BUDGET_RESERVATION_NOT_FOUND"); const existing = this.db.one<Row>("SELECT * FROM goal_budget_entries WHERE reservation_id = ? AND charge_key = ?", reservationId, chargeKey); if (existing) { result = { reservation_id: reservationId, charge_key: chargeKey, amount: Number(existing.amount), replayed: true }; return; } if (Number(reservation.remaining) < amount) throw new Error("BUDGET_EXHAUSTED"); this.db.run("INSERT INTO goal_budget_entries(id, reservation_id, charge_key, amount, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", uuidv7(now), reservationId, chargeKey, amount, JSON.stringify(evidence), now); const remaining = Number(reservation.remaining) - amount; this.db.run("UPDATE goal_budget_reservations SET remaining = ?, state = ?, updated_at = ? WHERE id = ?", remaining, remaining === 0 ? "CHARGED" : "RESERVED", now, reservationId); this.db.run("UPDATE goal_budget_accounts SET reserved = reserved - ?, consumed = consumed + ? WHERE goal_id = ? AND period_key = ? AND dimension = ?", amount, amount, reservation.goal_id, reservation.period_key, reservation.dimension); result = { reservation_id: reservationId, charge_key: chargeKey, amount, remaining, replayed: false }; }); return result; }
 
-  listAttention(filters: { state?: string; severity?: string; limit?: number } = {}): Record<string, unknown>[] { const conditions: string[] = ["1=1"]; const params: unknown[] = []; if (filters.state) { conditions.push("state = ?"); params.push(filters.state); } if (filters.severity) { conditions.push("severity = ?"); params.push(filters.severity); } const limit = Math.min(100, Math.max(1, filters.limit ?? 50)); return this.db.all<Row>(`SELECT * FROM attention_items WHERE ${conditions.join(" AND ")} ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END, updated_at DESC LIMIT ?`, ...params, limit).map((row) => this.attentionProjection(row)); }
-  upsertAttention(input: JsonObject, now = Date.now()): Record<string, unknown> { const subjectKind = text(input.subject_kind, "subject_kind"); const subjectId = text(input.subject_id, "subject_id"); const reasonCode = text(input.reason_code, "reason_code"); const fingerprint = text(input.fingerprint, "fingerprint", 200); const severity = String(input.severity ?? "NORMAL"); if (!["LOW", "NORMAL", "HIGH", "CRITICAL"].includes(severity)) throw new Error("INVALID_FIELD:severity"); const evidence = object(input.evidence ?? {}, "evidence"); let row!: Row; this.db.transaction(() => { const existing = this.db.one<Row>("SELECT * FROM attention_items WHERE subject_kind = ? AND subject_id = ? AND reason_code = ? AND state IN ('OPEN', 'SNOOZED') ORDER BY episode DESC LIMIT 1", subjectKind, subjectId, reasonCode); if (existing && existing.fingerprint === fingerprint) { row = existing; return; } const episode = Number(existing?.episode ?? 0) + 1; const id = uuidv7(now); if (existing) this.db.run("UPDATE attention_items SET state = 'SUPERSEDED', revision = revision + 1, updated_at = ? WHERE id = ?", now, existing.id); this.db.run("INSERT INTO attention_items(id, subject_kind, subject_id, reason_code, episode, severity, state, fingerprint, evidence_json, action_ref_json, deadline_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)", id, subjectKind, subjectId, reasonCode, episode, severity, fingerprint, JSON.stringify(evidence), input.action_ref ? JSON.stringify(input.action_ref) : null, input.deadline_at === undefined ? null : boundedInt(input.deadline_at, "deadline_at", 0, Number.MAX_SAFE_INTEGER), now, now); row = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id)!; this.appendEvent("ATTENTION", id, 1, "attention.opened", { id, subject_kind: subjectKind, subject_id: subjectId, reason_code: reasonCode }, now); }); this.events.publish({ type: "agent-work.attention.updated", attentionId: row.id }); return this.attentionProjection(row); }
-  attentionCommand(id: string, input: JsonObject, actorId: string, idempotencyKey: string, now = Date.now()): Record<string, unknown> { const kind = text(input.kind, "kind", 30); const row = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id); if (!row) throw new Error("ATTENTION_NOT_FOUND"); const expectedRevision = boundedInt(input.expected_revision, "expected_revision", -1, Number.MAX_SAFE_INTEGER); if (expectedRevision < 1) throw new Error("REVISION_REQUIRED"); const request = { id, kind, expectedRevision, payload: input.payload ?? null }; const requestHash = safeHash(request); const operation = this.startOperation("control.attention.command", "ATTENTION", id, actorId, idempotencyKey, requestHash, request, now); if (operation.replayed) return operation.result; try { this.db.transaction(() => { const current = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id)!; if (Number(current.revision) !== expectedRevision) throw new Error("REVISION_CONFLICT"); if (!["READ", "SNOOZE", "DISMISS_SUGGESTION"].includes(kind)) throw new Error("INVALID_FIELD:kind"); if (kind === "READ") this.db.run("UPDATE attention_items SET read_through_revision = MAX(read_through_revision, revision), updated_at = ? WHERE id = ?", now, id); else if (kind === "SNOOZE") this.db.run("UPDATE attention_items SET state = 'SNOOZED', snooze_until = ?, revision = revision + 1, updated_at = ? WHERE id = ?", boundedInt(object(input.payload, "payload").snooze_until, "payload.snooze_until", 0, Number.MAX_SAFE_INTEGER), now, id); else this.db.run("UPDATE attention_items SET state = 'SUPERSEDED', revision = revision + 1, updated_at = ? WHERE id = ?", now, id); this.recordOperationApplied(operation.id, { attention_id: id, kind, revision: kind === "READ" ? expectedRevision : expectedRevision + 1 }, now); this.appendEvent("ATTENTION", id, expectedRevision + (kind === "READ" ? 0 : 1), `attention.${kind.toLowerCase()}`, { id, kind }, now); }); } catch (error) { this.recordOperationError(operation.id, error, now); throw error; } return this.operationResult(operation.id); }
+  listAttention(filters: { state?: string; severity?: string; limit?: number } = {}, observedAt = Date.now()): Record<string, unknown>[] {
+    const states = ["OPEN", "SNOOZED", "RESOLVED", "SUPERSEDED"];
+    const severities = ["LOW", "NORMAL", "HIGH", "CRITICAL"];
+    if (filters.state !== undefined && !states.includes(filters.state)) throw new Error("INVALID_FIELD:state");
+    if (filters.severity !== undefined && !severities.includes(filters.severity)) throw new Error("INVALID_FIELD:severity");
+    if (filters.limit !== undefined && (!Number.isInteger(filters.limit) || filters.limit < 1 || filters.limit > 100)) throw new Error("INVALID_FIELD:limit");
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const effectiveState = "CASE WHEN state = 'SNOOZED' AND (snooze_until IS NULL OR snooze_until <= ?) THEN 'OPEN' ELSE state END";
+    if (filters.state !== undefined) {
+      conditions.push(`${effectiveState} = ?`);
+      params.push(observedAt, filters.state);
+    }
+    if (filters.severity !== undefined) {
+      conditions.push("severity = ?");
+      params.push(filters.severity);
+    }
+    const limit = filters.limit ?? 50;
+    return this.db.all<Row>(
+      `SELECT * FROM attention_items${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""} ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END, updated_at DESC, id DESC LIMIT ?`,
+      ...params,
+      limit,
+    ).map((row) => this.attentionProjection(row, observedAt));
+  }
+
+  getAttention(id: string, observedAt = Date.now()): Record<string, unknown> | undefined {
+    const row = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id);
+    return row ? this.attentionProjection(row, observedAt) : undefined;
+  }
+
+  upsertAttention(input: JsonObject, now = Date.now()): Record<string, unknown> {
+    const subjectKind = text(input.subject_kind, "subject_kind");
+    const subjectId = text(input.subject_id, "subject_id");
+    const reasonCode = text(input.reason_code, "reason_code");
+    const fingerprint = text(input.fingerprint, "fingerprint", 200);
+    const severity = String(input.severity ?? "NORMAL");
+    if (!["LOW", "NORMAL", "HIGH", "CRITICAL"].includes(severity)) throw new Error("INVALID_FIELD:severity");
+    const evidence = object(input.evidence ?? {}, "evidence");
+    let row!: Row;
+    let changed = false;
+    this.db.transaction(() => {
+      const existing = this.db.one<Row>("SELECT * FROM attention_items WHERE subject_kind = ? AND subject_id = ? AND reason_code = ? AND state IN ('OPEN', 'SNOOZED') ORDER BY episode DESC LIMIT 1", subjectKind, subjectId, reasonCode);
+      if (existing && existing.fingerprint === fingerprint) {
+        row = existing;
+        return;
+      }
+      const maxEpisode = this.db.one<Row>("SELECT COALESCE(MAX(episode), 0) AS episode FROM attention_items WHERE subject_kind = ? AND subject_id = ? AND reason_code = ?", subjectKind, subjectId, reasonCode);
+      const episode = Number(maxEpisode?.episode ?? 0) + 1;
+      const id = uuidv7(now);
+      if (existing) this.db.run("UPDATE attention_items SET state = 'SUPERSEDED', revision = revision + 1, updated_at = ? WHERE id = ?", now, existing.id);
+      this.db.run("INSERT INTO attention_items(id, subject_kind, subject_id, reason_code, episode, severity, state, fingerprint, evidence_json, action_ref_json, deadline_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)", id, subjectKind, subjectId, reasonCode, episode, severity, fingerprint, JSON.stringify(evidence), input.action_ref ? JSON.stringify(input.action_ref) : null, input.deadline_at === undefined ? null : boundedInt(input.deadline_at, "deadline_at", 0, Number.MAX_SAFE_INTEGER), now, now);
+      row = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id)!;
+      this.appendEvent("ATTENTION", id, 1, "attention.opened", { id, subject_kind: subjectKind, subject_id: subjectId, reason_code: reasonCode }, now);
+      changed = true;
+    });
+    if (changed) this.events.publish({ type: "agent-work.attention.updated", attentionId: row.id });
+    return this.attentionProjection(row, now);
+  }
+
+  attentionCommand(id: string, input: JsonObject, actorId: string, idempotencyKey: string, now = Date.now()): Record<string, unknown> {
+    this.requireFeature("agent_work_attention_enabled");
+    rejectUnknown(input, ["kind", "expected_revision", "payload"], "request");
+    const kind = text(input.kind, "kind", 30);
+    if (!["READ", "SNOOZE", "UNSNOOZE", "DISMISS_SUGGESTION"].includes(kind)) throw new Error("INVALID_FIELD:kind");
+    const expectedRevision = boundedInt(input.expected_revision, "expected_revision", -1, Number.MAX_SAFE_INTEGER);
+    if (expectedRevision < 1) throw new Error("REVISION_REQUIRED");
+    let snoozeUntil: number | undefined;
+    if (kind === "SNOOZE") {
+      const payload = object(input.payload, "payload");
+      rejectUnknown(payload, ["snooze_until"], "payload");
+      snoozeUntil = boundedInt(payload.snooze_until, "payload.snooze_until", -1, Number.MAX_SAFE_INTEGER);
+      if (snoozeUntil < 0) throw new Error("INVALID_FIELD:payload.snooze_until");
+    } else if (input.payload !== undefined && input.payload !== null) {
+      throw new Error("INVALID_FIELD:payload");
+    }
+    const row = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id);
+    if (!row) throw new Error("ATTENTION_NOT_FOUND");
+    const request = { id, kind, expectedRevision, payload: kind === "SNOOZE" ? { snooze_until: snoozeUntil } : null };
+    const requestHash = safeHash(request);
+    const operation = this.startOperation("control.attention.command", "ATTENTION", id, actorId, idempotencyKey, requestHash, request, now);
+    if (operation.replayed) return operation.result;
+    try {
+      this.db.transaction(() => {
+        const current = this.db.one<Row>("SELECT * FROM attention_items WHERE id = ?", id);
+        if (!current) throw new Error("ATTENTION_NOT_FOUND");
+        if (Number(current.revision) !== expectedRevision) throw new Error("REVISION_CONFLICT");
+        if (kind === "READ") {
+          this.db.run("UPDATE attention_items SET read_through_revision = MAX(read_through_revision, change_revision), updated_at = ? WHERE id = ?", now, id);
+        } else if (kind === "SNOOZE") {
+          if (snoozeUntil! <= now || snoozeUntil! > now + 30 * 24 * 60 * 60 * 1000) throw new Error("INVALID_FIELD:payload.snooze_until");
+          if (!["OPEN", "SNOOZED"].includes(String(current.state))) throw new Error("INVALID_ATTENTION_STATE");
+          this.db.run("UPDATE attention_items SET state = 'SNOOZED', snooze_until = ?, revision = revision + 1, updated_at = ? WHERE id = ?", snoozeUntil, now, id);
+        } else if (kind === "UNSNOOZE") {
+          if (current.state !== "SNOOZED") throw new Error("INVALID_ATTENTION_STATE");
+          this.db.run("UPDATE attention_items SET state = 'OPEN', snooze_until = NULL, revision = revision + 1, updated_at = ? WHERE id = ?", now, id);
+        } else {
+          // Preserve the existing command contract; the Attention page does not expose this operation.
+          this.db.run("UPDATE attention_items SET state = 'SUPERSEDED', revision = revision + 1, updated_at = ? WHERE id = ?", now, id);
+        }
+        const revision = kind === "READ" ? expectedRevision : expectedRevision + 1;
+        this.recordOperationApplied(operation.id, { attention_id: id, kind, revision }, now);
+        this.appendEvent("ATTENTION", id, revision, `attention.${kind.toLowerCase()}`, { id, kind }, now);
+      });
+    } catch (error) {
+      this.recordOperationError(operation.id, error, now);
+      throw error;
+    }
+    this.events.publish({ type: "agent-work.attention.updated", attentionId: id });
+    return this.operationResult(operation.id);
+  }
   memoryRequest(missionId: string, input: JsonObject, actorId: string, idempotencyKey: string, now = Date.now()): Record<string, unknown> { if (!this.db.one("SELECT id FROM missions WHERE id = ? AND archived_at IS NULL", missionId)) throw new Error("MISSION_NOT_FOUND"); if ((this.capabilities().memory as Row).available !== true) throw new Error("CONTEXT_UNAVAILABLE"); throw new Error("CONTEXT_UNAVAILABLE"); }
 
   artifactView(id: string): Record<string, unknown> { const row = this.db.one<Row>("SELECT * FROM artifacts WHERE id = ?", id); if (!row) throw new Error("ARTIFACT_NOT_FOUND"); const refs = this.db.all<Row>("SELECT owner_kind, owner_id, owner_version, purpose, metadata_json, pin_state, retain_until FROM agent_artifact_refs WHERE artifact_id = ? ORDER BY created_at", id).map((ref) => ({ ownerKind: ref.owner_kind, ownerId: ref.owner_id, ownerVersion: Number(ref.owner_version), purpose: ref.purpose, metadata: parseJson(ref.metadata_json), pinState: ref.pin_state, retainUntil: iso(ref.retain_until) })); const available = String(row.storage_state ?? "AVAILABLE") === "AVAILABLE" && this.artifacts.exists(String(row.storage_path)) && (() => { try { return ArtifactStorage.digest(this.artifacts.read(String(row.storage_path))) === String(row.sha256); } catch { return false; } })(); return { id: row.id, title: row.display_filename ?? row.filename, filename: row.display_filename ?? row.filename, mediaType: row.media_type, sizeBytes: Number(row.size_bytes), sha256: row.sha256, createdAt: iso(row.created_at), availability: available ? "AVAILABLE" : String(row.storage_state ?? "MISSING"), previewKind: row.preview_kind ?? null, downloadUrl: available ? `/api/v2/artifacts/${encodeURIComponent(id)}/download` : null, refs }; }
@@ -262,6 +370,32 @@ export class AgentWorkService {
   private routineProjection(row: Row, detail = false): Record<string, unknown> { const result: Row = { id: row.id, officeId: row.office_id, nativeKey: row.native_key, routineId: row.routine_id ?? null, desiredRevision: Number(row.desired_revision), effectiveRevision: row.effective_revision === null ? null : Number(row.effective_revision), nativeRevision: row.native_revision === null ? null : Number(row.native_revision), remoteState: row.remote_state, syncState: row.sync_state, admissionBlocked: Boolean(row.admission_blocked), nextFireAt: iso(row.next_fire_at), observedAt: iso(row.observed_at), updatedAt: iso(row.updated_at) }; if (detail) { result.revisions = this.db.all<Row>("SELECT * FROM routine_binding_revisions WHERE binding_id = ? ORDER BY revision DESC", row.id).map((item) => ({ revision: Number(item.revision), skillId: item.skill_id, skillVersion: Number(item.skill_version), intent: parseJson(item.intent_json), operationId: item.operation_id, requestHash: item.request_hash, createdAt: iso(item.created_at) })); result.occurrences = this.db.all<Row>("SELECT * FROM routine_occurrences WHERE binding_id = ? ORDER BY received_at DESC LIMIT 100", row.id).map((item) => this.occurrenceProjection(item)); } return result; }
   private occurrenceProjection(row: Row): Record<string, unknown> { return { sourceKey: row.source_key, bindingId: row.binding_id, bindingRevision: Number(row.binding_revision), nativeRevision: Number(row.native_revision), state: row.state, reasonCode: row.reason_code ?? null, missionId: row.mission_id ?? null, scheduledFor: iso(row.scheduled_for), payload: parseJson(row.payload_json), receivedAt: iso(row.received_at), updatedAt: iso(row.updated_at) }; }
   private goalProjection(row: Row, detail = false): Record<string, unknown> { const result: Row = { id: row.id, officeId: row.office_id, title: row.title, objective: parseJson(row.objective_json), scope: parseJson(row.scope_json), limits: parseJson(row.limits_json), state: row.state, health: row.health, revision: Number(row.revision), projectionRevision: Number(row.projection_revision), deadlineAt: iso(row.deadline_at), nextReviewAt: iso(row.next_review_at), reviewState: row.review_state, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; if (detail) { result.milestones = this.db.all<Row>("SELECT * FROM goal_milestones WHERE goal_id = ? ORDER BY ordinal", row.id).map((item) => ({ id: item.id, ordinal: Number(item.ordinal), title: item.title, required: Boolean(item.required), criteria: parseJson(item.criteria_json), state: item.state, acceptance: parseJson(item.acceptance_json, null), revision: Number(item.revision) })); result.missions = this.db.all<Row>("SELECT mission_id, milestone_id, goal_revision, proposal_key, work_fingerprint, blocked_by_goal_control FROM goal_mission_links WHERE goal_id = ?", row.id).map((item) => ({ missionId: item.mission_id, milestoneId: item.milestone_id, goalRevision: Number(item.goal_revision), proposalKey: item.proposal_key, workFingerprint: item.work_fingerprint, blocked: Boolean(item.blocked_by_goal_control) })); } return result; }
-  private attentionProjection(row: Row): Record<string, unknown> { return { id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, reasonCode: row.reason_code, episode: Number(row.episode), severity: row.severity, state: row.state, revision: Number(row.revision), changeRevision: Number(row.change_revision), fingerprint: row.fingerprint, evidence: parseJson(row.evidence_json), actionRef: parseJson(row.action_ref_json, null), deadlineAt: iso(row.deadline_at), snoozeUntil: iso(row.snooze_until), readThroughRevision: Number(row.read_through_revision), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; }
+  private attentionProjection(row: Row, observedAt = Date.now()): Record<string, unknown> {
+    const state = String(row.state);
+    const snoozeExpired = state === "SNOOZED" && (row.snooze_until === null || row.snooze_until === undefined || Number(row.snooze_until) <= observedAt);
+    const changeRevision = Number(row.change_revision);
+    const readThroughRevision = Number(row.read_through_revision);
+    return {
+      id: row.id,
+      subjectKind: row.subject_kind,
+      subjectId: row.subject_id,
+      reasonCode: row.reason_code,
+      episode: Number(row.episode),
+      severity: row.severity,
+      state,
+      effectiveState: snoozeExpired ? "OPEN" : state,
+      revision: Number(row.revision),
+      changeRevision,
+      fingerprint: row.fingerprint,
+      evidence: parseJson(row.evidence_json),
+      actionRef: parseJson(row.action_ref_json, null),
+      deadlineAt: iso(row.deadline_at),
+      snoozeUntil: iso(row.snooze_until),
+      readThroughRevision,
+      isUnread: readThroughRevision < changeRevision,
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+    };
+  }
   private browserProjection(row: Row): Record<string, unknown> { return { id: row.id, workerId: row.worker_id, brokerId: row.broker_id, profileRef: row.profile_ref, state: row.state, generation: Number(row.generation), revision: Number(row.revision), controller: row.controller, missionRunId: row.mission_run_id ?? null, leaseUntil: iso(row.lease_until), policyHash: row.policy_hash, brokerSnapshotSeq: Number(row.broker_snapshot_seq), observedAt: iso(row.observed_at), updatedAt: iso(row.updated_at) }; }
 }
