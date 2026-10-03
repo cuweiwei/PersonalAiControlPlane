@@ -2,7 +2,7 @@ name: personal-ai-control-plane
 
 services:
   pai-control-plane:
-    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:9a90b0c40d2ff1fb5fe71fc121d8dec17958cca22b96270641d7da294a7bcf82
+    image: ghcr.io/cuweiwei/personal-ai-control-plane@sha256:8e85a266c743e3a130a2aace0363493a620010c52931b65fdb52b327efed913b
     restart: unless-stopped
     user: "106808:106808"
     command: ["node", "--experimental-strip-types", "apps/control-plane/src/index.ts"]
