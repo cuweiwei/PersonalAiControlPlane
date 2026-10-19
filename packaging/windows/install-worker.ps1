@@ -147,6 +147,8 @@ $omlxEnabled = if ($env:PAI_OMLX_ENABLED) { $env:PAI_OMLX_ENABLED } else { "true
 $omlxApiKeyFile = if ($env:PAI_OMLX_API_KEY_FILE) { $env:PAI_OMLX_API_KEY_FILE } else { Join-Path $env:USERPROFILE ".omlx\settings.json" }
 $lmstudioEnabled = if ($env:PAI_LMSTUDIO_ENABLED) { $env:PAI_LMSTUDIO_ENABLED } else { "true" }
 $ollamaEnabled = if ($env:PAI_OLLAMA_ENABLED) { $env:PAI_OLLAMA_ENABLED } else { "true" }
+$opencodeEnabled = if ($env:PAI_OPENCODE_ENABLED) { $env:PAI_OPENCODE_ENABLED } else { "true" }
+$opencodeExecutable = if ($env:PAI_OPENCODE_EXECUTABLE) { $env:PAI_OPENCODE_EXECUTABLE } else { "" }
 $cuaEnabled = if ($env:PAI_CUA_ENABLED) { $env:PAI_CUA_ENABLED } else { "true" }
 $cuaDriverExecutable = if ($env:PAI_CUA_DRIVER_EXECUTABLE) { $env:PAI_CUA_DRIVER_EXECUTABLE } else { "" }
 $cuaDriverSocket = if ($env:PAI_CUA_DRIVER_SOCKET) { $env:PAI_CUA_DRIVER_SOCKET } else { "\\.\pipe\cua-driver" }
@@ -158,6 +160,12 @@ if ($cuaEnabled -eq "true" -and [string]::IsNullOrWhiteSpace($cuaDriverExecutabl
   if (!$cuaCommand) { $cuaCommand = Get-Command cua-driver -CommandType Application -ErrorAction SilentlyContinue }
   if ($cuaCommand) { $cuaDriverExecutable = $cuaCommand.Source }
   else { $cuaDriverExecutable = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin\cua-driver.exe" }
+}
+if ($opencodeEnabled -eq "true" -and [string]::IsNullOrWhiteSpace($opencodeExecutable)) {
+  $opencodeCommand = Get-Command opencode.exe -CommandType Application -ErrorAction SilentlyContinue
+  if (!$opencodeCommand) { $opencodeCommand = Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue }
+  if ($opencodeCommand) { $opencodeExecutable = $opencodeCommand.Source }
+  else { $opencodeExecutable = "opencode" }
 }
 
 foreach ($entry in @(
@@ -171,11 +179,13 @@ foreach ($entry in @(
   @{ Name = "OmlxApiKeyFile"; Value = $omlxApiKeyFile },
   @{ Name = "CuaDriverExecutable"; Value = $cuaDriverExecutable },
   @{ Name = "CuaDriverSocket"; Value = $cuaDriverSocket },
-  @{ Name = "CuaDriverVersion"; Value = $cuaDriverVersion }
+  @{ Name = "CuaDriverVersion"; Value = $cuaDriverVersion },
+  @{ Name = "OpenCodeExecutable"; Value = $opencodeExecutable }
 )) { Assert-SafeValue $entry.Name $entry.Value }
 if ($omlxEnabled -notin @("true", "false")) { Fail "PAI_OMLX_ENABLED must be true or false" }
 if ($lmstudioEnabled -notin @("true", "false")) { Fail "PAI_LMSTUDIO_ENABLED must be true or false" }
 if ($ollamaEnabled -notin @("true", "false")) { Fail "PAI_OLLAMA_ENABLED must be true or false" }
+if ($opencodeEnabled -notin @("true", "false")) { Fail "PAI_OPENCODE_ENABLED must be true or false" }
 if ($cuaEnabled -notin @("true", "false")) { Fail "PAI_CUA_ENABLED must be true or false" }
 if ($cuaDriverMode -notin @("mcp", "cli")) { Fail "PAI_CUA_DRIVER_MODE must be mcp or cli" }
 if ($cuaEnabled -eq "true") {
@@ -322,6 +332,8 @@ set "PAI_OMLX_ENABLED=$(CmdLiteral $omlxEnabled)"
 set "PAI_OMLX_API_KEY_FILE=$(CmdLiteral $omlxApiKeyFile)"
 set "PAI_LMSTUDIO_ENABLED=$(CmdLiteral $lmstudioEnabled)"
 set "PAI_OLLAMA_ENABLED=$(CmdLiteral $ollamaEnabled)"
+set "PAI_OPENCODE_ENABLED=$(CmdLiteral $opencodeEnabled)"
+set "PAI_OPENCODE_EXECUTABLE=$(CmdLiteral $opencodeExecutable)"
 set "PAI_CUA_ENABLED=$(CmdLiteral $cuaEnabled)"
 set "PAI_CUA_DRIVER_EXECUTABLE=$(CmdLiteral $cuaDriverExecutable)"
 set "PAI_CUA_DRIVER_SOCKET=$(CmdLiteral $cuaDriverSocket)"

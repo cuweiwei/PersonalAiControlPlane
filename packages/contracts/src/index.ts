@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export * from "./dispatch.ts";
 
-export const TASK_TYPES = ["llm.inference", "codex", "python", "command", "computer.use", "generic"] as const;
+export const TASK_TYPES = ["llm.inference", "codex", "opencode", "python", "command", "computer.use", "generic"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATES = ["QUEUED", "ASSIGNED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"] as const;
 export type TaskState = (typeof TASK_STATES)[number];
@@ -236,6 +236,7 @@ export function parseTaskContractV2Input(value: unknown, defaults: { timeoutSeco
   }
   const workspaceRef = optionalString(requirementsRaw.workspace_ref, "requirements.workspace_ref") ?? undefined;
   if (taskType === "codex" && !workspaceRef) throw new Error("WORKSPACE_REQUIRED_FOR_CODEX");
+  if (taskType === "opencode" && !workspaceRef) throw new Error("WORKSPACE_REQUIRED_FOR_OPENCODE");
   const requiredWorker = optionalString(requirementsRaw.required_worker, "requirements.required_worker") ?? undefined;
   const preferredWorker = optionalString(requirementsRaw.preferred_worker, "requirements.preferred_worker") ?? undefined;
   const criteriaRaw = value.criteria ?? [];

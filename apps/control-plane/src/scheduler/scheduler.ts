@@ -101,7 +101,7 @@ export class ResourceScheduler {
     if (task.task_type === "computer.use" && (!Array.isArray(features) || !features.includes("computer_session_v1"))) return { code: "WORKER_UPDATE_REQUIRED", count: 1, message: "Worker 需要更新才能執行 computer.use" };
     if (task.execution_semantics === "platform_v2" || task.owner_kind === "MISSION" || (Array.isArray(features) && features.length > 0)) {
       const requiredFeatures = new Set(["resolved_execution_v1", "task_run_v1"]);
-      if (task.task_type === "codex") requiredFeatures.add("workspace_inventory_v1");
+      if (task.task_type === "codex" || task.task_type === "opencode") requiredFeatures.add("workspace_inventory_v1");
       if (task.owner_kind === "MISSION") {
         requiredFeatures.add("mission_execution_v1");
         requiredFeatures.add("stop_evidence_v1");

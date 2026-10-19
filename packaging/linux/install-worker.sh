@@ -36,6 +36,10 @@ omlx_enabled=${PAI_OMLX_ENABLED:-true}
 omlx_api_key_file=${PAI_OMLX_API_KEY_FILE:-"$HOME/.omlx/settings.json"}
 lmstudio_enabled=${PAI_LMSTUDIO_ENABLED:-true}
 ollama_enabled=${PAI_OLLAMA_ENABLED:-true}
+opencode_enabled=${PAI_OPENCODE_ENABLED:-true}
+opencode_executable=${PAI_OPENCODE_EXECUTABLE:-}
+if [[ -z "$opencode_executable" ]]; then opencode_executable=$(command -v opencode 2>/dev/null || true); fi
+if [[ -z "$opencode_executable" ]]; then opencode_executable=opencode; fi
 cua_enabled=${PAI_CUA_ENABLED:-true}
 cua_driver_executable=${PAI_CUA_DRIVER_EXECUTABLE:-"$HOME/.local/bin/cua-driver"}
 cua_driver_socket=${PAI_CUA_DRIVER_SOCKET:-"${XDG_RUNTIME_DIR:-$HOME/.cache}/cua-driver.sock"}
@@ -45,12 +49,13 @@ refresh_source=${PAI_WORKER_REFRESH_SOURCE:-true}
 worker_unit=personal-ai-worker.service
 driver_unit=cua-driver.service
 
-for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$cua_enabled" "$cua_driver_executable" "$cua_driver_socket" "$cua_driver_mode" "$cua_driver_version" "$refresh_source"; do
+for value in "$origin" "$data_directory" "$worker_executable" "$log_directory" "$repository" "$source_ref" "$node_version" "$omlx_enabled" "$omlx_api_key_file" "$lmstudio_enabled" "$ollama_enabled" "$opencode_enabled" "$opencode_executable" "$cua_enabled" "$cua_driver_executable" "$cua_driver_socket" "$cua_driver_mode" "$cua_driver_version" "$refresh_source"; do
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "arguments must not contain newlines"
 done
 [[ "$omlx_enabled" == "true" || "$omlx_enabled" == "false" ]] || die "PAI_OMLX_ENABLED must be true or false"
 [[ "$lmstudio_enabled" == "true" || "$lmstudio_enabled" == "false" ]] || die "PAI_LMSTUDIO_ENABLED must be true or false"
 [[ "$ollama_enabled" == "true" || "$ollama_enabled" == "false" ]] || die "PAI_OLLAMA_ENABLED must be true or false"
+[[ "$opencode_enabled" == "true" || "$opencode_enabled" == "false" ]] || die "PAI_OPENCODE_ENABLED must be true or false"
 [[ "$cua_enabled" == "true" || "$cua_enabled" == "false" ]] || die "PAI_CUA_ENABLED must be true or false"
 [[ "$cua_driver_mode" == "mcp" || "$cua_driver_mode" == "cli" ]] || die "PAI_CUA_DRIVER_MODE must be mcp or cli"
 [[ "$cua_driver_version" == "" || "$cua_driver_version" =~ ^[A-Za-z0-9._-]+$ ]] || die "PAI_CUA_DRIVER_VERSION contains unsupported characters"
@@ -270,6 +275,8 @@ Environment=$(systemd_quote "PAI_OMLX_ENABLED=$omlx_enabled")
 Environment=$(systemd_quote "PAI_OMLX_API_KEY_FILE=$omlx_api_key_file")
 Environment=$(systemd_quote "PAI_LMSTUDIO_ENABLED=$lmstudio_enabled")
 Environment=$(systemd_quote "PAI_OLLAMA_ENABLED=$ollama_enabled")
+Environment=$(systemd_quote "PAI_OPENCODE_ENABLED=$opencode_enabled")
+Environment=$(systemd_quote "PAI_OPENCODE_EXECUTABLE=$opencode_executable")
 Environment=$(systemd_quote "PAI_CUA_ENABLED=$cua_enabled")
 Environment=$(systemd_quote "PAI_CUA_DRIVER_EXECUTABLE=$cua_driver_executable")
 Environment=$(systemd_quote "PAI_CUA_DRIVER_SOCKET=$cua_driver_socket")

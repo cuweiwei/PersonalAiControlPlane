@@ -461,8 +461,8 @@ export class TaskService {
     const executionRecord = execution && typeof execution === "object" ? execution as Record<string, unknown> : {};
     const model = executionRecord.model && typeof executionRecord.model === "object" ? executionRecord.model as Record<string, unknown> : {};
     const target = { worker_id: executionRecord.workerId ?? executionRecord.worker_id ?? null, runtime: executionRecord.runtime ?? null, model_id: model.name ?? executionRecord.model_id ?? null, workspace_id: executionRecord.workspaceId ?? executionRecord.workspace_id ?? null };
-    const kindByTaskType: Record<string, string> = { "llm.inference": "TEXT", codex: "CODEX", python: "PYTHON", command: "COMMAND", "computer.use": "COMPUTER_USE", generic: "GENERIC" };
-    const kind = ["TEXT", "CODEX", "PYTHON", "COMMAND", "COMPUTER_USE", "GENERIC"].includes(String(input.kind)) ? String(input.kind) : kindByTaskType[taskType] ?? "GENERIC";
+    const kindByTaskType: Record<string, string> = { "llm.inference": "TEXT", codex: "CODEX", opencode: "OPENCODE", python: "PYTHON", command: "COMMAND", "computer.use": "COMPUTER_USE", generic: "GENERIC" };
+    const kind = ["TEXT", "CODEX", "OPENCODE", "PYTHON", "COMMAND", "COMPUTER_USE", "GENERIC"].includes(String(input.kind)) ? String(input.kind) : kindByTaskType[taskType] ?? "GENERIC";
     const text = typeof input.text === "string" ? input.text : typeof result.text === "string" ? result.text : typeof result.stdout === "string" ? result.stdout : null;
     let changes: unknown = input.changes ?? { state: "NOT_PROVIDED", files: [], diff_artifact_id: null, attribution: "UNKNOWN" };
     if (changes && typeof changes === "object" && typeof (changes as Record<string, unknown>).diff_artifact_key === "string") {

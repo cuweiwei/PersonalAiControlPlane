@@ -29,7 +29,7 @@ test("macOS Worker installer is a self-bootstrapping shell script", () => {
 
 test("Windows Worker installer bootstraps source, Node.js, launcher, and Scheduled Task", () => {
   const source = readFileSync(windowsInstaller, "utf8");
-  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "pai-worker-scheduled.ps1", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "powershell.exe", "-WindowStyle Hidden", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "Get-ActiveWorkerAttemptCount", "pai-worker-journal-", ".cjs", "process.argv[2]", "Start-Process", "-RedirectStandardOutput", "-RedirectStandardError", "worker.db", "ACCEPTED", "RUNNING", "taskkill.exe", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED", "PAI_CUA_ENABLED", "PAI_CUA_DRIVER_EXECUTABLE", "PAI_CUA_DRIVER_SOCKET", "PAI_CUA_DRIVER_MODE", "else { \"true\" }", "cua.ai/driver/install.ps1", "autostart enable", "autostart kick", "interactive-user autostart task", "default named pipe", "status"]) {
+  for (const marker of ["source.zip", "nodejs.org/dist", "Get-FileHash", "Expand-Archive", "npm.cmd", "pai-worker.cmd", "pai-worker-scheduled.ps1", "worker.log", "2>&1", "Get-ScheduledTaskInfo", "New-ScheduledTaskAction", "powershell.exe", "-WindowStyle Hidden", "New-ScheduledTaskTrigger", "Register-ScheduledTask", "Start-ScheduledTask", "Get-ActiveWorkerAttemptCount", "pai-worker-journal-", ".cjs", "process.argv[2]", "Start-Process", "-RedirectStandardOutput", "-RedirectStandardError", "worker.db", "ACCEPTED", "RUNNING", "taskkill.exe", "PAI_OMLX_ENABLED", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED", "PAI_OPENCODE_ENABLED", "PAI_OPENCODE_EXECUTABLE", "PAI_CUA_ENABLED", "PAI_CUA_DRIVER_EXECUTABLE", "PAI_CUA_DRIVER_SOCKET", "PAI_CUA_DRIVER_MODE", "else { \"true\" }", "cua.ai/driver/install.ps1", "autostart enable", "autostart kick", "interactive-user autostart task", "default named pipe", "status"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.doesNotMatch(source, /shell\.Run/);
@@ -47,7 +47,7 @@ test("Linux Worker installer bootstraps CUA Driver and user services", () => {
   const path = new URL("../packaging/linux/install-worker.sh", import.meta.url).pathname;
   const source = readFileSync(path, "utf8");
   assert.equal(spawnSync("bash", ["-n", path]).status, 0);
-  for (const marker of ["PAI_CUA_ENABLED:-true", "cua.ai/driver/install.sh", "CUA_DRIVER_RS_VERSION", "libxi6", "at-spi2-core", "graphical-session.target", "systemctl --user import-environment", "systemctl --user enable --now", "PAI_CUA_DRIVER_SOCKET", "personal-ai-worker.service", "journalctl --user", "supported CUA Driver Linux desktop", "refusing to replace live Worker files"]) {
+  for (const marker of ["PAI_CUA_ENABLED:-true", "PAI_OPENCODE_ENABLED:-true", "PAI_OPENCODE_EXECUTABLE", "cua.ai/driver/install.sh", "CUA_DRIVER_RS_VERSION", "libxi6", "at-spi2-core", "graphical-session.target", "systemctl --user import-environment", "systemctl --user enable --now", "PAI_CUA_DRIVER_SOCKET", "personal-ai-worker.service", "journalctl --user", "supported CUA Driver Linux desktop", "refusing to replace live Worker files"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.doesNotMatch(source, /enable-linger|sudo\s+systemctl/);
