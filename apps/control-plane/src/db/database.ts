@@ -956,6 +956,25 @@ export class ControlPlaneDatabase {
         ensureColumn("recovery_intents", "request_hash", "TEXT NOT NULL DEFAULT ''");
         this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (19, ?, ?)").run("recovery-report-idempotency-v1", Date.now());
       }
+      const orchestrationEventsMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 20").get() as { checksum?: string } | undefined;
+      if (orchestrationEventsMigration && orchestrationEventsMigration.checksum !== "orchestration-work-events-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:20");
+      if (!orchestrationEventsMigration) {
+        this.connection.exec(`
+          CREATE TABLE IF NOT EXISTS orchestration_work_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            work_id TEXT NOT NULL REFERENCES orchestration_works(id),
+            revision INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_orchestration_work_events_cursor
+            ON orchestration_work_events(work_id, seq);
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (20, ?, ?)").run("orchestration-work-events-v1", Date.now());
+      }
       for (const [version, checksum, migration] of officeMigrations) {
         const applied = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = ?").get(version) as { checksum?: string } | undefined;
         if (applied && applied.checksum !== checksum) throw new Error(`MIGRATION_CHECKSUM_MISMATCH:${version}`);

@@ -150,6 +150,88 @@ function stringValue(value: unknown, field: string, max = 500): string { if (typ
 function optionalString(value: unknown, field: string): string | null | undefined { if (value === undefined || value === null) return value as null | undefined; return stringValue(value, field, 500); }
 function nonNegativeInt(value: unknown, field: string, fallback: number, maximum: number): number { if (value === undefined) return fallback; if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > maximum) throw new Error(`${field} must be a bounded non-negative integer`); return value; }
 
+function stringArray(value: unknown, field: string, maxItems: number, maxLength = 500): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${field} is invalid`);
+  const items = value.map((item, index) => stringValue(item, `${field}[${index}]`, maxLength));
+  if (new Set(items).size !== items.length) throw new Error(`${field} must not contain duplicates`);
+  return items;
+}
+
+/** Strict parser for the bounded, cross-orchestrator Work contract. */
+export function parseOrchestrationWorkContract(value: unknown): OrchestrationWorkContract {
+  if (!isRecord(value)) throw new Error("ORCHESTRATION_CONTRACT_INVALID");
+  rejectUnknown(value, ["schema_version", "origin", "objective", "project_ref", "repository_ref", "phase_ref", "design_authority", "implementation_owner", "design_refs", "base_commit_sha", "workspace_id", "owned_paths", "acceptance_criteria", "required_tests", "target", "review", "resume_policy", "risk_tier"], "contract");
+  if (value.schema_version !== 1) throw new Error("ORCHESTRATION_CONTRACT_VERSION_UNSUPPORTED");
+  if (!isRecord(value.origin)) throw new Error("contract.origin is invalid");
+  rejectUnknown(value.origin, ["kind", "origin_ref"], "contract.origin");
+  const originKind = value.origin.kind as OrchestratorKind;
+  if (originKind !== "HERMES" && originKind !== "CODEX") throw new Error("contract.origin.kind is invalid");
+
+  const designAuthority = value.design_authority as WorkDesignAuthority;
+  if (designAuthority !== "MAC_LED" && designAuthority !== "WINDOWS_FEATURE_OWNER") throw new Error("contract.design_authority is invalid");
+  const implementationOwner = value.implementation_owner as WorkImplementationOwner;
+  if (!["WINDOWS", "MAC_LOCAL", "DYNAMIC"].includes(implementationOwner)) throw new Error("contract.implementation_owner is invalid");
+  const resumePolicy = value.resume_policy as ResumePolicy;
+  if (resumePolicy !== "INHERIT_WORKER" && resumePolicy !== "MANUAL_ONLY") throw new Error("contract.resume_policy is invalid");
+  const riskTier = value.risk_tier as OrchestrationWorkContract["risk_tier"];
+  if (!["LOW", "MEDIUM", "HIGH"].includes(riskTier)) throw new Error("contract.risk_tier is invalid");
+
+  if (!isRecord(value.target)) throw new Error("contract.target is invalid");
+  rejectUnknown(value.target, ["capability", "runtime", "preferred_worker_id"], "contract.target");
+  if (!isRecord(value.review)) throw new Error("contract.review is invalid");
+  rejectUnknown(value.review, ["owner", "merge_allowed"], "contract.review");
+  if (value.review.owner !== originKind || value.review.merge_allowed !== false) throw new Error("contract.review must preserve the origin owner and disallow merge");
+
+  const acceptanceRaw = value.acceptance_criteria;
+  if (!Array.isArray(acceptanceRaw) || acceptanceRaw.length === 0 || acceptanceRaw.length > 100) throw new Error("contract.acceptance_criteria is invalid");
+  const acceptanceCriteria = acceptanceRaw.map((item, index) => {
+    if (!isRecord(item)) throw new Error(`contract.acceptance_criteria[${index}] is invalid`);
+    rejectUnknown(item, ["id", "text"], `contract.acceptance_criteria[${index}]`);
+    return { id: stringValue(item.id, `contract.acceptance_criteria[${index}].id`, 120), text: stringValue(item.text, `contract.acceptance_criteria[${index}].text`, 4_000) };
+  });
+  if (new Set(acceptanceCriteria.map((item) => item.id)).size !== acceptanceCriteria.length) throw new Error("contract.acceptance_criteria ids must be unique");
+
+  const testsRaw = value.required_tests;
+  if (!Array.isArray(testsRaw) || testsRaw.length > 100) throw new Error("contract.required_tests is invalid");
+  const requiredTests = testsRaw.map((item, index) => {
+    if (!isRecord(item)) throw new Error(`contract.required_tests[${index}] is invalid`);
+    rejectUnknown(item, ["kind", "command_ref"], `contract.required_tests[${index}]`);
+    if (item.kind !== "COMMAND" && item.kind !== "CI") throw new Error(`contract.required_tests[${index}].kind is invalid`);
+    const commandRef = optionalString(item.command_ref, `contract.required_tests[${index}].command_ref`);
+    if (item.kind === "COMMAND" && !commandRef) throw new Error(`contract.required_tests[${index}].command_ref is required`);
+    return { kind: item.kind as "COMMAND" | "CI", ...(commandRef ? { command_ref: commandRef } : {}) };
+  });
+
+  const ownedPaths = stringArray(value.owned_paths, "contract.owned_paths", 200, 1_000);
+  for (const path of ownedPaths) {
+    const normalized = path.replace(/\\/g, "/");
+    if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || normalized.split("/").some((part) => part === "..")) throw new Error("contract.owned_paths must be workspace-relative");
+  }
+  const baseCommitSha = optionalString(value.base_commit_sha, "contract.base_commit_sha");
+  if (baseCommitSha && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(baseCommitSha)) throw new Error("contract.base_commit_sha is invalid");
+
+  return {
+    schema_version: 1,
+    origin: { kind: originKind, origin_ref: stringValue(value.origin.origin_ref, "contract.origin.origin_ref", 500) },
+    objective: stringValue(value.objective, "contract.objective", 20_000),
+    ...(value.project_ref === undefined || value.project_ref === null ? {} : { project_ref: stringValue(value.project_ref, "contract.project_ref", 500) }),
+    ...(value.repository_ref === undefined || value.repository_ref === null ? {} : { repository_ref: stringValue(value.repository_ref, "contract.repository_ref", 500) }),
+    ...(value.phase_ref === undefined || value.phase_ref === null ? {} : { phase_ref: stringValue(value.phase_ref, "contract.phase_ref", 500) }),
+    design_authority: designAuthority,
+    implementation_owner: implementationOwner,
+    design_refs: stringArray(value.design_refs, "contract.design_refs", 100, 1_000),
+    ...(baseCommitSha ? { base_commit_sha: baseCommitSha } : {}),
+    workspace_id: stringValue(value.workspace_id, "contract.workspace_id", 200),
+    owned_paths: ownedPaths,
+    acceptance_criteria: acceptanceCriteria,
+    required_tests: requiredTests,
+    target: { capability: stringValue(value.target.capability, "contract.target.capability", 120), runtime: stringValue(value.target.runtime, "contract.target.runtime", 120), ...(value.target.preferred_worker_id === undefined ? {} : { preferred_worker_id: value.target.preferred_worker_id === null ? null : stringValue(value.target.preferred_worker_id, "contract.target.preferred_worker_id", 300) }) },
+    review: { owner: originKind, merge_allowed: false },
+    resume_policy: resumePolicy,
+    risk_tier: riskTier,
+  };
+}
+
 export function parseCreateTaskInput(value: unknown, defaults: { timeoutSeconds?: number; maxAttempts?: number } = {}): CreateTaskInput {
   if (!isRecord(value)) throw new Error("request body must be an object");
   rejectUnknown(value, ["source", "source_ref", "correlation_id", "group_id", "parent_task_id", "title", "task_type", "instruction", "context", "payload", "execution", "limits", "priority", "input_artifact_ids"], "request");

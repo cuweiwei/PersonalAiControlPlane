@@ -21,7 +21,17 @@ export class ResourceScheduler {
 
   tick(now = Date.now()): number {
     let assigned = 0;
-    const queued = this.db.all<Row>("SELECT t.* FROM tasks t LEFT JOIN task_dispatch_state d ON d.task_id = t.id WHERE t.status = 'QUEUED' AND (t.archived_at IS NULL OR t.archived_at = 0) AND (d.dispatch_not_before IS NULL OR d.dispatch_not_before <= ?) ORDER BY t.priority DESC, t.created_at ASC, t.id ASC", now);
+    const queued = this.db.all<Row>(`SELECT t.* FROM tasks t
+      LEFT JOIN task_dispatch_state d ON d.task_id = t.id
+      WHERE t.status = 'QUEUED'
+        AND (t.archived_at IS NULL OR t.archived_at = 0)
+        AND (d.dispatch_not_before IS NULL OR d.dispatch_not_before <= ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM orchestration_work_tasks wt
+          JOIN orchestration_works w ON w.id = wt.work_id
+          WHERE wt.task_id = t.id AND w.status = 'PAUSED'
+        )
+      ORDER BY t.priority DESC, t.created_at ASC, t.id ASC`, now);
     for (const task of queued) {
       const requirement = parse(task.execution_json) as Requirement;
       if (task.execution_semantics === "platform_v2") {

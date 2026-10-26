@@ -48,6 +48,11 @@ export class RecoveryPolicyReconciler {
       });
       const policyVersion = effective.version + Number(preferences?.version ?? 0);
       const priorState = String(row.state);
+      const schedulerBackoffCurrent = priorState === "WAITING_RESET"
+        && typeof row.last_error_code === "string"
+        && row.last_error_code.startsWith("SCHEDULER_")
+        && Number(row.policy_version) === policyVersion;
+      if (decision.state === "WAITING_RESET" && schedulerBackoffCurrent) continue;
       if (priorState === "RESUMING") {
         if (decision.state !== "WAITING_RESET") {
           const inFlightCode = "POLICY_CHANGED_IN_FLIGHT";
