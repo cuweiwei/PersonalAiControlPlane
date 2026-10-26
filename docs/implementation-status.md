@@ -1,6 +1,6 @@
 # v2 實作狀態與證據
 
-更新：2026-10-26
+更新：2026-10-27
 
 ## 本機 repository evidence
 
@@ -25,7 +25,7 @@
 | Virtual Office UI | `implemented_local` | `/office`、`/office/members`、`/missions`、`/missions/new`、`/missions/:id` routes with intake, plan/run projection, controls, timeline and results |
 | Cross-service recovery and acceptance probe | `implemented_local` | Recovery mode/authority epoch API and fail-closed `scripts/production-acceptance.mjs`; live restart, real Worker, Hermes provider and backup/restore evidence remain required |
 | CI/release compose | `implemented_local` | immutable image workflow、digest-pinned compose、`/healthz`/`/readyz` |
-| Local checks | `implemented_local` | 本次分支驗證：`npm run check`、`npm run typecheck`、`npm test`（151 tests：150 pass、1 environment-gated skip、0 fail）、`npm run build:web`；Vite reports the existing >500 kB scene chunk warning |
+| Local checks | `implemented_local` | 本次分支驗證：`npm run check`、`npm run typecheck`、`npm test`（156 tests：155 pass、1 environment-gated skip、0 fail）、`npm run build:web`；Vite reports the existing >500 kB scene chunk warning |
 | NAS release | `live_verified` | allowlist、staging validate、gateway deploy/status、loopback、Tailscale、cross-service health 與 live task state smoke 均通過（2026-09-02） |
 | Real Mac/Windows enrollment | `provider_verified` pending | repository tests 不等於實體裝置 enrollment、OS vault 或 WSS/TLS evidence |
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |
@@ -39,12 +39,13 @@
 | Recovery status API | `implemented_local`, read-only internal-peer projection | `GET /api/v2/recovery/intents[/:id]` and `GET /api/v2/quota-pools[/:poolId]` are limited to trusted internal peers; browser-origin reads are rejected; account fingerprint and native session ID are never returned; no write/mutation facade is enabled |
 | Orchestration Work facade P0 | `implemented_local`, HTTP/MCP gateway remains gated OFF | `OrchestrationService` implements owner-scoped Work create/read, bounded revision-CAS delegation, pause/cancel/unpause control, evidence-backed acceptance, artifact/recovery projections, and durable cursor events; `pai_*` MCP methods call the same domain service. Pausing blocks queued Work tasks but does not stop already-running tasks; native manual/same-session resume is explicitly unsupported. Routes require trusted-peer and explicit-actor checks, then fail closed while `orchestration_gateway_enabled=false`; no live orchestrator identity/token verification evidence exists |
 | Quota/reset recovery scheduler | `implemented_local`, dispatch intentionally absent | Due intents use durable leases, verified pool readiness, reset-aware jitter/backoff, shared pool cooldown and a bounded probe counter; policy changes cannot erase the scheduled backoff; scheduler only reads local evidence and persists conditions/events, always returns `dispatched: 0`, and never probes a model |
+| Worker native-session journal groundwork | `implemented_local`, native resume unsupported | `apps/worker/src/native-session-journal.ts` binds OpenCode/Codex session metadata to immutable attempt/workspace/fence identity, applies CAS-fenced bounded checkpoints, and records resume requests as `UNSUPPORTED` with no native message ID or dispatch path; `test/native-session-journal.test.ts` covers validation, idempotency, fencing, secret-safe checkpoint shape and SQLite reopen |
 
 ## 明確未宣告的事項
 
 本文件不把 UI 顯示、health、executor flag 或 unit/integration tests 誤當成 production、provider、memory authority、backup/restore 或實體 worker acceptance。ContextHub 仍是記憶 authority；Control Plane 沒有 memory projection 或 conversation archive。Virtual Office 的本機實作已涵蓋 durable wake-up contract、Coordinator、Worker mission path、UI 與 recovery gates；尚不代表真實 Hermes provider turn、實體 Worker 執行、跨服務重啟、備份還原或 Mission 可跨日完成。
 
-本次 Multi-Orchestrator/resumable execution 變更已加入受閘門保護的 Orchestration Work HTTP/MCP facade：能力快照、owner-scoped Work 建立/讀取、bounded Task delegation、revision-CAS control/acceptance、durable event cursor、artifact/recovery projections；Task/Work 關聯、取消與 receipt 使用同一 DB transaction。Pause 只阻止尚未派送的 queued Work Task，不會停止已執行中的 Task；native manual/same-session resume 明確回報 unsupported。`orchestration_gateway_enabled` 仍為 OFF，且沒有 live orchestrator identity/token 驗證證據，不能把此本機 domain 實作視為可用的 live Orchestrator API。另有 DB-only quota/reset scheduler，具 durable claim、pool cooldown、reset-aware backoff 和有限檢查次數；它不執行 provider probe、不發 Worker resume、不建立新 Attempt，dispatch count 固定為 0。尚未完成 quota/reset recovery dispatcher、Worker native-session adapter、OpenCode same-session continuation 或 Codex Managed Host；目前 Worker 不會宣告新報告 feature，PAICP 不會自動 Resume，也沒有 live E2E 證據。`auto_resume_default_enabled=true` 不會改變此限制。Migrations 17–20 僅新增 quota-pool identity、recovery policy/report idempotency 與 Work event cursor metadata，不修改既有 Work/Worker/Task authority。
+本次 Multi-Orchestrator/resumable execution 變更已加入受閘門保護的 Orchestration Work HTTP/MCP facade：能力快照、owner-scoped Work 建立/讀取、bounded Task delegation、revision-CAS control/acceptance、durable event cursor、artifact/recovery projections；Task/Work 關聯、取消與 receipt 使用同一 DB transaction。Pause 只阻止尚未派送的 queued Work Task，不會停止已執行中的 Task；native manual/same-session resume 明確回報 unsupported。`orchestration_gateway_enabled` 仍為 OFF，且沒有 live orchestrator identity/token 驗證證據，不能把此本機 domain 實作視為可用的 live Orchestrator API。另有 DB-only quota/reset scheduler，具 durable claim、pool cooldown、reset-aware backoff 和有限檢查次數；它不執行 provider probe、不發 Worker resume、不建立新 Attempt，dispatch count 固定為 0。Worker native-session journal 現有受限的本機 binding/checkpoint API，resume operation 只能持久記為 `UNSUPPORTED`，沒有呼叫 executor 的方法。尚未完成 quota/reset recovery dispatcher、OpenCode same-session continuation 或 Codex Managed Host；目前 Worker 不會宣告新報告 feature，PAICP 不會自動 Resume，也沒有 live E2E 證據。`auto_resume_default_enabled=true` 不會改變此限制。Migrations 17–20 僅新增 quota-pool identity、recovery policy/report idempotency 與 Work event cursor metadata，不修改既有 Work/Worker/Task authority。
 
 Personal Agent Work 的本機 domain 已可保存可追溯的技能、例行 binding、Goal／budget、Attention 與成果投影；技能 `VALIDATE_ONLY` 只代表靜態核對，不能直接升成 READY。Hermes／ContextHub／browser broker 的 receipt、provider、重啟與實體 Worker 證據仍須在各自 repository／部署環境完成。
 

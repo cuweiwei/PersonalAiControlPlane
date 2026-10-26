@@ -33,6 +33,7 @@ const required = [
   "apps/worker/src/runtime.ts",
   "apps/worker/src/transport.ts",
   "apps/worker/src/local-db.ts",
+  "apps/worker/src/native-session-journal.ts",
   "packages/contracts/src/index.ts",
   "packages/contracts/src/office/index.ts",
   "packages/worker/src/index.ts",
