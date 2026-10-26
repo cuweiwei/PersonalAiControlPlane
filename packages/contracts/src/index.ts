@@ -13,6 +13,50 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export const WORKER_STATES = ["ONLINE", "OFFLINE", "DISABLED"] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 
+export type OrchestratorKind = "HERMES" | "CODEX";
+export type WorkDesignAuthority = "MAC_LED" | "WINDOWS_FEATURE_OWNER";
+export type WorkImplementationOwner = "WINDOWS" | "MAC_LOCAL" | "DYNAMIC";
+export type ResumePolicy = "INHERIT_WORKER" | "MANUAL_ONLY";
+export type ExecutionCondition =
+  | "READY" | "ACTIVE" | "BLOCKED_QUOTA" | "WAITING_RESET" | "DISABLED_BY_POLICY"
+  | "RESUME_ELIGIBLE" | "RESUMING" | "RECONCILIATION_REQUIRED" | "BLOCKED_AUTH"
+  | "WAITING_HOST" | "NEEDS_OWNER_ACTION" | "WAITING_OWNER_REVIEW";
+
+export type OrchestrationWorkContract = {
+  schema_version: 1;
+  origin: { kind: OrchestratorKind; origin_ref: string };
+  objective: string;
+  project_ref?: string;
+  repository_ref?: string;
+  phase_ref?: string;
+  design_authority: WorkDesignAuthority;
+  implementation_owner: WorkImplementationOwner;
+  design_refs: string[];
+  base_commit_sha?: string;
+  workspace_id: string;
+  owned_paths: string[];
+  acceptance_criteria: Array<{ id: string; text: string }>;
+  required_tests: Array<{ kind: "COMMAND" | "CI"; command_ref?: string }>;
+  target: { capability: string; runtime: string; preferred_worker_id?: string | null };
+  review: { owner: OrchestratorKind; merge_allowed: false };
+  resume_policy: ResumePolicy;
+  risk_tier: "LOW" | "MEDIUM" | "HIGH";
+};
+
+export type NativeSessionBindingContract = {
+  task_id: string;
+  attempt_id: string;
+  worker_id: string;
+  runtime: "opencode" | "codex";
+  native_session_id: string;
+  workspace_id: string;
+  workspace_fence_epoch: number;
+  usage_pool_id?: string | null;
+  baseline_sha?: string | null;
+  last_head_sha?: string | null;
+  runtime_state: string;
+};
+
 export type TaskModelRequirement = { name?: string; mode?: "required" | "preferred" | "any" };
 export type TaskExecution = {
   capabilities: string[];

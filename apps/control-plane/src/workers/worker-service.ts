@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ControlPlaneDatabase } from "../db/database.ts";
 import { EventHub } from "../events/event-hub.ts";
 import { newWorkerToken, hashWorkerToken } from "../tasks/task-service.ts";
+import { resolveEffectiveAutoResumePolicy } from "../recovery/resume-policy.ts";
 import { canonicalJson, uuidv7, type JsonValue } from "../../../../packages/contracts/src/index.ts";
 
 type Row = Record<string, any>;
@@ -75,9 +76,10 @@ export type RegistrationResult = { registrationId: string; status: "pending" };
 export class WorkerService {
   readonly db: ControlPlaneDatabase;
   private readonly events: EventHub;
+  private readonly getAutoResumeSettings: () => { defaultEnabled: boolean; emergencyStop: boolean };
   private readonly pendingTokens = new Map<string, string>();
 
-  constructor(db: ControlPlaneDatabase, events = new EventHub()) { this.db = db; this.events = events; }
+  constructor(db: ControlPlaneDatabase, events = new EventHub(), getAutoResumeSettings: () => { defaultEnabled: boolean; emergencyStop: boolean } = () => ({ defaultEnabled: true, emergencyStop: false })) { this.db = db; this.events = events; this.getAutoResumeSettings = getAutoResumeSettings; }
 
   register(input: { name: string; registrationSecret: string; platform: string; hostname?: string; agentVersion?: string; hardware: Record<string, JsonValue>; onboardingId?: string }, now = Date.now()): RegistrationResult {
     if (input.registrationSecret.length < 16) throw new Error("REGISTRATION_SECRET_TOO_SHORT");
@@ -263,13 +265,14 @@ export class WorkerService {
     this.db.run("INSERT INTO worker_workspaces(worker_id, workspace_id, display_name, capabilities_json, state, config_version, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id, workspace_id) DO UPDATE SET display_name = excluded.display_name, capabilities_json = excluded.capabilities_json, state = excluded.state, config_version = excluded.config_version, checked_at = excluded.checked_at", workerId, value.workspaceId, value.displayName ?? value.workspaceId, JSON.stringify(value.capabilities ?? []), state, value.configVersion ?? 0, now);
   }
 
-  updatePreferences(workerId: string, input: { mode?: "NORMAL" | "IDLE_ONLY"; idleThresholdSeconds?: number | null; pause?: { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } }, expectedVersion?: number, now = Date.now()): Record<string, unknown> {
+  updatePreferences(workerId: string, input: { mode?: "NORMAL" | "IDLE_ONLY"; idleThresholdSeconds?: number | null; pause?: { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number }; autoResumeOverride?: boolean | null }, expectedVersion?: number, now = Date.now(), actor = "owner"): Record<string, unknown> {
     return this.db.transaction(() => {
       const current = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", workerId);
       const version = Number(current?.version ?? 0);
       if (expectedVersion !== undefined && expectedVersion !== version) throw new Error("WORKER_PREFERENCES_CHANGED");
       const mode = input.mode ?? current?.mode ?? "NORMAL";
       const threshold = input.idleThresholdSeconds === undefined ? current?.idle_threshold_seconds ?? null : input.idleThresholdSeconds;
+      const autoResumeOverride = Object.hasOwn(input, "autoResumeOverride") ? input.autoResumeOverride : current?.auto_resume_override === null || current?.auto_resume_override === undefined ? null : Number(current.auto_resume_override) === 1;
       let pauseId = current?.pause_id ?? null; let pauseUntil = current?.pause_until ?? null; let indefinite = Number(current?.pause_indefinite ?? 0);
       if (input.pause) {
         if (input.pause.kind === "NONE") { pauseId = null; pauseUntil = null; indefinite = 0; }
@@ -282,7 +285,9 @@ export class WorkerService {
       }
       if (mode !== "NORMAL" && mode !== "IDLE_ONLY") throw new Error("INVALID_WORKER_PREFERENCE");
       if (threshold !== null && (!Number.isInteger(Number(threshold)) || Number(threshold) < 60 || Number(threshold) > 7_200)) throw new Error("INVALID_WORKER_PREFERENCE");
-      this.db.run("INSERT INTO worker_preferences(worker_id, version, mode, pause_id, pause_until, pause_indefinite, idle_threshold_seconds, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET version = excluded.version, mode = excluded.mode, pause_id = excluded.pause_id, pause_until = excluded.pause_until, pause_indefinite = excluded.pause_indefinite, idle_threshold_seconds = excluded.idle_threshold_seconds, updated_at = excluded.updated_at", workerId, version + 1, mode, pauseId, pauseUntil, indefinite, threshold, now);
+      if (autoResumeOverride !== null && typeof autoResumeOverride !== "boolean") throw new Error("INVALID_WORKER_PREFERENCE");
+      this.db.run("INSERT INTO worker_preferences(worker_id, version, mode, pause_id, pause_until, pause_indefinite, idle_threshold_seconds, auto_resume_override, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker_id) DO UPDATE SET version = excluded.version, mode = excluded.mode, pause_id = excluded.pause_id, pause_until = excluded.pause_until, pause_indefinite = excluded.pause_indefinite, idle_threshold_seconds = excluded.idle_threshold_seconds, auto_resume_override = excluded.auto_resume_override, updated_at = excluded.updated_at", workerId, version + 1, mode, pauseId, pauseUntil, indefinite, threshold, autoResumeOverride === null ? null : autoResumeOverride ? 1 : 0, now);
+      this.appendAudit(actor, "worker.preferences.changed", workerId, { version: version + 1, changed: { ...(input.mode === undefined ? {} : { mode }), ...(input.idleThresholdSeconds === undefined ? {} : { idleThresholdSeconds: threshold }), ...(input.pause === undefined ? {} : { pause: input.pause.kind }), ...(!Object.hasOwn(input, "autoResumeOverride") ? {} : { autoResumeOverride }) } }, now);
       this.events.publish({ type: "worker.updated", workerId, preferencesVersion: version + 1 });
       return this.preferences(workerId);
     });
@@ -290,7 +295,10 @@ export class WorkerService {
 
   preferences(workerId: string): Record<string, unknown> {
     const row = this.db.one<Row>("SELECT * FROM worker_preferences WHERE worker_id = ?", workerId);
-    return { version: Number(row?.version ?? 0), mode: row?.mode ?? "NORMAL", pause: row?.pause_id ? { id: row.pause_id, until: iso(row.pause_until), indefinite: Boolean(row.pause_indefinite) } : null, idleThresholdSeconds: row?.idle_threshold_seconds ?? null };
+    const settings = this.getAutoResumeSettings();
+    const override = row?.auto_resume_override === null || row?.auto_resume_override === undefined ? null : Number(row.auto_resume_override) === 1;
+    const policy = resolveEffectiveAutoResumePolicy({ globalDefaultEnabled: settings.defaultEnabled, emergencyStop: settings.emergencyStop, workerOverride: override });
+    return { version: Number(row?.version ?? 0), mode: row?.mode ?? "NORMAL", pause: row?.pause_id ? { id: row.pause_id, until: iso(row.pause_until), indefinite: Boolean(row.pause_indefinite) } : null, idleThresholdSeconds: row?.idle_threshold_seconds ?? null, autoResume: { ...policy, runtimeSupport: "UNSUPPORTED", automaticResumeEligible: false } };
   }
 
   expirePauses(now = Date.now()): number {

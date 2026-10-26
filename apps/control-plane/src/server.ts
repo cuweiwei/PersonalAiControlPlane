@@ -454,7 +454,12 @@ export function createControlPlaneServer(options: Options) {
         }
         if (method === "PATCH" && parts[4] === "preferences") {
           const key = request.headers["idempotency-key"]?.toString(); if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY"); const match = request.headers["if-match"]?.toString().match(/worker-preferences-(\d+)/); if (!match) throw new Error("MISSING_IF_MATCH"); const input = await bodyJson(request); const requestHash = safeHash(input); const scope = `worker:${workerId}:preferences`; const prior = options.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = ? AND operation_key = ?", scope, key); if (prior) { if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT"); return writeJson(response, Number(prior.status_code), json(prior.response_json)), true; }
-          const preference = options.workers.updatePreferences(workerId, { mode: input.mode as "NORMAL" | "IDLE_ONLY" | undefined, idleThresholdSeconds: input.idle_threshold_seconds === null ? null : input.idle_threshold_seconds === undefined ? undefined : Number(input.idle_threshold_seconds), pause: input.pause as { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } | undefined }, Number(match[1])); const result = { desired: preference, applied: { state: "PENDING", preferencesVersion: preference.version } }; options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 200, ?, ?)", scope, key, requestHash, JSON.stringify(result), Date.now()); return writeJson(response, 200, result), true;
+          const preferenceInput: { mode?: "NORMAL" | "IDLE_ONLY"; idleThresholdSeconds?: number | null; pause?: { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number }; autoResumeOverride?: boolean | null } = { mode: input.mode as "NORMAL" | "IDLE_ONLY" | undefined, idleThresholdSeconds: input.idle_threshold_seconds === null ? null : input.idle_threshold_seconds === undefined ? undefined : Number(input.idle_threshold_seconds), pause: input.pause as { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } | undefined };
+          if (Object.hasOwn(input, "auto_resume_override")) {
+            if (input.auto_resume_override !== null && typeof input.auto_resume_override !== "boolean") throw new Error("INVALID_WORKER_PREFERENCE");
+            preferenceInput.autoResumeOverride = input.auto_resume_override as boolean | null;
+          }
+          const preference = options.workers.updatePreferences(workerId, preferenceInput, Number(match[1]), Date.now(), actor(request)); const result = { desired: preference, applied: { state: "PENDING", preferencesVersion: preference.version } }; options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 200, ?, ?)", scope, key, requestHash, JSON.stringify(result), Date.now()); return writeJson(response, 200, result), true;
         }
         if (method === "PATCH" && parts.length === 4) { const input = await bodyJson(request); options.workers.rename(workerId, String(input.name ?? ""), actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
         if (method === "POST" && parts[4] === "enable") { options.workers.setEnabled(workerId, true, actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
@@ -489,7 +494,17 @@ export function createControlPlaneServer(options: Options) {
       if (parts[2] === "settings") {
         if (method === "GET" && parts[3] === "effective") { const effective = options.settings.getEffective(); response.setHeader("etag", `\"settings-${effective.version}\"`); return writeJson(response, 200, effective), true; }
         if (method === "GET" && parts.length === 3) return writeJson(response, 200, options.settings.get()), true;
-        if (method === "PATCH" && parts.length === 3) { const expected = request.headers["if-match"]?.toString().match(/settings-(\d+)/)?.[1]; const patched = options.settings.patch(await bodyJson(request), Date.now(), expected === undefined ? undefined : Number(expected)) as Row; response.setHeader("etag", `\"settings-${patched.version}\"`); return writeJson(response, 200, { ...(patched.values as Row), ...patched }), true; }
+        if (method === "PATCH" && parts.length === 3) {
+          const input = await bodyJson(request); const gatedKeys = ["orchestration_gateway_enabled", "opencode_session_adapter_enabled", "codex_managed_host_enabled", "quota_recovery_engine_enabled", "auto_resume_default_enabled", "auto_resume_emergency_stop", "native_agent_tree_observation_enabled", "recovery_pool_max_concurrency"];
+          const isGatedWrite = Object.keys(input).some((key) => gatedKeys.includes(key)); const expected = request.headers["if-match"]?.toString().match(/settings-(\d+)/)?.[1];
+          if (isGatedWrite && expected === undefined) throw new Error("MISSING_IF_MATCH");
+          const key = request.headers["idempotency-key"]?.toString(); if (isGatedWrite && !key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          if (isGatedWrite && key) { const prior = options.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = 'settings:resumable' AND operation_key = ?", key); if (prior) { if (prior.request_hash !== safeHash(input)) throw new Error("IDEMPOTENCY_CONFLICT"); response.setHeader("etag", `\"settings-${json(prior.response_json).version}\"`); return writeJson(response, Number(prior.status_code), json(prior.response_json)), true; } }
+          const patched = options.settings.patch(input, Date.now(), expected === undefined ? undefined : Number(expected), Object.hasOwn(input, "auto_resume_emergency_stop") ? stepUpActor(request) : actor(request)) as Row;
+          const result = { ...(patched.values as Row), ...patched }; response.setHeader("etag", `\"settings-${patched.version}\"`);
+          if (isGatedWrite && key) options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES ('settings:resumable', ?, ?, 200, ?, ?)", key, safeHash(input), JSON.stringify(result), Date.now());
+          return writeJson(response, 200, result), true;
+        }
       }
       if (parts[2] === "dashboard" && method === "GET") {
         const since = Date.now() - 86_400_000;

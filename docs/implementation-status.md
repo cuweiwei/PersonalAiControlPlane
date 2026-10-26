@@ -1,6 +1,6 @@
 # v2 實作狀態與證據
 
-更新：2026-09-16
+更新：2026-10-26
 
 ## 本機 repository evidence
 
@@ -31,10 +31,15 @@
 | Local model/Codex execution | `provider_verified` pending | executor code 已提供；實際 runtime/model inventory 與品質證據尚未宣告 |
 | Personal Agent Work durable domain | `implemented_local` | migration 13、`AgentWorkService`、Skill immutable version／artifact pin／static validation、Routine binding／receipt fence／occurrence dedup、Goal／milestone／budget、Attention projection、Artifact view、Browser/Teaching fail-closed routes；`test/agent-work.test.ts` |
 | Personal Agent Work external lanes | `implemented_local` with capability gates | Hermes native scheduler、ContextHub memory authority、browser broker 與 teaching executor 尚未在本 repository 驗證；未收到 typed receipt 時維持 `PENDING`／`CAPABILITY_UNAVAILABLE`，不宣稱 live/provider 完成 |
+| Multi-Orchestrator / resumable execution P0-A | `implemented_local` compatibility decision; native runtime support `NOT_VERIFIED` | `docs/adr/2026-10-26-multi-orchestrator-resume-compatibility.md` records checkout evidence; no Mac/Windows live probe or production behavior is claimed |
+| Resumable execution flags and ledger schema P0-B/P1-A | `implemented_local`; execution routes remain gated OFF | Additive schema migration 16, durable Work/session/quota/recovery tables, local native-session journal tables, typed Work/session contracts; no resume dispatcher or native adapter is enabled |
+| Worker Auto Resume policy P1-B | `implemented_local`; actual automatic continuation `UNSUPPORTED` | Global default ON, emergency stop OFF, per-Worker nullable override, pure eligibility policy, versioned/idempotent API, audit chain and Workers UI; recovery engine and runtime adapters stay OFF |
 
 ## 明確未宣告的事項
 
 本文件不把 UI 顯示、health、executor flag 或 unit/integration tests 誤當成 production、provider、memory authority、backup/restore 或實體 worker acceptance。ContextHub 仍是記憶 authority；Control Plane 沒有 memory projection 或 conversation archive。Virtual Office 的本機實作已涵蓋 durable wake-up contract、Coordinator、Worker mission path、UI 與 recovery gates；尚不代表真實 Hermes provider turn、實體 Worker 執行、跨服務重啟、備份還原或 Mission 可跨日完成。
+
+本次 Multi-Orchestrator/resumable execution 變更只完成相容性界線、預設關閉的能力旗標、additive ledger groundwork，以及 Auto Resume policy UI/API。沒有實作 Orchestration Work HTTP/MCP facade、quota observation ingestion/recovery scheduler、OpenCode same-session continuation 或 Codex Managed Host；因此目前不會自動 Resume，也沒有 live E2E 證據。`auto_resume_default_enabled=true` 不會改變此限制。
 
 Personal Agent Work 的本機 domain 已可保存可追溯的技能、例行 binding、Goal／budget、Attention 與成果投影；技能 `VALIDATE_ONLY` 只代表靜態核對，不能直接升成 READY。Hermes／ContextHub／browser broker 的 receipt、provider、重啟與實體 Worker 證據仍須在各自 repository／部署環境完成。
 
