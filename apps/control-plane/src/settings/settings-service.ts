@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ControlPlaneDatabase } from "../db/database.ts";
+import { canonicalJson, uuidv7 } from "../../../../packages/contracts/src/index.ts";
 
 export type SettingType = "integer" | "boolean" | "string";
 export type SettingSource = "ENV" | "STORED" | "DEFAULT";
@@ -73,9 +74,24 @@ const definitions: SettingDefinition[] = [
   { key: "agent_work_memory_enabled", label: "啟用記憶引用", description: "只有 ContextHub adapter 通過驗證後才可啟用。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: "PAI_AGENT_WORK_MEMORY_ENABLED", applyScope: "AGENT_WORK_INTAKE" },
   { key: "agent_work_browser_enabled", label: "啟用瀏覽器 Worker", description: "只有受控 browser broker 與停止證據驗證後才可啟用。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: "PAI_AGENT_WORK_BROWSER_ENABLED", applyScope: "AGENT_WORK_INTAKE" },
   { key: "agent_work_teaching_enabled", label: "啟用示範學習", description: "只有 browser session 隔離與隱私錄製驗證後才可啟用。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: "PAI_AGENT_WORK_TEACHING_ENABLED", applyScope: "AGENT_WORK_INTAKE" },
+  { key: "orchestration_gateway_enabled", label: "Orchestration API", description: "允許新 Orchestrator Gateway 整合；驗證完成前保持關閉。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "ORCHESTRATION_GATE" },
+  { key: "opencode_session_adapter_enabled", label: "OpenCode Session Adapter", description: "允許經相容性驗證的 OpenCode 原生 Session adapter；未驗證時不可續跑。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "WORKER_RUNTIME" },
+  { key: "codex_managed_host_enabled", label: "Codex Managed Host", description: "允許受控 Codex Host；不會接管互動式 Desktop Thread。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "WORKER_RUNTIME" },
+  { key: "quota_recovery_engine_enabled", label: "Quota Recovery Engine", description: "自動恢復總閘；在 quota、session ownership 與 fencing 通過 live gate 前保持關閉。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "RECOVERY_DISPATCH" },
+  { key: "auto_resume_default_enabled", label: "Auto Resume 全域預設", description: "Worker 可覆寫此預設；此設定本身不會啟用未驗證的恢復引擎。", type: "boolean", unit: null, defaultValue: true, min: null, max: null, nullable: false, envKey: null, applyScope: "RECOVERY_POLICY" },
+  { key: "auto_resume_emergency_stop", label: "停止所有自動 Resume", description: "最高優先 hard-stop；啟用後阻止所有自動 continuation，並留下稽核記錄。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "RECOVERY_POLICY" },
+  { key: "native_agent_tree_observation_enabled", label: "Codex Agent Tree observation", description: "只在官方可觀測能力通過相容性驗證後啟用；不會 fork 或控制 native child agents。", type: "boolean", unit: null, defaultValue: false, min: null, max: null, nullable: false, envKey: null, applyScope: "CODEX_OBSERVATION" },
+  { key: "recovery_pool_max_concurrency", label: "Quota pool Resume 併發上限", description: "同一 usage pool 同時可恢復的工作數。", type: "integer", unit: "個", defaultValue: 1, min: 1, max: 10, nullable: false, envKey: null, applyScope: "RECOVERY_SCHEDULER" },
 ];
 
 const byKey = new Map(definitions.map((definition) => [definition.key, definition]));
+const capabilityFlagsNotImplemented = new Set([
+  "orchestration_gateway_enabled",
+  "opencode_session_adapter_enabled",
+  "codex_managed_host_enabled",
+  "quota_recovery_engine_enabled",
+  "native_agent_tree_observation_enabled",
+]);
 
 function parseStored(value: unknown): unknown {
   try { return value === null || value === undefined ? undefined : JSON.parse(String(value)); } catch { return undefined; }
@@ -116,7 +132,7 @@ export class SettingsService {
       const source: SettingSource = envValue !== undefined ? "ENV" : storedValue !== undefined ? "STORED" : "DEFAULT";
       const effectiveValue = source === "ENV" ? envValue : source === "STORED" ? storedValue : definition.defaultValue;
       if (!isValid(definition, effectiveValue)) throw new Error(`INVALID_EFFECTIVE_SETTING:${definition.key}`);
-      return { ...definition, storedValue: storedValue ?? null, effectiveValue, source, editable: source !== "ENV" };
+      return { ...definition, storedValue: storedValue ?? null, effectiveValue, source, editable: source !== "ENV" && !capabilityFlagsNotImplemented.has(definition.key) };
     });
     const values = Object.fromEntries(fields.map((field) => [field.key, field.effectiveValue]));
     if (Number(values.worker_offline_seconds) < Number(values.heartbeat_interval_seconds) * 3) throw new Error("INVALID_EFFECTIVE_SETTING:worker_offline_seconds");
@@ -125,7 +141,7 @@ export class SettingsService {
     return { version, values, fields, applications };
   }
 
-  patch(values: Record<string, unknown>, now = Date.now(), expectedVersion?: number): Record<string, unknown> {
+  patch(values: Record<string, unknown>, now = Date.now(), expectedVersion?: number, actor = "owner"): Record<string, unknown> {
     const current = this.getEffective();
     if (expectedVersion !== undefined && expectedVersion !== current.version) throw new Error("SETTINGS_CHANGED");
     const entries = Object.entries(values);
@@ -135,6 +151,7 @@ export class SettingsService {
       if (!definition) throw new Error("UNKNOWN_SETTING");
       if (parseEnv(definition) !== undefined) throw new Error("SETTING_OVERRIDDEN");
       if (!isValid(definition, value)) throw new Error(`INVALID_SETTING_VALUE:${key}`);
+      if (capabilityFlagsNotImplemented.has(key) && value === true) throw new Error("FEATURE_UNAVAILABLE");
     }
     const merged = { ...current.values, ...values };
     if (Number(merged.worker_offline_seconds) < Number(merged.heartbeat_interval_seconds) * 3) throw new Error("INVALID_SETTING_VALUE:worker_offline_seconds");
@@ -146,6 +163,8 @@ export class SettingsService {
       const hash = createHash("sha256").update(JSON.stringify(merged)).digest("hex");
       this.db.run("INSERT INTO runtime_metadata(key, value_json) VALUES ('settings_version', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", JSON.stringify(version));
       this.db.run("INSERT INTO runtime_metadata(key, value_json) VALUES ('settings_effective_hash', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", JSON.stringify(hash));
+      const policyChanges = Object.fromEntries(entries.filter(([key]) => ["auto_resume_default_enabled", "auto_resume_emergency_stop"].includes(key)));
+      if (Object.keys(policyChanges).length > 0) this.appendAudit(actor, "settings.auto_resume_policy.changed", { settingsVersion: version, changes: policyChanges }, now);
     });
     return this.getEffective();
   }
@@ -153,6 +172,12 @@ export class SettingsService {
   taskDefaults(): { timeoutSeconds: number; maxAttempts: number; settingsVersion: number } {
     const effective = this.getEffective();
     return { timeoutSeconds: Number(effective.values.default_task_timeout_seconds), maxAttempts: Number(effective.values.default_max_attempts), settingsVersion: effective.version };
+  }
+
+  private appendAudit(actor: string, action: string, payload: Record<string, unknown>, now: number): void {
+    const previousHash = String(this.db.one<{ event_hash: string }>("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1")?.event_hash ?? "");
+    const eventHash = createHash("sha256").update(canonicalJson({ actor, action, workerId: null, payload, previousHash, createdAt: now }), "utf8").digest("hex");
+    this.db.run("INSERT INTO audit_events(event_uuid, actor, action, worker_id, payload_json, previous_hash, event_hash, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)", uuidv7(now), actor, action, JSON.stringify(payload), previousHash, eventHash, now);
   }
 }
 

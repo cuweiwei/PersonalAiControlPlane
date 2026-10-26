@@ -48,24 +48,36 @@ export class TaskService {
 
   /** Hermes -> Control Plane v2 delegation. This is deliberately a thin adapter over the task domain. */
   delegate(input: TaskContractV2Input, principal = input.requestedBy ?? "owner", now = Date.now()): Record<string, unknown> {
+    const response = this.db.transaction(() => this.delegateInTx(input, principal, now));
+    if (!response.deduplicated) this.publishDelegated(String(response.task_id));
+    return response;
+  }
+
+  /**
+   * Unit-of-work form used by orchestration domain transactions. The caller
+   * owns the database transaction and must call publishDelegated after commit.
+   */
+  delegateInTx(input: TaskContractV2Input, principal = input.requestedBy ?? "owner", now = Date.now()): Record<string, unknown> {
     const operationKey = input.idempotencyKey;
     const requestHash = safeHash({ ...input, requestedBy: principal });
-    return this.db.transaction(() => {
-      const existing = this.db.one<TaskRow>("SELECT * FROM tasks WHERE requested_by = ? AND idempotency_key = ?", principal, operationKey);
-      if (existing) {
-        const priorSnapshot = existing.request_snapshot_json ? parseJson(existing.request_snapshot_json, {}) as Record<string, unknown> : {};
-        const priorHash = typeof priorSnapshot.requestHash === "string" ? priorSnapshot.requestHash : null;
-        if (priorHash && priorHash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT");
-        return { task_id: existing.id, run_id: existing.current_run_id, revision: Number(existing.revision ?? 1), status: existing.status, deduplicated: true, task: this.publicTask(existing) };
-      }
-      const created = this.createInTx({ ...input, requestedBy: principal, schemaVersion: 2, executionSemantics: "platform_v2" }, now, { ownerKind: "STANDALONE" });
-      const row = this.getRow(created.id)!;
-      // Keep the request hash in the immutable request snapshot for replay conflict detection.
-      this.db.run("UPDATE tasks SET request_snapshot_json = ? WHERE id = ?", JSON.stringify({ ...input, requestedBy: principal, requestHash }), created.id);
-      const response = { task_id: created.id, run_id: created.runId, revision: Number(row.revision ?? 1), status: row.status, deduplicated: false, task: this.publicTask(row) };
-      this.events.publish({ type: "task.updated", taskId: created.id, status: "QUEUED", revision: 1 });
-      return response;
-    });
+    const existing = this.db.one<TaskRow>("SELECT * FROM tasks WHERE requested_by = ? AND idempotency_key = ?", principal, operationKey);
+    if (existing) {
+      const priorSnapshot = existing.request_snapshot_json ? parseJson(existing.request_snapshot_json, {}) as Record<string, unknown> : {};
+      const priorHash = typeof priorSnapshot.requestHash === "string" ? priorSnapshot.requestHash : null;
+      if (priorHash && priorHash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT");
+      return { task_id: existing.id, run_id: existing.current_run_id, revision: Number(existing.revision ?? 1), status: existing.status, deduplicated: true, task: this.publicTask(existing) };
+    }
+    const created = this.createInTx({ ...input, requestedBy: principal, schemaVersion: 2, executionSemantics: "platform_v2" }, now, { ownerKind: "STANDALONE" });
+    const row = this.getRow(created.id)!;
+    // Keep the request hash in the immutable request snapshot for replay conflict detection.
+    this.db.run("UPDATE tasks SET request_snapshot_json = ? WHERE id = ?", JSON.stringify({ ...input, requestedBy: principal, requestHash }), created.id);
+    return { task_id: created.id, run_id: created.runId, revision: Number(row.revision ?? 1), status: row.status, deduplicated: false, task: this.publicTask(row) };
+  }
+
+  /** Publish the in-memory update only after the owning transaction commits. */
+  publishDelegated(taskId: string): void {
+    const row = this.getRow(taskId);
+    if (row) this.events.publish({ type: "task.updated", taskId, status: String(row.status), revision: Number(row.revision ?? 1) });
   }
 
   /** Internal unit-of-work entry. The caller owns the surrounding transaction. */
@@ -321,28 +333,45 @@ export class TaskService {
   }
 
   cancel(taskId: string, now = Date.now(), options: TaskOperationOptions = {}): Record<string, unknown> | undefined {
+    const cancelled = this.db.transaction(() => this.cancelInTx(taskId, now, options));
+    if (cancelled.changed) this.publishCancelled(taskId);
+    return cancelled.task;
+  }
+
+  /** Transaction-reuse form for an orchestration Work-wide cancel. */
+  cancelInTx(taskId: string, now = Date.now(), options: TaskOperationOptions = {}): { task?: Record<string, unknown>; changed: boolean } {
     const scope = `task:${taskId}:cancel`;
     const requestHash = safeHash({ expectedRevision: options.expectedRevision ?? null });
-    return this.db.transaction(() => {
-      if (options.idempotencyKey) {
-        const receipt = this.db.one<TaskRow>("SELECT * FROM operation_receipts WHERE scope = ? AND operation_key = ?", scope, options.idempotencyKey);
-        if (receipt) { if (receipt.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT"); return parseJson(receipt.response_json, null) as Record<string, unknown>; }
+    if (options.idempotencyKey) {
+      const receipt = this.db.one<TaskRow>("SELECT * FROM operation_receipts WHERE scope = ? AND operation_key = ?", scope, options.idempotencyKey);
+      if (receipt) {
+        if (receipt.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT");
+        return { task: parseJson(receipt.response_json, null) as Record<string, unknown>, changed: false };
       }
-      const task = this.getRow(taskId); if (!task) return undefined;
-      if (options.expectedRevision !== undefined && Number(task.revision ?? 1) !== options.expectedRevision) throw new Error("TASK_CHANGED");
-      if (terminalTaskStates.has(task.status)) return this.publicTask(task);
-      assertTaskTransition(task.status, "CANCELLED");
-      const v2 = task.execution_semantics === "platform_v2";
-      const hasAttempt = Boolean(task.current_attempt_id);
-      this.db.run("UPDATE tasks SET status = 'CANCELLED', finished_at = ?, updated_at = ?, revision = revision + 1, control_cancel = CASE WHEN execution_semantics = 'platform_v2' THEN 'REQUESTED' ELSE control_cancel END, execution_certainty = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'UNKNOWN' WHEN execution_semantics = 'platform_v2' THEN 'TERMINAL_CONFIRMED' ELSE execution_certainty END, waiting_reason = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'STOP_RECONCILIATION' ELSE waiting_reason END, occupancy = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'RELEASING' WHEN execution_semantics = 'platform_v2' THEN 'RELEASED' ELSE occupancy END WHERE id = ?", now, now, hasAttempt ? 1 : 0, hasAttempt ? 1 : 0, hasAttempt ? 1 : 0, taskId);
-      if (task.current_attempt_id) this.db.run("UPDATE task_attempts SET status = 'CANCELLED', occupancy = CASE WHEN status IN ('OFFERED', 'ACCEPTED', 'RUNNING') THEN 'RELEASING' ELSE 'RELEASED' END, cancel_requested_at = ?, finished_at = CASE WHEN status IN ('OFFERED', 'ACCEPTED', 'RUNNING') THEN NULL ELSE ? END WHERE id = ? AND status NOT IN ('SUCCEEDED', 'FAILED', 'LOST')", now, now, task.current_attempt_id);
-      if (task.current_run_id) this.db.run("UPDATE task_runs SET status = 'CANCELLED', finished_at = ? WHERE id = ?", now, task.current_run_id);
-      this.bumpListRevision();
-      this.appendEvent(taskId, "TASK_CANCELLED", task.current_attempt_id, null, { requested: v2 }, now); this.enqueueCallback(taskId, "cancelled", {}, null, now); this.events.publish({ type: "task.updated", taskId, status: "CANCELLED", executionCertainty: hasAttempt ? "UNKNOWN" : "TERMINAL_CONFIRMED" });
-      const response = this.publicTask(this.getRow(taskId)!);
-      if (options.idempotencyKey) this.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 202, ?, ?)", scope, options.idempotencyKey, requestHash, JSON.stringify(response), now);
-      return response;
-    });
+    }
+    const task = this.getRow(taskId);
+    if (!task) return { changed: false };
+    if (options.expectedRevision !== undefined && Number(task.revision ?? 1) !== options.expectedRevision) throw new Error("TASK_CHANGED");
+    if (terminalTaskStates.has(task.status)) return { task: this.publicTask(task), changed: false };
+    assertTaskTransition(task.status, "CANCELLED");
+    const v2 = task.execution_semantics === "platform_v2";
+    const hasAttempt = Boolean(task.current_attempt_id);
+    this.db.run("UPDATE tasks SET status = 'CANCELLED', finished_at = ?, updated_at = ?, revision = revision + 1, control_cancel = CASE WHEN execution_semantics = 'platform_v2' THEN 'REQUESTED' ELSE control_cancel END, execution_certainty = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'UNKNOWN' WHEN execution_semantics = 'platform_v2' THEN 'TERMINAL_CONFIRMED' ELSE execution_certainty END, waiting_reason = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'STOP_RECONCILIATION' ELSE waiting_reason END, occupancy = CASE WHEN execution_semantics = 'platform_v2' AND ? = 1 THEN 'RELEASING' WHEN execution_semantics = 'platform_v2' THEN 'RELEASED' ELSE occupancy END WHERE id = ?", now, now, hasAttempt ? 1 : 0, hasAttempt ? 1 : 0, hasAttempt ? 1 : 0, taskId);
+    if (task.current_attempt_id) this.db.run("UPDATE task_attempts SET status = 'CANCELLED', occupancy = CASE WHEN status IN ('OFFERED', 'ACCEPTED', 'RUNNING') THEN 'RELEASING' ELSE 'RELEASED' END, cancel_requested_at = ?, finished_at = CASE WHEN status IN ('OFFERED', 'ACCEPTED', 'RUNNING') THEN NULL ELSE ? END WHERE id = ? AND status NOT IN ('SUCCEEDED', 'FAILED', 'LOST')", now, now, task.current_attempt_id);
+    if (task.current_run_id) this.db.run("UPDATE task_runs SET status = 'CANCELLED', finished_at = ? WHERE id = ?", now, task.current_run_id);
+    this.bumpListRevision();
+    this.appendEvent(taskId, "TASK_CANCELLED", task.current_attempt_id, null, { requested: v2 }, now);
+    this.enqueueCallback(taskId, "cancelled", {}, null, now);
+    const response = this.publicTask(this.getRow(taskId)!);
+    if (options.idempotencyKey) this.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 202, ?, ?)", scope, options.idempotencyKey, requestHash, JSON.stringify(response), now);
+    return { task: response, changed: true };
+  }
+
+  publishCancelled(taskId: string): void {
+    const row = this.getRow(taskId);
+    if (!row) return;
+    const hasAttempt = Boolean(row.current_attempt_id);
+    this.events.publish({ type: "task.updated", taskId, status: "CANCELLED", executionCertainty: hasAttempt ? "UNKNOWN" : "TERMINAL_CONFIRMED" });
   }
 
   cancelWithOptions(taskId: string, options: TaskOperationOptions = {}, now = Date.now()): Record<string, unknown> | undefined { return this.cancel(taskId, now, options); }

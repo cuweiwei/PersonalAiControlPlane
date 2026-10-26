@@ -27,10 +27,13 @@ import { safeHash } from "./tasks/task-service.ts";
 import { ComputerSessionService } from "./computers/computer-session-service.ts";
 import { DispatchService } from "./dispatch/dispatch-service.ts";
 import { parseDispatchReleasePayload, parseDispatchRulePayload } from "./dispatch/rule-registry.ts";
+import { RecoveryService } from "./recovery/recovery-service.ts";
+import { QuotaPoolService } from "./recovery/quota-pool-service.ts";
+import { OrchestrationService } from "./orchestration/orchestration-service.ts";
 import { parseDispatchRequest } from "../../../packages/contracts/src/dispatch.ts";
 import { parseCreateMemberInput, parseCreateMissionInput, parseCreateRoleInput, parseCreateTaskInput, parseRegistrationInput, parseTaskContractV2Input } from "../../../packages/contracts/src/index.ts";
 
-type Options = { db: ControlPlaneDatabase; tasks: TaskService; workers: WorkerService; coordinator: WorkerCoordinator; missionCoordinator?: MissionCoordinator; artifacts: ArtifactStorage; settings: SettingsService; health: HealthMonitor; events: EventHub; office?: OfficeService; missions?: MissionService; plans?: PlanService; callback?: HermesCallbackDispatcher; modelTests?: ModelTestService; modelPreferences?: ModelPreferenceService; onboarding?: OnboardingService; agentWork?: AgentWorkService; computers?: ComputerSessionService; dispatch?: DispatchService; assetRoot?: string; isReady?: () => boolean };
+type Options = { db: ControlPlaneDatabase; tasks: TaskService; workers: WorkerService; coordinator: WorkerCoordinator; missionCoordinator?: MissionCoordinator; artifacts: ArtifactStorage; settings: SettingsService; health: HealthMonitor; events: EventHub; office?: OfficeService; missions?: MissionService; plans?: PlanService; callback?: HermesCallbackDispatcher; modelTests?: ModelTestService; modelPreferences?: ModelPreferenceService; onboarding?: OnboardingService; agentWork?: AgentWorkService; computers?: ComputerSessionService; dispatch?: DispatchService; recovery?: RecoveryService; quotaPools?: QuotaPoolService; orchestration?: OrchestrationService; assetRoot?: string; isReady?: () => boolean };
 type Row = Record<string, any>;
 const systemEntrySettings: Record<string, string> = { "control-plane": "control_plane_entry_url", hermes: "hermes_entry_url", contexthub: "contexthub_entry_url", "information-radar": "information_radar_entry_url" };
 function projectSystemEntries(items: Record<string, unknown>[], values: Record<string, unknown>): Record<string, unknown>[] { return items.map((item) => { const setting = systemEntrySettings[String(item.id)]; return setting && values[setting] ? { ...item, entryUrl: values[setting] } : item; }); }
@@ -53,6 +56,7 @@ async function body(request: IncomingMessage, limit: number): Promise<Buffer> {
 async function bodyJson(request: IncomingMessage): Promise<Record<string, unknown>> { const raw = await body(request, JSON_LIMIT); if (!raw.length) return {}; const parsed = JSON.parse(raw.toString("utf8")); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("INVALID_JSON_BODY"); return parsed as Record<string, unknown>; }
 function authWorker(request: IncomingMessage, workers: WorkerService): Row { const value = request.headers.authorization; const token = value?.startsWith("Bearer ") ? value.slice(7) : ""; const worker = workers.authenticate(token); if (!worker) throw new Error("INVALID_WORKER_TOKEN"); return worker; }
 function actor(request: IncomingMessage): string { const value = request.headers["x-actor"]?.toString().trim(); return value && value.length <= 120 ? value : "owner"; }
+function orchestrationActor(request: IncomingMessage): string { const value = request.headers["x-actor"]?.toString().trim(); if (!value || value.length > 120) throw new Error("ORCHESTRATION_ACTOR_REQUIRED"); return value; }
 function stepUpActor(request: IncomingMessage): string {
   if (process.env.PAI_REQUIRE_STEP_UP === "true") {
     const assertion = request.headers["x-step-up-assertion"]?.toString().trim();
@@ -92,6 +96,23 @@ export function createControlPlaneServer(options: Options) {
     const items = [...workers, ...models];
     return { snapshotId: randomUUID(), observedAt: new Date().toISOString(), ttlSeconds: Number(options.settings.get().hermes_brain_capability_ttl_seconds ?? 30), taskContractVersions: [1, 2], workerProtocolVersions: [2], features: ["mcp_task_adapter_v1", "attempt_fencing_v1", "durable_result_ack_v1", "workspace_lock_v1", "stop_evidence_v1", "computer_session_v1"], contentHash: safeHash({ items, hermes }), items, hermes };
   };
+  const orchestrationCapabilitySnapshot = async (): Promise<Record<string, unknown>> => {
+    const snapshot = await capabilitySnapshot();
+    const effective = options.settings.getEffective();
+    const workers = options.workers.listWorkers().map((worker: any) => ({
+      worker_id: worker.id,
+      status: worker.status,
+      availability: worker.enabled !== false && worker.drain !== true && worker.status === "ONLINE" ? "AVAILABLE" : "UNAVAILABLE",
+      auto_resume: options.workers.preferences(String(worker.id)).autoResume,
+      observed_at: worker.lastHeartbeatAt ?? null,
+    }));
+    return {
+      ...snapshot,
+      auto_resume: { global_default_enabled: Boolean(effective.values.auto_resume_default_enabled), emergency_stop: Boolean(effective.values.auto_resume_emergency_stop), runtime_support: "UNSUPPORTED", automatic_resume_eligible: false, observed_at: new Date().toISOString() },
+      workers,
+      quota_pools: options.quotaPools?.listPools() ?? [],
+    };
+  };
   const queryCapabilities = async (input: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const observedAt = Date.now();
     const requirements = input.requirements && typeof input.requirements === "object" && !Array.isArray(input.requirements) ? input.requirements as Row : {};
@@ -130,6 +151,58 @@ export function createControlPlaneServer(options: Options) {
     const parts = pathParts(request); const method = request.method ?? "GET"; const q = query(request);
     if (parts[0] !== "api" || parts[1] !== "v2") return false;
     try {
+      if (parts[2] === "orchestration") {
+        if (!(await internalPeerAllowed(request))) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
+        if (options.settings.get().orchestration_gateway_enabled !== true) throw new Error("ORCHESTRATION_DISABLED");
+        if (!options.orchestration) throw new Error("ORCHESTRATION_UNAVAILABLE");
+        const principal = orchestrationActor(request);
+        if (parts[3] === "capabilities" && method === "GET" && parts.length === 4) {
+          return writeJson(response, 200, await orchestrationCapabilitySnapshot()), true;
+        }
+        if (parts[3] === "works" && method === "POST" && parts.length === 4) {
+          const key = request.headers["idempotency-key"]?.toString() ?? "";
+          if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          return writeJson(response, 201, options.orchestration.createWork(await bodyJson(request), principal, key)), true;
+        }
+        if (parts[3] === "works" && parts[4] && method === "GET" && parts.length === 5) {
+          return writeJson(response, 200, options.orchestration.getWork(parts[4], principal)), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "events" && method === "GET" && parts.length === 6) {
+          const cursor = q.has("cursor") ? Number(q.get("cursor")) : 0;
+          const limit = q.has("limit") ? Number(q.get("limit")) : 100;
+          return writeJson(response, 200, options.orchestration.getWorkEvents(parts[4], principal, cursor, limit)), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "artifacts" && method === "GET" && parts.length === 6) {
+          return writeJson(response, 200, options.orchestration.workArtifacts(parts[4], q.get("task_id") ?? undefined, principal)), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "recovery" && method === "GET" && parts.length === 6) {
+          return writeJson(response, 200, options.orchestration.recoveryStatus(parts[4], principal)), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "tasks" && method === "POST" && parts.length === 6) {
+          const key = request.headers["idempotency-key"]?.toString() ?? "";
+          if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          const match = request.headers["if-match"]?.toString().match(/^work-(\d+)$/);
+          if (!match) throw new Error("MISSING_IF_MATCH");
+          const result = options.orchestration.delegateTask(parts[4], await bodyJson(request), principal, Number(match[1]), key);
+          return writeJson(response, 202, result), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "control" && method === "POST" && parts.length === 6) {
+          const key = request.headers["idempotency-key"]?.toString() ?? "";
+          if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          const match = request.headers["if-match"]?.toString().match(/^work-(\d+)$/);
+          if (!match) throw new Error("MISSING_IF_MATCH");
+          const input = await bodyJson(request);
+          if (input.idempotency_key !== undefined && input.idempotency_key !== key) throw new Error("IDEMPOTENCY_CONFLICT");
+          return writeJson(response, 202, options.orchestration.controlWork(parts[4], String(input.action ?? ""), principal, Number(match[1]), key)), true;
+        }
+        if (parts[3] === "works" && parts[4] && parts[5] === "acceptance" && method === "POST" && parts.length === 6) {
+          const key = request.headers["idempotency-key"]?.toString() ?? "";
+          if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          const match = request.headers["if-match"]?.toString().match(/^work-(\d+)$/);
+          if (!match) throw new Error("MISSING_IF_MATCH");
+          return writeJson(response, 200, options.orchestration.recordAcceptance(parts[4], await bodyJson(request), principal, Number(match[1]), key)), true;
+        }
+      }
       if (parts[2] === "events" && method === "GET") {
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" }); response.write(`event: ready\ndata: ${JSON.stringify({ status: "connected" })}\n\n`); const unsubscribe = options.events.subscribe((event) => { if (!response.writableEnded) response.write(`data: ${JSON.stringify(event)}\n\n`); }); request.on("close", unsubscribe); return true;
       }
@@ -147,6 +220,20 @@ export function createControlPlaneServer(options: Options) {
           if (action === "CLEAR") return writeJson(response, 200, options.missionCoordinator.leaveRecovery()), true;
           throw new Error("INVALID_RECOVERY_ACTION");
         }
+      }
+      if (parts[2] === "recovery" && parts[3] === "intents") {
+        if (!(await internalPeerAllowed(request))) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
+        if (!options.recovery) throw new Error("RECOVERY_UNAVAILABLE");
+        if (method === "GET" && parts.length === 4) return writeJson(response, 200, { items: options.recovery.listIntents(Number(q.get("limit") ?? 100)), observedAt: new Date().toISOString() }), true;
+        const intentId = parts[4];
+        if (method === "GET" && intentId && parts.length === 5) { const item = options.recovery.getIntent(intentId); if (!item) throw new Error("RECOVERY_INTENT_NOT_FOUND"); return writeJson(response, 200, item), true; }
+      }
+      if (parts[2] === "quota-pools") {
+        if (!(await internalPeerAllowed(request))) throw new Error("INTERNAL_ROUTE_FORBIDDEN");
+        if (!options.quotaPools) throw new Error("QUOTA_POOL_UNAVAILABLE");
+        if (method === "GET" && parts.length === 3) return writeJson(response, 200, { items: options.quotaPools.listPools(), observedAt: new Date().toISOString() }), true;
+        const poolId = parts[3];
+        if (method === "GET" && poolId && parts.length === 4) { const item = options.quotaPools.getPool(poolId); if (!item) throw new Error("QUOTA_POOL_NOT_FOUND"); return writeJson(response, 200, { ...item, readiness: options.quotaPools.getReadiness(poolId) }), true; }
       }
       if (parts[2] === "acceptance" && method === "GET" && parts.length === 3) {
         const office = options.office?.get("office-1") ?? null;
@@ -206,7 +293,26 @@ export function createControlPlaneServer(options: Options) {
         const rpc = await bodyJson(request); const id = rpc.id ?? null; const rawName = String(rpc.method ?? ""); const name = ({ "control.capabilities.query": "find_capabilities", "control.tasks.delegate": "delegate_task", "control.tasks.get": "get_task_status", "control.tasks.result": "get_task_result", "control.tasks.wait": "wait_task", "control.tasks.cancel": "cancel_task", "control.tasks.retry": "retry_task" } as Record<string, string>)[rawName] ?? rawName; const parameters = rpc.params && typeof rpc.params === "object" && !Array.isArray(rpc.params) ? rpc.params as Row : {};
         try {
           let result: unknown;
-          if (name === "find_capabilities") result = await queryCapabilities(parameters);
+          if (name.startsWith("pai_")) {
+            if (options.settings.get().orchestration_gateway_enabled !== true) throw new Error("ORCHESTRATION_DISABLED");
+            if (!options.orchestration) throw new Error("ORCHESTRATION_UNAVAILABLE");
+            const principal = orchestrationActor(request);
+            const headerKey = request.headers["idempotency-key"]?.toString();
+            if (parameters.idempotency_key !== undefined && headerKey && String(parameters.idempotency_key) !== headerKey) throw new Error("IDEMPOTENCY_CONFLICT");
+            const workId = String(parameters.work_id ?? "");
+            const key = String(parameters.idempotency_key ?? headerKey ?? "");
+            if (name === "pai_list_capabilities") result = await orchestrationCapabilitySnapshot();
+            else if (name === "pai_submit_work") result = options.orchestration.createWork(parameters.contract, principal, key);
+            else if (name === "pai_delegate_task") result = options.orchestration.delegateTask(workId, parameters.task, principal, Number(parameters.expected_revision), key);
+            else if (name === "pai_work_status") result = options.orchestration.getWork(workId, principal);
+            else if (name === "pai_work_artifacts") result = options.orchestration.workArtifacts(workId, parameters.task_id === undefined ? undefined : String(parameters.task_id), principal);
+            else if (name === "pai_work_control") result = options.orchestration.controlWork(workId, String(parameters.action ?? ""), principal, Number(parameters.expected_revision), key);
+            else if (name === "pai_record_acceptance") result = options.orchestration.recordAcceptance(workId, parameters, principal, Number(parameters.expected_revision), key);
+            else if (name === "pai_work_events") result = options.orchestration.getWorkEvents(workId, principal, Number(parameters.cursor ?? 0), Number(parameters.limit ?? 100));
+            else if (name === "pai_recovery_status") result = options.orchestration.recoveryStatus(workId, principal);
+            else throw new Error("MCP_METHOD_NOT_FOUND");
+          }
+          else if (name === "find_capabilities") result = await queryCapabilities(parameters);
           else if (name === "delegate_task") { const parsed = parseTaskContractV2Input({ ...parameters, schema_version: parameters.schema_version ?? 2, idempotency_key: parameters.idempotency_key ?? request.headers["idempotency-key"]?.toString() }, options.settings.taskDefaults()); result = options.tasks.delegate(parsed, actor(request)); }
           else if (name === "get_task_status") { result = options.tasks.detail(String(parameters.task_id ?? "")); if (!result) throw new Error("TASK_NOT_FOUND"); }
           else if (name === "get_task_result") { result = options.tasks.resultView(String(parameters.task_id ?? ""), parameters.run_id ? String(parameters.run_id) : undefined); if (!result) throw new Error("TASK_NOT_FOUND"); }
@@ -454,7 +560,12 @@ export function createControlPlaneServer(options: Options) {
         }
         if (method === "PATCH" && parts[4] === "preferences") {
           const key = request.headers["idempotency-key"]?.toString(); if (!key) throw new Error("MISSING_IDEMPOTENCY_KEY"); const match = request.headers["if-match"]?.toString().match(/worker-preferences-(\d+)/); if (!match) throw new Error("MISSING_IF_MATCH"); const input = await bodyJson(request); const requestHash = safeHash(input); const scope = `worker:${workerId}:preferences`; const prior = options.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = ? AND operation_key = ?", scope, key); if (prior) { if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT"); return writeJson(response, Number(prior.status_code), json(prior.response_json)), true; }
-          const preference = options.workers.updatePreferences(workerId, { mode: input.mode as "NORMAL" | "IDLE_ONLY" | undefined, idleThresholdSeconds: input.idle_threshold_seconds === null ? null : input.idle_threshold_seconds === undefined ? undefined : Number(input.idle_threshold_seconds), pause: input.pause as { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } | undefined }, Number(match[1])); const result = { desired: preference, applied: { state: "PENDING", preferencesVersion: preference.version } }; options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 200, ?, ?)", scope, key, requestHash, JSON.stringify(result), Date.now()); return writeJson(response, 200, result), true;
+          const preferenceInput: { mode?: "NORMAL" | "IDLE_ONLY"; idleThresholdSeconds?: number | null; pause?: { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number }; autoResumeOverride?: boolean | null } = { mode: input.mode as "NORMAL" | "IDLE_ONLY" | undefined, idleThresholdSeconds: input.idle_threshold_seconds === null ? null : input.idle_threshold_seconds === undefined ? undefined : Number(input.idle_threshold_seconds), pause: input.pause as { kind: "NONE" | "TIMED" | "INDEFINITE"; durationSeconds?: number } | undefined };
+          if (Object.hasOwn(input, "auto_resume_override")) {
+            if (input.auto_resume_override !== null && typeof input.auto_resume_override !== "boolean") throw new Error("INVALID_WORKER_PREFERENCE");
+            preferenceInput.autoResumeOverride = input.auto_resume_override as boolean | null;
+          }
+          const preference = options.workers.updatePreferences(workerId, preferenceInput, Number(match[1]), Date.now(), actor(request)); const result = { desired: preference, applied: { state: "PENDING", preferencesVersion: preference.version } }; options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES (?, ?, ?, 200, ?, ?)", scope, key, requestHash, JSON.stringify(result), Date.now()); return writeJson(response, 200, result), true;
         }
         if (method === "PATCH" && parts.length === 4) { const input = await bodyJson(request); options.workers.rename(workerId, String(input.name ?? ""), actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
         if (method === "POST" && parts[4] === "enable") { options.workers.setEnabled(workerId, true, actor(request)); return writeJson(response, 200, options.workers.getWorker(workerId)), true; }
@@ -489,7 +600,17 @@ export function createControlPlaneServer(options: Options) {
       if (parts[2] === "settings") {
         if (method === "GET" && parts[3] === "effective") { const effective = options.settings.getEffective(); response.setHeader("etag", `\"settings-${effective.version}\"`); return writeJson(response, 200, effective), true; }
         if (method === "GET" && parts.length === 3) return writeJson(response, 200, options.settings.get()), true;
-        if (method === "PATCH" && parts.length === 3) { const expected = request.headers["if-match"]?.toString().match(/settings-(\d+)/)?.[1]; const patched = options.settings.patch(await bodyJson(request), Date.now(), expected === undefined ? undefined : Number(expected)) as Row; response.setHeader("etag", `\"settings-${patched.version}\"`); return writeJson(response, 200, { ...(patched.values as Row), ...patched }), true; }
+        if (method === "PATCH" && parts.length === 3) {
+          const input = await bodyJson(request); const gatedKeys = ["orchestration_gateway_enabled", "opencode_session_adapter_enabled", "codex_managed_host_enabled", "quota_recovery_engine_enabled", "auto_resume_default_enabled", "auto_resume_emergency_stop", "native_agent_tree_observation_enabled", "recovery_pool_max_concurrency"];
+          const isGatedWrite = Object.keys(input).some((key) => gatedKeys.includes(key)); const expected = request.headers["if-match"]?.toString().match(/settings-(\d+)/)?.[1];
+          if (isGatedWrite && expected === undefined) throw new Error("MISSING_IF_MATCH");
+          const key = request.headers["idempotency-key"]?.toString(); if (isGatedWrite && !key) throw new Error("MISSING_IDEMPOTENCY_KEY");
+          if (isGatedWrite && key) { const prior = options.db.one<Row>("SELECT * FROM operation_receipts WHERE scope = 'settings:resumable' AND operation_key = ?", key); if (prior) { if (prior.request_hash !== safeHash(input)) throw new Error("IDEMPOTENCY_CONFLICT"); response.setHeader("etag", `\"settings-${json(prior.response_json).version}\"`); return writeJson(response, Number(prior.status_code), json(prior.response_json)), true; } }
+          const patched = options.settings.patch(input, Date.now(), expected === undefined ? undefined : Number(expected), Object.hasOwn(input, "auto_resume_emergency_stop") ? stepUpActor(request) : actor(request)) as Row;
+          const result = { ...(patched.values as Row), ...patched }; response.setHeader("etag", `\"settings-${patched.version}\"`);
+          if (isGatedWrite && key) options.db.run("INSERT INTO operation_receipts(scope, operation_key, request_hash, status_code, response_json, created_at) VALUES ('settings:resumable', ?, ?, 200, ?, ?)", key, safeHash(input), JSON.stringify(result), Date.now());
+          return writeJson(response, 200, result), true;
+        }
       }
       if (parts[2] === "dashboard" && method === "GET") {
         const since = Date.now() - 86_400_000;
@@ -513,9 +634,38 @@ export function createControlPlaneServer(options: Options) {
       return writeJson(response, 404, errorBody("NOT_FOUND", "API route not found")), true;
     } catch (error) {
       const rawCode = error instanceof Error ? error.message : "INTERNAL_ERROR";
-      const code = rawCode.startsWith("UNKNOWN_FIELD:") ? "UNKNOWN_FIELD" : rawCode.startsWith("INVALID_FIELD:") ? "INVALID_FIELD" : rawCode;
+      const code = rawCode.startsWith("UNKNOWN_FIELD:") ? "UNKNOWN_FIELD" : rawCode.startsWith("INVALID_FIELD:") ? "INVALID_FIELD" : rawCode.startsWith("ORCHESTRATION_CONTRACT_INVALID:") ? "ORCHESTRATION_CONTRACT_INVALID" : rawCode.startsWith("ORCHESTRATION_TASK_INVALID:") ? "ORCHESTRATION_TASK_INVALID" : rawCode;
       const details = error && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
-      const status = ["TASK_NOT_FOUND", "WORKER_NOT_FOUND", "REGISTRATION_NOT_FOUND", "ARTIFACT_NOT_FOUND", "CAPABILITY_NOT_FOUND", "PREFERENCE_NOT_FOUND", "ONBOARDING_NOT_FOUND", "MODEL_TEST_NOT_FOUND", "DELIVERY_NOT_FOUND", "OFFICE_NOT_FOUND", "ROLE_NOT_FOUND", "MISSION_NOT_FOUND", "COMMAND_NOT_FOUND", "OPERATION_NOT_FOUND", "SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND", "ROUTINE_NOT_FOUND", "GOAL_NOT_FOUND", "MILESTONE_NOT_FOUND", "ATTENTION_NOT_FOUND", "BROWSER_SESSION_NOT_FOUND", "TEACHING_SESSION_NOT_FOUND", "BUDGET_ACCOUNT_NOT_FOUND", "BUDGET_RESERVATION_NOT_FOUND", "COMPUTER_SESSION_NOT_FOUND", "OBSERVATION_NOT_FOUND", "DISPATCH_PROPOSAL_NOT_FOUND", "DISPATCH_REQUEST_NOT_FOUND", "DISPATCH_RULE_NOT_FOUND", "DISPATCH_RELEASE_NOT_FOUND", "DISPATCH_SHADOW_NOT_FOUND", "DISPATCH_OBSERVATION_NOT_FOUND"] .includes(code) ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" || code === "STEP_UP_REQUIRED" || code === "INTERNAL_ROUTE_FORBIDDEN" || code === "SESSION_ACCESS_DENIED" ? 403 : ["INVALID_TASK_STATE", "INVALID_REGISTRATION_STATE", "INVALID_ATTENTION_STATE", "WORKER_BUSY", "REGISTRATION_ALREADY_FINALIZED", "IDEMPOTENCY_CONFLICT", "TASK_CHANGED", "CURSOR_STALE", "SETTING_OVERRIDDEN", "WORKER_PREFERENCES_CHANGED", "SETTINGS_CHANGED", "PREFERENCE_CHANGED", "INPUT_ARTIFACT_EXPIRED", "RECEIPT_CONFLICT", "TEMPLATE_CHANGED", "WORKSPACE_MISSING", "ARTIFACT_CONTENT_CONFLICT", "RESULT_ARTIFACT_NOT_READY", "ARTIFACT_MISSING", "REVISION_CONFLICT", "PLAN_ALREADY_COMMITTED", "RESULT_CONFLICT", "SEAT_ALREADY_ASSIGNED", "ADMISSION_DEFERRED", "STALE_EXECUTION", "STALE_DECISION", "LIMIT_WAIT_OWNER", "FINALIZATION_INCOMPLETE", "RECOVERY_RECONCILIATION_REQUIRED", "RECOVERY_MODE", "COMMAND_RETRY_NOT_AVAILABLE", "MISSION_TERMINAL", "MISSION_NOT_TERMINAL", "SIDE_EFFECT_IN_PROGRESS", "OPERATION_NOT_IMPLEMENTED", "SKILL_NOT_READY", "VALIDATION_INCOMPLETE", "BINDING_REVISION_STALE", "GOAL_NOT_ACTIVE", "BUDGET_EXHAUSTED", "EXECUTION_UNKNOWN", "FEATURE_DISABLED", "CAPABILITY_UNAVAILABLE", "BUDGET_RESERVATION_NOT_FOUND", "INVALID_GOAL_STATE", "MILESTONES_INCOMPLETE", "DESKTOP_BUSY", "SESSION_CHANGED", "DESKTOP_CHANGED", "SESSION_NOT_ACTIVE", "SESSION_SCOPE_DENIED", "APP_SCOPE_DENIED", "COMPUTER_CAPABILITY_UNAVAILABLE", "CAPTURE_SCOPE_MISMATCH", "CAPTURE_SCOPE_DENIED", "OBSERVATION_STALE", "OBSERVATION_REQUIRED", "OBSERVATION_NOT_FOUND", "INVALID_OPERATION_SCOPE", "OPERATION_SEQUENCE_CONFLICT", "OPERATION_ALREADY_EXISTS", "INVALID_SESSION_STATE", "INVALID_SESSION_ACTION", "STOP_UNCONFIRMED", "SESSION_EXPIRED", "WINDOW_REF_INVALID", "DRIVER_ENDPOINT_REQUIRED", "DRIVER_SCHEMA_UNSUPPORTED", "APPROVAL_REQUIRED", "CUA_DIRECTION_REQUIRED", "CUA_KEYS_REQUIRED", "COMPUTER_OBSERVATION_LIMIT", "DISPATCH_REQUEST_CONFLICT", "DISPATCH_ACTION_CONFLICT", "DISPATCH_COMMIT_CONFLICT", "DISPATCH_PROPOSAL_EXPIRED", "DISPATCH_PROPOSAL_RELEASED", "DISPATCH_PROPOSAL_NOT_COMMITTABLE", "DISPATCH_PROPOSAL_REVOKED", "DISPATCH_ALREADY_ACCEPTED", "DISPATCH_PROPOSAL_NOT_RESOLVABLE", "DISPATCH_SESSION_CHANGED", "DISPATCH_RULE_REVISION_CONFLICT", "DISPATCH_RULE_STATE_CHANGED", "DISPATCH_RULE_INVALID_TRANSITION", "DISPATCH_RELEASE_CHANGED", "DISPATCH_OPERATION_UNAVAILABLE", "DISPATCH_RULE_RISK_UNSUPPORTED", "DISPATCH_SUBJECT_MISMATCH", "DISPATCH_OBSERVATION_CONFLICT", "DISPATCH_SHADOW_CONFLICT", "DISPATCH_SHADOW_ACTION_CONFLICT", "DISPATCH_SHADOW_RULE_NOT_ACTIVE", "DISPATCH_SHADOW_COMPARISON_CONFLICT", "DISPATCH_PROMOTION_RULE_NOT_SHADOW", "DISPATCH_PROMOTION_EVALUATION_UNAVAILABLE"].includes(code) || code.startsWith("OPERATION_UNAVAILABLE:") ? 409 : ["TASK_ARCHIVED", "ARTIFACT_EXPIRED", "OFFICE_DISABLED", "BRAIN_V2_DISABLED"].includes(code) ? ["OFFICE_DISABLED", "BRAIN_V2_DISABLED"].includes(code) ? 503 : 410 : code === "PREVIEW_UNSUPPORTED" ? 415 : code === "REQUEST_TOO_LARGE" || code === "DISPATCH_REQUEST_TOO_LARGE" ? 413 : code === "TARGET_UNKNOWN" || code === "TEST_PARAMETER_UNSUPPORTED" ? 422 : code.startsWith("INVALID_") || code.startsWith("UNKNOWN_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code === "MISSING_IDEMPOTENCY_KEY" || code === "INVALID_COMMAND_FAILURE" || code.startsWith("MISSING_OPERATION_PARAMETER") || code === "MISSING_SOURCE_INTENT_KEY" || code === "MISSING_SOURCE_INTENT_REF" || code === "CONTRACT_UPGRADE_REQUIRED" || code === "MCP_METHOD_NOT_FOUND" || code === "REVISION_REQUIRED" || code === "BRAIN_V2_REQUIRED" || code.includes("must be") || code === "WORKSPACE_CONFLICT" || code === "INVALID_COMMAND" || code === "TASK_TYPE_CAPABILITY_MISMATCH" || code === "WORKSPACE_REQUIRED_FOR_CODEX" || code === "WORKSPACE_REQUIRED_FOR_OPENCODE" || code.startsWith("INVALID_DISPATCH_") || ["DISPATCH_OBSERVATION_SOURCE_INVALID", "DISPATCH_OBSERVATION_NOT_SINGLE_ACTION", "DISPATCH_LABEL_SOURCE_INVALID", "DISPATCH_LABEL_EVIDENCE_REQUIRED", "DISPATCH_EVALUATION_THRESHOLD_INVALID", "DISPATCH_EVALUATION_EVIDENCE_INVALID", "DISPATCH_DEGRADATION_WINDOW_INVALID"].includes(code) ? 400 : 500;
+      const orchestrationStatuses: Record<string, number> = {
+        WORK_NOT_FOUND: 404,
+        ORCHESTRATION_ACTOR_REQUIRED: 401,
+        WORK_OWNER_CONFLICT: 403,
+        ORCHESTRATION_DISABLED: 503,
+        ORCHESTRATION_UNAVAILABLE: 503,
+        WORK_REVISION_CONFLICT: 409,
+        WORK_REFERENCE_CONFLICT: 409,
+        WORK_TASK_OUT_OF_SCOPE: 409,
+        WORK_NOT_ACTIVE: 409,
+        WORK_PAUSED: 409,
+        WORK_TASK_NOT_FOUND: 404,
+        WORK_ACCEPTANCE_TASKS_INCOMPLETE: 409,
+        SESSION_CONTROL_UNSUPPORTED: 422,
+        INVALID_WORK_CONTROL: 400,
+        INVALID_ACCEPTANCE_DECISION: 400,
+        INVALID_ACCEPTANCE_PR_REF: 400,
+        INVALID_ACCEPTANCE_EVIDENCE_REFS: 400,
+        INVALID_ACCEPTED_CRITERIA: 400,
+        ACCEPTANCE_EVIDENCE_REQUIRED: 400,
+        WORK_ACCEPTANCE_CRITERIA_INCOMPLETE: 409,
+        INVALID_WORK_EVENT_CURSOR: 400,
+        MISSING_IDEMPOTENCY_KEY: 400,
+        MISSING_IF_MATCH: 400,
+        ORCHESTRATION_CONTRACT_INVALID: 400,
+        ORCHESTRATION_CONTRACT_VERSION_UNSUPPORTED: 422,
+        ORCHESTRATION_TASK_INVALID: 400,
+      };
+      if (orchestrationStatuses[code]) return writeJson(response, orchestrationStatuses[code], { ...errorBody(code, code, details), requestId: requestId(request) }), true;
+      const status = ["TASK_NOT_FOUND", "WORKER_NOT_FOUND", "REGISTRATION_NOT_FOUND", "ARTIFACT_NOT_FOUND", "CAPABILITY_NOT_FOUND", "PREFERENCE_NOT_FOUND", "ONBOARDING_NOT_FOUND", "MODEL_TEST_NOT_FOUND", "DELIVERY_NOT_FOUND", "OFFICE_NOT_FOUND", "ROLE_NOT_FOUND", "MISSION_NOT_FOUND", "COMMAND_NOT_FOUND", "OPERATION_NOT_FOUND", "SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND", "ROUTINE_NOT_FOUND", "GOAL_NOT_FOUND", "MILESTONE_NOT_FOUND", "ATTENTION_NOT_FOUND", "BROWSER_SESSION_NOT_FOUND", "TEACHING_SESSION_NOT_FOUND", "BUDGET_ACCOUNT_NOT_FOUND", "BUDGET_RESERVATION_NOT_FOUND", "COMPUTER_SESSION_NOT_FOUND", "OBSERVATION_NOT_FOUND", "DISPATCH_PROPOSAL_NOT_FOUND", "DISPATCH_REQUEST_NOT_FOUND", "DISPATCH_RULE_NOT_FOUND", "DISPATCH_RELEASE_NOT_FOUND", "DISPATCH_SHADOW_NOT_FOUND", "DISPATCH_OBSERVATION_NOT_FOUND", "QUOTA_POOL_NOT_FOUND", "RECOVERY_INTENT_NOT_FOUND"] .includes(code) ? 404 : code === "INVALID_WORKER_TOKEN" ? 401 : code === "REGISTRATION_DISABLED" || code === "STEP_UP_REQUIRED" || code === "INTERNAL_ROUTE_FORBIDDEN" || code === "SESSION_ACCESS_DENIED" ? 403 : ["INVALID_TASK_STATE", "INVALID_REGISTRATION_STATE", "INVALID_ATTENTION_STATE", "WORKER_BUSY", "REGISTRATION_ALREADY_FINALIZED", "IDEMPOTENCY_CONFLICT", "TASK_CHANGED", "CURSOR_STALE", "SETTING_OVERRIDDEN", "WORKER_PREFERENCES_CHANGED", "SETTINGS_CHANGED", "PREFERENCE_CHANGED", "INPUT_ARTIFACT_EXPIRED", "RECEIPT_CONFLICT", "TEMPLATE_CHANGED", "WORKSPACE_MISSING", "ARTIFACT_CONTENT_CONFLICT", "RESULT_ARTIFACT_NOT_READY", "ARTIFACT_MISSING", "REVISION_CONFLICT", "PLAN_ALREADY_COMMITTED", "RESULT_CONFLICT", "SEAT_ALREADY_ASSIGNED", "ADMISSION_DEFERRED", "STALE_EXECUTION", "STALE_DECISION", "LIMIT_WAIT_OWNER", "FINALIZATION_INCOMPLETE", "RECOVERY_RECONCILIATION_REQUIRED", "RECOVERY_MODE", "COMMAND_RETRY_NOT_AVAILABLE", "MISSION_TERMINAL", "MISSION_NOT_TERMINAL", "SIDE_EFFECT_IN_PROGRESS", "OPERATION_NOT_IMPLEMENTED", "SKILL_NOT_READY", "VALIDATION_INCOMPLETE", "BINDING_REVISION_STALE", "GOAL_NOT_ACTIVE", "BUDGET_EXHAUSTED", "EXECUTION_UNKNOWN", "FEATURE_DISABLED", "CAPABILITY_UNAVAILABLE", "BUDGET_RESERVATION_NOT_FOUND", "INVALID_GOAL_STATE", "MILESTONES_INCOMPLETE", "DESKTOP_BUSY", "SESSION_CHANGED", "DESKTOP_CHANGED", "SESSION_NOT_ACTIVE", "SESSION_SCOPE_DENIED", "APP_SCOPE_DENIED", "COMPUTER_CAPABILITY_UNAVAILABLE", "CAPTURE_SCOPE_MISMATCH", "CAPTURE_SCOPE_DENIED", "OBSERVATION_STALE", "OBSERVATION_REQUIRED", "OBSERVATION_NOT_FOUND", "INVALID_OPERATION_SCOPE", "OPERATION_SEQUENCE_CONFLICT", "OPERATION_ALREADY_EXISTS", "INVALID_SESSION_STATE", "INVALID_SESSION_ACTION", "STOP_UNCONFIRMED", "SESSION_EXPIRED", "WINDOW_REF_INVALID", "DRIVER_ENDPOINT_REQUIRED", "DRIVER_SCHEMA_UNSUPPORTED", "APPROVAL_REQUIRED", "CUA_DIRECTION_REQUIRED", "CUA_KEYS_REQUIRED", "COMPUTER_OBSERVATION_LIMIT", "DISPATCH_REQUEST_CONFLICT", "DISPATCH_ACTION_CONFLICT", "DISPATCH_COMMIT_CONFLICT", "DISPATCH_PROPOSAL_EXPIRED", "DISPATCH_PROPOSAL_RELEASED", "DISPATCH_PROPOSAL_NOT_COMMITTABLE", "DISPATCH_PROPOSAL_REVOKED", "DISPATCH_ALREADY_ACCEPTED", "DISPATCH_PROPOSAL_NOT_RESOLVABLE", "DISPATCH_SESSION_CHANGED", "DISPATCH_RULE_REVISION_CONFLICT", "DISPATCH_RULE_STATE_CHANGED", "DISPATCH_RULE_INVALID_TRANSITION", "DISPATCH_RELEASE_CHANGED", "DISPATCH_OPERATION_UNAVAILABLE", "DISPATCH_RULE_RISK_UNSUPPORTED", "DISPATCH_SUBJECT_MISMATCH", "DISPATCH_OBSERVATION_CONFLICT", "DISPATCH_SHADOW_CONFLICT", "DISPATCH_SHADOW_ACTION_CONFLICT", "DISPATCH_SHADOW_RULE_NOT_ACTIVE", "DISPATCH_SHADOW_COMPARISON_CONFLICT", "DISPATCH_PROMOTION_RULE_NOT_SHADOW", "DISPATCH_PROMOTION_EVALUATION_UNAVAILABLE"].includes(code) || code.startsWith("OPERATION_UNAVAILABLE:") ? 409 : ["TASK_ARCHIVED", "ARTIFACT_EXPIRED", "OFFICE_DISABLED", "BRAIN_V2_DISABLED"].includes(code) ? ["OFFICE_DISABLED", "BRAIN_V2_DISABLED"].includes(code) ? 503 : 410 : code === "PREVIEW_UNSUPPORTED" ? 415 : code === "REQUEST_TOO_LARGE" || code === "DISPATCH_REQUEST_TOO_LARGE" ? 413 : code === "TARGET_UNKNOWN" || code === "TEST_PARAMETER_UNSUPPORTED" ? 422 : code.startsWith("INVALID_") || code.startsWith("UNKNOWN_") || code === "REGISTRATION_SECRET_TOO_SHORT" || code === "INVALID_JSON_BODY" || code === "MISSING_IDEMPOTENCY_KEY" || code === "INVALID_COMMAND_FAILURE" || code.startsWith("MISSING_OPERATION_PARAMETER") || code === "MISSING_SOURCE_INTENT_KEY" || code === "MISSING_SOURCE_INTENT_REF" || code === "CONTRACT_UPGRADE_REQUIRED" || code === "MCP_METHOD_NOT_FOUND" || code === "REVISION_REQUIRED" || code === "BRAIN_V2_REQUIRED" || code.includes("must be") || code === "WORKSPACE_CONFLICT" || code === "INVALID_COMMAND" || code === "TASK_TYPE_CAPABILITY_MISMATCH" || code === "WORKSPACE_REQUIRED_FOR_CODEX" || code === "WORKSPACE_REQUIRED_FOR_OPENCODE" || code.startsWith("INVALID_DISPATCH_") || ["DISPATCH_OBSERVATION_SOURCE_INVALID", "DISPATCH_OBSERVATION_NOT_SINGLE_ACTION", "DISPATCH_LABEL_SOURCE_INVALID", "DISPATCH_LABEL_EVIDENCE_REQUIRED", "DISPATCH_EVALUATION_THRESHOLD_INVALID", "DISPATCH_EVALUATION_EVIDENCE_INVALID", "DISPATCH_DEGRADATION_WINDOW_INVALID"].includes(code) ? 400 : 500;
       return writeJson(response, status, { ...errorBody(code, code, details), requestId: requestId(request) }), true;
     }
   };

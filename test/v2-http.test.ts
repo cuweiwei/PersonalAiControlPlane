@@ -9,6 +9,8 @@ import { ArtifactStorage } from "../apps/control-plane/src/artifacts/artifact-st
 import { TaskService } from "../apps/control-plane/src/tasks/task-service.ts";
 import { WorkerService } from "../apps/control-plane/src/workers/worker-service.ts";
 import { SettingsService } from "../apps/control-plane/src/settings/settings-service.ts";
+import { RecoveryService } from "../apps/control-plane/src/recovery/recovery-service.ts";
+import { QuotaPoolService } from "../apps/control-plane/src/recovery/quota-pool-service.ts";
 import { HealthMonitor } from "../apps/control-plane/src/systems/health-monitor.ts";
 import { createControlPlaneServer } from "../apps/control-plane/src/server.ts";
 import type { WorkerCoordinator } from "../apps/control-plane/src/workers/worker-channel.ts";
@@ -21,6 +23,8 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
   const workers = new WorkerService(db, events);
   const artifacts = new ArtifactStorage(directory);
   const settings = new SettingsService(db);
+  const recovery = new RecoveryService(db);
+  const quotaPools = new QuotaPoolService(db);
   const health = new HealthMonitor(db, events);
   health.seed();
   const coordinator = {
@@ -29,7 +33,7 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     isConnected: () => true,
     offer: () => true,
   } as unknown as WorkerCoordinator;
-  const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, assetRoot: directory });
+  const server = createControlPlaneServer({ db, tasks, workers, coordinator, artifacts, settings, health, events, recovery, quotaPools, assetRoot: directory });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.equal(typeof address, "object");
@@ -51,6 +55,16 @@ test("unified v2 HTTP API covers enrollment, tasks, artifacts, settings, and hea
     const approved = await jsonRequest(`/api/v2/workers/registrations/${registrationId}/approve`, { method: "POST" });
     assert.equal(approved.response.status, 200);
     const workerId = approved.body.workerId as string;
+    const quotaPool = quotaPools.createPool({ provider: "openai" }, "test-owner") as Record<string, any>;
+    const quotaPoolListing = await jsonRequest("/api/v2/quota-pools");
+    assert.equal(quotaPoolListing.body.items.some((item: Record<string, any>) => item.poolId === quotaPool.id), true);
+    assert.equal(JSON.stringify(quotaPoolListing.body).includes("account_fingerprint"), false);
+    const quotaPoolDetail = await jsonRequest(`/api/v2/quota-pools/${quotaPool.id}`);
+    assert.equal(quotaPoolDetail.body.readiness.state, "UNKNOWN");
+    const recoveryListing = await jsonRequest("/api/v2/recovery/intents");
+    assert.deepEqual(recoveryListing.body.items, []);
+    const browserRecoveryRead = await fetch(`${origin}/api/v2/recovery/intents`, { headers: { origin } });
+    assert.equal(browserRecoveryRead.status, 403);
     const polled = await fetch(`${origin}/api/v2/worker/registration/${registrationId}`, { headers: { "x-registration-secret": secret } });
     const enrollment = await polled.json() as Record<string, any>;
     assert.equal(enrollment.status, "approved");

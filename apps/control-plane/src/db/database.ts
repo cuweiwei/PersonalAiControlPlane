@@ -1,8 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { officeMigrations } from "./office-migrations.ts";
+import { canonicalJson, uuidv7 } from "../../../../packages/contracts/src/index.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -639,6 +640,7 @@ export class ControlPlaneDatabase {
       ensureColumn("computer_sessions", "persistent", "INTEGER NOT NULL DEFAULT 0");
       ensureColumn("computer_sessions", "authorization_mode", "TEXT NOT NULL DEFAULT 'SESSION_APPROVAL'");
       ensureColumn("computer_sessions", "deleted_at", "INTEGER");
+      ensureColumn("worker_preferences", "auto_resume_override", "INTEGER");
       this.connection.exec("UPDATE computer_sessions SET persistent = 1, max_actions = 0 WHERE state IN ('ACTIVE', 'PAUSED') AND persistent = 0");
       this.connection.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_mission_execution ON tasks(mission_execution_id) WHERE mission_execution_id IS NOT NULL");
       this.connection.exec(`
@@ -695,6 +697,283 @@ export class ControlPlaneDatabase {
       if (!workerProjection) this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (2, ?, ?)").run("worker-management-projection", Date.now());
       for (const [version, checksum] of [[3, "task-runs-and-receipts"], [4, "artifact-callback-projection"], [5, "worker-preferences-and-workspaces"], [6, "model-tests-and-preferences"]] as const) {
         this.connection.prepare("INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)").run(version, checksum, Date.now());
+      }
+      const resumableMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 16").get() as { checksum?: string } | undefined;
+      if (resumableMigration && resumableMigration.checksum !== "multi-orchestrator-resumable-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:16");
+      if (!resumableMigration) {
+        this.connection.exec(`
+          CREATE TRIGGER IF NOT EXISTS worker_preferences_auto_resume_insert
+          BEFORE INSERT ON worker_preferences
+          WHEN NEW.auto_resume_override IS NOT NULL AND NEW.auto_resume_override NOT IN (0, 1)
+          BEGIN SELECT RAISE(ABORT, 'INVALID_AUTO_RESUME_OVERRIDE'); END;
+          CREATE TRIGGER IF NOT EXISTS worker_preferences_auto_resume_update
+          BEFORE UPDATE OF auto_resume_override ON worker_preferences
+          WHEN NEW.auto_resume_override IS NOT NULL AND NEW.auto_resume_override NOT IN (0, 1)
+          BEGIN SELECT RAISE(ABORT, 'INVALID_AUTO_RESUME_OVERRIDE'); END;
+
+          CREATE TABLE IF NOT EXISTS orchestration_works (
+            id TEXT PRIMARY KEY,
+            owner_kind TEXT NOT NULL CHECK(owner_kind IN ('HERMES','CODEX')),
+            owner_principal TEXT NOT NULL,
+            origin_ref TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            repository_ref TEXT,
+            project_ref TEXT,
+            design_authority TEXT NOT NULL CHECK(design_authority IN ('MAC_LED','WINDOWS_FEATURE_OWNER')),
+            implementation_owner TEXT NOT NULL CHECK(implementation_owner IN ('WINDOWS','MAC_LOCAL','DYNAMIC')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            review_state TEXT NOT NULL DEFAULT 'PENDING',
+            contract_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            completed_at INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_orchestration_works_owner ON orchestration_works(owner_principal,status);
+          CREATE TABLE IF NOT EXISTS orchestration_work_tasks (
+            work_id TEXT NOT NULL REFERENCES orchestration_works(id),
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            role TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(work_id, task_id),
+            UNIQUE(task_id)
+          );
+          CREATE TABLE IF NOT EXISTS agent_session_bindings (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            attempt_id TEXT NOT NULL REFERENCES task_attempts(id),
+            worker_id TEXT NOT NULL REFERENCES workers(id),
+            runtime TEXT NOT NULL CHECK(runtime IN ('opencode','codex')),
+            native_session_id TEXT NOT NULL,
+            parent_native_session_id TEXT,
+            workspace_id TEXT NOT NULL,
+            workspace_fence_epoch INTEGER NOT NULL,
+            provider_id TEXT,
+            model_id TEXT,
+            usage_pool_id TEXT,
+            branch TEXT,
+            baseline_sha TEXT,
+            last_head_sha TEXT,
+            runtime_state TEXT NOT NULL,
+            checkpoint_artifact_id TEXT,
+            observed_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(runtime, worker_id, native_session_id),
+            UNIQUE(attempt_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_session_bindings(task_id);
+          CREATE INDEX IF NOT EXISTS idx_agent_sessions_pool ON agent_session_bindings(usage_pool_id,runtime_state);
+          CREATE TABLE IF NOT EXISTS quota_pools (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            account_fingerprint TEXT,
+            alias_masked TEXT,
+            pool_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            next_recheck_at INTEGER,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS quota_pool_bindings (
+            usage_pool_id TEXT NOT NULL REFERENCES quota_pools(id),
+            worker_id TEXT NOT NULL REFERENCES workers(id),
+            runtime TEXT NOT NULL,
+            evidence_state TEXT NOT NULL,
+            verified_at INTEGER,
+            PRIMARY KEY(worker_id,runtime)
+          );
+          CREATE TABLE IF NOT EXISTS quota_observations (
+            id TEXT PRIMARY KEY,
+            usage_pool_id TEXT NOT NULL REFERENCES quota_pools(id),
+            bucket TEXT NOT NULL CHECK(bucket IN ('FIVE_HOUR','WEEKLY','OTHER','UNKNOWN')),
+            exhausted INTEGER,
+            used_percent REAL,
+            resets_at INTEGER,
+            observed_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            evidence_hash TEXT,
+            created_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_quota_obs_pool_time ON quota_observations(usage_pool_id,observed_at DESC);
+          CREATE TABLE IF NOT EXISTS task_execution_conditions (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+            condition TEXT NOT NULL,
+            reason_code TEXT,
+            since INTEGER NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            next_action_at INTEGER
+          );
+          CREATE TABLE IF NOT EXISTS recovery_intents (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            session_binding_id TEXT NOT NULL REFERENCES agent_session_bindings(id),
+            blocker_generation INTEGER NOT NULL,
+            resume_generation INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL,
+            blocker_kind TEXT NOT NULL,
+            policy_version INTEGER NOT NULL,
+            next_probe_at INTEGER,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_until INTEGER,
+            last_error_code TEXT,
+            last_native_command_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(session_binding_id,blocker_generation,resume_generation)
+          );
+          CREATE INDEX IF NOT EXISTS idx_recovery_due ON recovery_intents(state,next_probe_at,lease_until);
+          CREATE TABLE IF NOT EXISTS recovery_events (
+            id TEXT PRIMARY KEY,
+            intent_id TEXT NOT NULL REFERENCES recovery_intents(id),
+            event_type TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS codex_agent_nodes (
+            id TEXT PRIMARY KEY,
+            work_id TEXT NOT NULL REFERENCES orchestration_works(id),
+            host_worker_id TEXT NOT NULL REFERENCES workers(id),
+            native_thread_id TEXT NOT NULL,
+            parent_node_id TEXT REFERENCES codex_agent_nodes(id),
+            is_root INTEGER NOT NULL DEFAULT 0,
+            host_mode TEXT NOT NULL CHECK(host_mode IN ('MANAGED','DESKTOP_OBSERVED')),
+            persistence_level TEXT NOT NULL,
+            turn_state TEXT NOT NULL,
+            ownership_state TEXT NOT NULL,
+            checkpoint_artifact_id TEXT,
+            observation_confidence TEXT NOT NULL,
+            last_observed_at INTEGER NOT NULL,
+            UNIQUE (host_worker_id, native_thread_id)
+          );
+          CREATE TABLE IF NOT EXISTS work_review_handoffs (
+            id TEXT PRIMARY KEY,
+            work_id TEXT NOT NULL REFERENCES orchestration_works(id),
+            task_id TEXT REFERENCES tasks(id),
+            pr_ref TEXT,
+            ci_evidence_json TEXT,
+            acceptance_json TEXT,
+            review_state TEXT NOT NULL DEFAULT 'PENDING',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS native_session_journal (
+            task_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            runtime TEXT NOT NULL,
+            native_session_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            fence_epoch INTEGER NOT NULL,
+            branch TEXT,
+            baseline_sha TEXT,
+            last_head_sha TEXT,
+            checkpoint_json TEXT,
+            state TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(attempt_id)
+          );
+          CREATE TABLE IF NOT EXISTS native_resume_operations (
+            operation_key TEXT PRIMARY KEY,
+            attempt_id TEXT NOT NULL,
+            native_session_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            native_message_id TEXT,
+            request_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+        `);
+        const newSettings: Array<[string, unknown]> = [
+          ["orchestration_gateway_enabled", false], ["opencode_session_adapter_enabled", false],
+          ["codex_managed_host_enabled", false], ["quota_recovery_engine_enabled", false],
+          ["auto_resume_default_enabled", true], ["auto_resume_emergency_stop", false],
+          ["native_agent_tree_observation_enabled", false], ["recovery_pool_max_concurrency", 1],
+        ];
+        const inserted: string[] = [];
+        const insertSetting = this.connection.prepare("INSERT OR IGNORE INTO settings(key, value_json, updated_at) VALUES (?, ?, ?)");
+        for (const [key, value] of newSettings) if (Number(insertSetting.run(key, JSON.stringify(value), Date.now()).changes) > 0) inserted.push(key);
+        if (inserted.length > 0) {
+          const previousVersion = Number(JSON.parse(String((this.connection.prepare("SELECT value_json FROM runtime_metadata WHERE key = 'settings_version'").get() as { value_json?: string } | undefined)?.value_json ?? "0")));
+          const version = previousVersion + 1;
+          this.connection.prepare("INSERT INTO runtime_metadata(key, value_json) VALUES ('settings_version', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json").run(JSON.stringify(version));
+          const actor = "system"; const action = "settings.resumable_defaults.migrated"; const workerId = null;
+          const payload = { keys: inserted, settingsVersion: version }; const previousHash = String((this.connection.prepare("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1").get() as { event_hash?: string } | undefined)?.event_hash ?? ""); const createdAt = Date.now();
+          const eventHash = createHash("sha256").update(canonicalJson({ actor, action, workerId, payload, previousHash, createdAt }), "utf8").digest("hex");
+          this.connection.prepare("INSERT INTO audit_events(event_uuid, actor, action, worker_id, payload_json, previous_hash, event_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(uuidv7(createdAt), actor, action, workerId, JSON.stringify(payload), previousHash, eventHash, createdAt);
+        }
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (16, ?, ?)").run("multi-orchestrator-resumable-v1", Date.now());
+      }
+      const quotaPoolMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 17").get() as { checksum?: string } | undefined;
+      if (quotaPoolMigration && quotaPoolMigration.checksum !== "quota-pool-identity-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:17");
+      if (!quotaPoolMigration) {
+        ensureColumn("quota_pools", "identity_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
+        this.connection.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_pools_provider_fingerprint
+            ON quota_pools(provider, account_fingerprint) WHERE account_fingerprint IS NOT NULL;
+          CREATE TRIGGER IF NOT EXISTS quota_pools_identity_insert
+          BEFORE INSERT ON quota_pools
+          WHEN NEW.identity_state NOT IN ('UNKNOWN','OWNER_CONFIRMED')
+            OR (NEW.identity_state = 'OWNER_CONFIRMED' AND NEW.account_fingerprint IS NULL)
+            OR (NEW.account_fingerprint IS NOT NULL AND (
+              length(NEW.account_fingerprint) != 71
+              OR substr(NEW.account_fingerprint, 1, 7) != 'sha256:'
+              OR substr(NEW.account_fingerprint, 8) GLOB '*[^0-9a-f]*'
+            ))
+          BEGIN SELECT RAISE(ABORT, 'INVALID_QUOTA_POOL_IDENTITY'); END;
+          CREATE TRIGGER IF NOT EXISTS quota_pools_identity_update
+          BEFORE UPDATE OF identity_state, account_fingerprint ON quota_pools
+          WHEN NEW.identity_state NOT IN ('UNKNOWN','OWNER_CONFIRMED')
+            OR (NEW.identity_state = 'OWNER_CONFIRMED' AND NEW.account_fingerprint IS NULL)
+            OR (NEW.account_fingerprint IS NOT NULL AND (
+              length(NEW.account_fingerprint) != 71
+              OR substr(NEW.account_fingerprint, 1, 7) != 'sha256:'
+              OR substr(NEW.account_fingerprint, 8) GLOB '*[^0-9a-f]*'
+            ))
+          BEGIN SELECT RAISE(ABORT, 'INVALID_QUOTA_POOL_IDENTITY'); END;
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (17, ?, ?)").run("quota-pool-identity-v1", Date.now());
+      }
+      const recoveryMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 18").get() as { checksum?: string } | undefined;
+      if (recoveryMigration && recoveryMigration.checksum !== "recovery-resume-policy-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:18");
+      if (!recoveryMigration) {
+        ensureColumn("recovery_intents", "resume_policy", "TEXT NOT NULL DEFAULT 'INHERIT_WORKER'");
+        this.connection.exec(`
+          CREATE TRIGGER IF NOT EXISTS recovery_intents_resume_policy_insert
+          BEFORE INSERT ON recovery_intents
+          WHEN NEW.resume_policy NOT IN ('INHERIT_WORKER','MANUAL_ONLY')
+          BEGIN SELECT RAISE(ABORT, 'INVALID_RECOVERY_RESUME_POLICY'); END;
+          CREATE TRIGGER IF NOT EXISTS recovery_intents_resume_policy_update
+          BEFORE UPDATE OF resume_policy ON recovery_intents
+          WHEN NEW.resume_policy NOT IN ('INHERIT_WORKER','MANUAL_ONLY')
+          BEGIN SELECT RAISE(ABORT, 'INVALID_RECOVERY_RESUME_POLICY'); END;
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (18, ?, ?)").run("recovery-resume-policy-v1", Date.now());
+      }
+      const recoveryIdempotencyMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 19").get() as { checksum?: string } | undefined;
+      if (recoveryIdempotencyMigration && recoveryIdempotencyMigration.checksum !== "recovery-report-idempotency-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:19");
+      if (!recoveryIdempotencyMigration) {
+        ensureColumn("recovery_intents", "request_hash", "TEXT NOT NULL DEFAULT ''");
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (19, ?, ?)").run("recovery-report-idempotency-v1", Date.now());
+      }
+      const orchestrationEventsMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 20").get() as { checksum?: string } | undefined;
+      if (orchestrationEventsMigration && orchestrationEventsMigration.checksum !== "orchestration-work-events-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:20");
+      if (!orchestrationEventsMigration) {
+        this.connection.exec(`
+          CREATE TABLE IF NOT EXISTS orchestration_work_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            work_id TEXT NOT NULL REFERENCES orchestration_works(id),
+            revision INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_orchestration_work_events_cursor
+            ON orchestration_work_events(work_id, seq);
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (20, ?, ?)").run("orchestration-work-events-v1", Date.now());
       }
       for (const [version, checksum, migration] of officeMigrations) {
         const applied = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = ?").get(version) as { checksum?: string } | undefined;

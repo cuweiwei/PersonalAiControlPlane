@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -12,13 +12,19 @@ const execFileAsync = promisify(execFile);
 test("Codex executor captures untracked diff and test log artifacts and separates runner from command status", async () => {
   const root = await mkdtemp(join(tmpdir(), "pai-codex-executor-"));
   const workspace = join(root, "workspace");
-  const executable = join(root, "fake-codex.sh");
+  const windows = process.platform === "win32";
+  const executable = join(root, windows ? "fake-codex.cmd" : "fake-codex.sh");
   try {
-    await execFileAsync("mkdir", [workspace]);
+    await mkdir(workspace);
     await execFileAsync("git", ["init", "-q"], { cwd: workspace });
     await writeFile(join(workspace, "smoke.txt"), "bounded smoke\n", "utf8");
-    await writeFile(executable, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli-test; exit 0; fi\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"npm test -- test/v2-http.test.ts\",\"aggregated_output\":\"TAP test failed\",\"exit_code\":1,\"status\":\"failed\"}}'\n", "utf8");
-    await chmod(executable, 0o700);
+    if (windows) {
+      await writeFile(join(root, "fake-codex.js"), "console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'npm test -- test/v2-http.test.ts',aggregated_output:'TAP test failed',exit_code:1,status:'failed'}}));\n", "utf8");
+      await writeFile(executable, "@echo off\r\nif \"%~1\"==\"--version\" (echo codex-cli-test& exit /b 0)\r\nnode \"%~dp0fake-codex.js\" %*\r\n", "utf8");
+    } else {
+      await writeFile(executable, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli-test; exit 0; fi\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"npm test -- test/v2-http.test.ts\",\"aggregated_output\":\"TAP test failed\",\"exit_code\":1,\"status\":\"failed\"}}'\n", "utf8");
+      await chmod(executable, 0o700);
+    }
     const executor = new CodexExecutor({ smoke: workspace }, executable, true);
     assert.equal((await executor.discover()).capabilities?.[0]?.status, "READY");
     const task = {

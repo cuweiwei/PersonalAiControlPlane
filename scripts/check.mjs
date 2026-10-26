@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 const required = [
   "package.json",
   "tsconfig.json",
@@ -18,6 +19,8 @@ const required = [
   "apps/control-plane/src/missions/coordinator.ts",
   "apps/control-plane/src/missions/command-dispatcher.ts",
   "apps/control-plane/src/tasks/task-service.ts",
+  "apps/control-plane/src/orchestration/orchestration-service.ts",
+  "apps/control-plane/src/recovery/recovery-scheduler.ts",
   "apps/control-plane/src/tasks/task-state-machine.ts",
   "apps/control-plane/src/scheduler/scheduler.ts",
   "apps/control-plane/src/workers/worker-service.ts",
@@ -30,6 +33,7 @@ const required = [
   "apps/worker/src/runtime.ts",
   "apps/worker/src/transport.ts",
   "apps/worker/src/local-db.ts",
+  "apps/worker/src/native-session-journal.ts",
   "packages/contracts/src/index.ts",
   "packages/contracts/src/office/index.ts",
   "packages/worker/src/index.ts",
@@ -46,6 +50,7 @@ const required = [
   "docs/implementation-status.md",
   "schemas/api/v2/task-create.schema.json",
   "schemas/api/v2/task-delegate.schema.json",
+  "schemas/api/v2/orchestration-work.schema.json",
   "schemas/worker/v2/message.schema.json",
   "schemas/system/v2/health.schema.json",
   "schemas/release/v1/release-manifest.schema.json",
@@ -78,6 +83,7 @@ for (const relative of sourceFiles) {
 const schemas = [
   "schemas/api/v2/task-create.schema.json",
   "schemas/api/v2/task-delegate.schema.json",
+  "schemas/api/v2/orchestration-work.schema.json",
   "schemas/worker/v2/message.schema.json",
   "schemas/system/v2/health.schema.json",
   "schemas/release/v1/release-manifest.schema.json",

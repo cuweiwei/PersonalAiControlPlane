@@ -48,6 +48,31 @@ CREATE TABLE IF NOT EXISTS computer_operations (
   updated_at INTEGER NOT NULL,
   UNIQUE(session_id, sequence)
 );
+CREATE TABLE IF NOT EXISTS native_session_journal (
+  task_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  runtime TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  fence_epoch INTEGER NOT NULL,
+  branch TEXT,
+  baseline_sha TEXT,
+  last_head_sha TEXT,
+  checkpoint_json TEXT,
+  state TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(attempt_id)
+);
+CREATE TABLE IF NOT EXISTS native_resume_operations (
+  operation_key TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  native_message_id TEXT,
+  request_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 export class WorkerLocalDatabase {
