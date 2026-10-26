@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export * from "./dispatch.ts";
+export * from "./quota.ts";
 
 export const TASK_TYPES = ["llm.inference", "codex", "opencode", "python", "command", "computer.use", "generic"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];

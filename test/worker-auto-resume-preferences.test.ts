@@ -27,8 +27,13 @@ test("fresh schema has additive resumable ledgers and persisted default-on polic
   assert.equal(settings.get().native_agent_tree_observation_enabled, false);
   assert.equal(settings.get().recovery_pool_max_concurrency, 1);
   assert.equal(settings.getEffective().fields.find((field) => field.key === "opencode_session_adapter_enabled")?.editable, false);
-  assert.throws(() => settings.patch({ opencode_session_adapter_enabled: true }), /FEATURE_UNAVAILABLE/);
+  for (const key of ["orchestration_gateway_enabled", "opencode_session_adapter_enabled", "codex_managed_host_enabled", "quota_recovery_engine_enabled"]) {
+    assert.throws(() => settings.patch({ [key]: true }), /FEATURE_UNAVAILABLE/);
+  }
   assert.equal(db.one("SELECT version FROM schema_migrations WHERE version = 16") !== undefined, true);
+  assert.equal(db.one("SELECT version FROM schema_migrations WHERE version = 17") !== undefined, true);
+  assert.equal(db.one("SELECT version FROM schema_migrations WHERE version = 18") !== undefined, true);
+  assert.equal(db.one("SELECT version FROM schema_migrations WHERE version = 19") !== undefined, true);
   for (const table of ["orchestration_works", "agent_session_bindings", "quota_pools", "quota_observations", "task_execution_conditions", "recovery_intents", "recovery_events", "codex_agent_nodes", "work_review_handoffs"]) {
     assert.equal(db.one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table) !== undefined, true, table);
   }
@@ -85,6 +90,9 @@ test("reopening both SQLite stores keeps resumable schema and worker-local journ
     const second = new ControlPlaneDatabase(cpPath);
     assert.equal(second.one<any>("SELECT value_json FROM settings WHERE key = 'test_sentinel'")?.value_json, "1");
     assert.equal(second.one("SELECT version FROM schema_migrations WHERE version = 16") !== undefined, true);
+    assert.equal(second.one("SELECT version FROM schema_migrations WHERE version = 17") !== undefined, true);
+    assert.equal(second.one("SELECT version FROM schema_migrations WHERE version = 18") !== undefined, true);
+    assert.equal(second.one("SELECT version FROM schema_migrations WHERE version = 19") !== undefined, true);
     assert.equal(Number(second.one<any>("SELECT value_json FROM runtime_metadata WHERE key = 'settings_version'")?.value_json), 1);
     second.close();
     const local = new WorkerLocalDatabase(workerPath); local.close();

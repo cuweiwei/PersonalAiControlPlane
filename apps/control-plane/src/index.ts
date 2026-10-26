@@ -22,6 +22,9 @@ import { MissionCoordinator } from "./missions/coordinator.ts";
 import { AgentWorkService } from "./agent-work/agent-work-service.ts";
 import { ComputerSessionService } from "./computers/computer-session-service.ts";
 import { DispatchService } from "./dispatch/dispatch-service.ts";
+import { RecoveryPolicyReconciler } from "./recovery/recovery-policy-reconciler.ts";
+import { RecoveryService } from "./recovery/recovery-service.ts";
+import { QuotaPoolService } from "./recovery/quota-pool-service.ts";
 import { SystemHealthCheckAdapter } from "./dispatch/dispatch-policy.ts";
 import { createPrivateHttpSemanticRouterProvider } from "./dispatch/providers/private-http-provider.ts";
 
@@ -38,7 +41,10 @@ const artifacts = new ArtifactStorage(artifactRoot);
 const tasks = new TaskService(db, events, { artifactStorage: artifacts });
 const settings = new SettingsService(db);
 const workers = new WorkerService(db, events, () => ({ defaultEnabled: Boolean(settings.get().auto_resume_default_enabled), emergencyStop: Boolean(settings.get().auto_resume_emergency_stop) }));
-const coordinator = new WorkerCoordinator(workers, tasks, events, artifacts, settings);
+const recoveryPolicyReconciler = new RecoveryPolicyReconciler(db, settings, workers);
+const recovery = new RecoveryService(db);
+const quotaPools = new QuotaPoolService(db);
+const coordinator = new WorkerCoordinator(workers, tasks, events, artifacts, settings, recovery, quotaPools);
 const scheduler = new ResourceScheduler(db, tasks, workers, coordinator, events);
 const callback = new HermesCallbackDispatcher(db);
 const modelTests = new ModelTestService(db, tasks);
@@ -69,7 +75,7 @@ let schedulerAlive = true;
 let coordinatorAlive = true;
 let databaseReady = db.isWritable();
 let artifactReady = artifacts.isWritable();
-const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, computers, dispatch, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
+const server = createControlPlaneServer({ db, tasks, workers, coordinator, missionCoordinator, artifacts, settings, health, events, office, missions, plans, callback, modelTests, modelPreferences, onboarding, agentWork, computers, dispatch, recovery, quotaPools, isReady: () => databaseReady && schedulerAlive && coordinatorAlive && artifactReady });
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
   if (pathname !== "/worker/ws") { socket.destroy(); return; }
@@ -84,10 +90,11 @@ const callbackTimer = setInterval(() => { void callback.dispatchOnce().catch((er
 const readinessTimer = setInterval(() => { databaseReady = db.isWritable(); artifactReady = artifacts.isWritable(); }, 15_000);
 const computerArtifactTimer = setInterval(() => { try { for (const path of computers.expireObservationArtifacts()) artifacts.remove(path); } catch (error) { console.error(JSON.stringify({ event: "computer.artifact_cleanup_error", message: error instanceof Error ? error.message : "COMPUTER_ARTIFACT_CLEANUP_FAILED" })); } }, 60_000);
 const computerLeaseTimer = setInterval(() => { try { computers.renewLeases(); } catch (error) { console.error(JSON.stringify({ event: "computer.lease_error", message: error instanceof Error ? error.message : "COMPUTER_LEASE_FAILED" })); } }, 5_000);
+const recoveryPolicyTimer = setInterval(() => { try { recoveryPolicyReconciler.reconcile(); } catch (error) { console.error(JSON.stringify({ event: "recovery.policy_reconcile_error", message: error instanceof Error ? error.message : "RECOVERY_POLICY_RECONCILE_FAILED" })); } }, 15_000);
 
 server.listen(port, bindAddress, () => console.log(JSON.stringify({ event: "control-plane.started", version: "2.0.0", port, bindAddress, dataDir, artifactRoot })));
 
 let stopping = false;
-async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); clearInterval(computerArtifactTimer); clearInterval(computerLeaseTimer); missionCoordinator.close(); coordinator.close(); await semanticProvider?.close(); await close(server); db.close(); }
+async function shutdown(): Promise<void> { if (stopping) return; stopping = true; clearInterval(schedulerTimer); clearInterval(missionCommandTimer); clearInterval(staleTimer); clearInterval(healthTimer); clearInterval(callbackTimer); clearInterval(readinessTimer); clearInterval(computerArtifactTimer); clearInterval(computerLeaseTimer); clearInterval(recoveryPolicyTimer); missionCoordinator.close(); coordinator.close(); await semanticProvider?.close(); await close(server); db.close(); }
 function signal(): void { void shutdown().catch((error) => { console.error(error); process.exitCode = 1; }); }
 process.once("SIGINT", signal); process.once("SIGTERM", signal);

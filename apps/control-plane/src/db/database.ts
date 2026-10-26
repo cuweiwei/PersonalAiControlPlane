@@ -904,6 +904,58 @@ export class ControlPlaneDatabase {
         }
         this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (16, ?, ?)").run("multi-orchestrator-resumable-v1", Date.now());
       }
+      const quotaPoolMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 17").get() as { checksum?: string } | undefined;
+      if (quotaPoolMigration && quotaPoolMigration.checksum !== "quota-pool-identity-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:17");
+      if (!quotaPoolMigration) {
+        ensureColumn("quota_pools", "identity_state", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
+        this.connection.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_pools_provider_fingerprint
+            ON quota_pools(provider, account_fingerprint) WHERE account_fingerprint IS NOT NULL;
+          CREATE TRIGGER IF NOT EXISTS quota_pools_identity_insert
+          BEFORE INSERT ON quota_pools
+          WHEN NEW.identity_state NOT IN ('UNKNOWN','OWNER_CONFIRMED')
+            OR (NEW.identity_state = 'OWNER_CONFIRMED' AND NEW.account_fingerprint IS NULL)
+            OR (NEW.account_fingerprint IS NOT NULL AND (
+              length(NEW.account_fingerprint) != 71
+              OR substr(NEW.account_fingerprint, 1, 7) != 'sha256:'
+              OR substr(NEW.account_fingerprint, 8) GLOB '*[^0-9a-f]*'
+            ))
+          BEGIN SELECT RAISE(ABORT, 'INVALID_QUOTA_POOL_IDENTITY'); END;
+          CREATE TRIGGER IF NOT EXISTS quota_pools_identity_update
+          BEFORE UPDATE OF identity_state, account_fingerprint ON quota_pools
+          WHEN NEW.identity_state NOT IN ('UNKNOWN','OWNER_CONFIRMED')
+            OR (NEW.identity_state = 'OWNER_CONFIRMED' AND NEW.account_fingerprint IS NULL)
+            OR (NEW.account_fingerprint IS NOT NULL AND (
+              length(NEW.account_fingerprint) != 71
+              OR substr(NEW.account_fingerprint, 1, 7) != 'sha256:'
+              OR substr(NEW.account_fingerprint, 8) GLOB '*[^0-9a-f]*'
+            ))
+          BEGIN SELECT RAISE(ABORT, 'INVALID_QUOTA_POOL_IDENTITY'); END;
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (17, ?, ?)").run("quota-pool-identity-v1", Date.now());
+      }
+      const recoveryMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 18").get() as { checksum?: string } | undefined;
+      if (recoveryMigration && recoveryMigration.checksum !== "recovery-resume-policy-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:18");
+      if (!recoveryMigration) {
+        ensureColumn("recovery_intents", "resume_policy", "TEXT NOT NULL DEFAULT 'INHERIT_WORKER'");
+        this.connection.exec(`
+          CREATE TRIGGER IF NOT EXISTS recovery_intents_resume_policy_insert
+          BEFORE INSERT ON recovery_intents
+          WHEN NEW.resume_policy NOT IN ('INHERIT_WORKER','MANUAL_ONLY')
+          BEGIN SELECT RAISE(ABORT, 'INVALID_RECOVERY_RESUME_POLICY'); END;
+          CREATE TRIGGER IF NOT EXISTS recovery_intents_resume_policy_update
+          BEFORE UPDATE OF resume_policy ON recovery_intents
+          WHEN NEW.resume_policy NOT IN ('INHERIT_WORKER','MANUAL_ONLY')
+          BEGIN SELECT RAISE(ABORT, 'INVALID_RECOVERY_RESUME_POLICY'); END;
+        `);
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (18, ?, ?)").run("recovery-resume-policy-v1", Date.now());
+      }
+      const recoveryIdempotencyMigration = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = 19").get() as { checksum?: string } | undefined;
+      if (recoveryIdempotencyMigration && recoveryIdempotencyMigration.checksum !== "recovery-report-idempotency-v1") throw new Error("MIGRATION_CHECKSUM_MISMATCH:19");
+      if (!recoveryIdempotencyMigration) {
+        ensureColumn("recovery_intents", "request_hash", "TEXT NOT NULL DEFAULT ''");
+        this.connection.prepare("INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (19, ?, ?)").run("recovery-report-idempotency-v1", Date.now());
+      }
       for (const [version, checksum, migration] of officeMigrations) {
         const applied = this.connection.prepare("SELECT checksum FROM schema_migrations WHERE version = ?").get(version) as { checksum?: string } | undefined;
         if (applied && applied.checksum !== checksum) throw new Error(`MIGRATION_CHECKSUM_MISMATCH:${version}`);

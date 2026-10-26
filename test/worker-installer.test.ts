@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -10,9 +11,9 @@ const installer = new URL("../packaging/macos/install-worker.sh", import.meta.ur
 const windowsInstaller = new URL("../packaging/windows/install-worker.ps1", import.meta.url);
 
 test("macOS Worker installer is a self-bootstrapping shell script", () => {
-  const path = installer.pathname;
+  const path = fileURLToPath(installer);
   const source = readFileSync(path, "utf8");
-  assert.equal(spawnSync("bash", ["-n", path]).status, 0);
+  if (process.platform !== "win32") assert.equal(spawnSync("bash", ["-n", path]).status, 0);
   for (const marker of ["archive_url=", "PAI_OMLX_ENABLED", "PAI_OMLX_API_KEY_FILE", "PAI_LMSTUDIO_ENABLED", "PAI_OLLAMA_ENABLED", "refresh_source", "nodejs.org/dist", "shasum -a 256 -c", "ci --prefix", "launchctl bootstrap", "com.personal-ai.worker", "PAI_CUA_ENABLED:-true", "cua.ai/driver/install.sh", "com.trycua.cua-driver", "CuaDriver.app/Contents/MacOS/cua-driver", "System Settings"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -44,9 +45,9 @@ test("Windows Worker installer bootstraps source, Node.js, launcher, and Schedul
 });
 
 test("Linux Worker installer bootstraps CUA Driver and user services", () => {
-  const path = new URL("../packaging/linux/install-worker.sh", import.meta.url).pathname;
+  const path = fileURLToPath(new URL("../packaging/linux/install-worker.sh", import.meta.url));
   const source = readFileSync(path, "utf8");
-  assert.equal(spawnSync("bash", ["-n", path]).status, 0);
+  if (process.platform !== "win32") assert.equal(spawnSync("bash", ["-n", path]).status, 0);
   for (const marker of ["PAI_CUA_ENABLED:-true", "PAI_OPENCODE_ENABLED:-true", "PAI_OPENCODE_EXECUTABLE", "cua.ai/driver/install.sh", "CUA_DRIVER_RS_VERSION", "libxi6", "at-spi2-core", "graphical-session.target", "systemctl --user import-environment", "systemctl --user enable --now", "PAI_CUA_DRIVER_SOCKET", "personal-ai-worker.service", "journalctl --user", "supported CUA Driver Linux desktop", "refusing to replace live Worker files"]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

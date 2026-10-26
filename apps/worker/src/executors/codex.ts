@@ -14,6 +14,19 @@ const ARTIFACT_OUTPUT_LIMIT = 20_000_000;
 
 function digest(bytes: Uint8Array): string { return `sha256:${createHash("sha256").update(bytes).digest("hex")}`; }
 
+function quoteWindowsArg(value: string): string {
+  if (value.length > 0 && !/[\s"&|<>^]/.test(value)) return value;
+  return `"${value.replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/g, "$1$1")}"`;
+}
+
+function spawnExecutable(executable: string, args: string[], options: any = {}): ChildProcess {
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
+    const command = [quoteWindowsArg(executable), ...args.map(quoteWindowsArg)].join(" ");
+    return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], options);
+  }
+  return spawn(executable, args, { ...options, shell: false });
+}
+
 function parseCommandObservations(stdout: string): CommandObservation[] {
   const observations: CommandObservation[] = [];
   for (const line of stdout.split(/\r?\n/)) {
@@ -81,7 +94,7 @@ export class CodexExecutor implements WorkerExecutor {
   async discover() {
     if (!this.enabled) return { capabilities: [], models: [] };
     const healthy = await new Promise<boolean>((resolveResult) => {
-      const child = spawn(this.executable, ["--version"], { stdio: "ignore" });
+      const child = spawnExecutable(this.executable, ["--version"], { stdio: "ignore" });
       child.once("error", () => resolveResult(false));
       child.once("close", (code) => resolveResult(code === 0));
     });
@@ -187,7 +200,7 @@ export class CodexExecutor implements WorkerExecutor {
       if (signal?.aborted) { reject(new Error("CODEX_CANCELLED")); return; }
       const inherited = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "CODEX_HOME", "NO_COLOR"];
       const env = Object.fromEntries(inherited.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key] as string]]));
-      const child = spawn(executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
+      const child = spawnExecutable(executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
       this.children.set(attemptId, child);
       let stdout = "";
       let stderr = "";
@@ -195,8 +208,8 @@ export class CodexExecutor implements WorkerExecutor {
       const abort = () => { child.kill("SIGTERM"); reject(new Error("CODEX_CANCELLED")); };
       signal?.addEventListener("abort", abort, { once: true });
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); this.children.delete(attemptId); };
-      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8").slice(0, Math.max(0, outputLimit - stdout.length)); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8").slice(0, Math.max(0, 20_000 - stderr.length)); });
+      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8").slice(0, Math.max(0, outputLimit - stdout.length)); });
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8").slice(0, Math.max(0, 20_000 - stderr.length)); });
       child.once("error", (error) => { cleanup(); reject(error); });
       child.once("close", (code) => { cleanup(); resolveResult({ code: code ?? 1, stdout, stderr }); });
     });
