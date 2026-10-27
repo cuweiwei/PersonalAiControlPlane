@@ -4,7 +4,7 @@
   "title": "Commit-bound release evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "serviceId", "repository", "commitSha", "imageDigest", "composePath", "composeSha256", "deploymentProjectId", "health"],
+  "required": ["schemaVersion", "serviceId", "repository", "commitSha", "imageDigest", "images", "composePath", "composeSha256", "deploymentProjectId", "health"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "serviceId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$" },

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 test("release artifact binds the unified Control Plane image to one commit", () => {
-  const root = resolve(new URL("..", import.meta.url).pathname);
+  const root = fileURLToPath(new URL("..", import.meta.url));
   const output = mkdtempSync(join(tmpdir(), "pai-release-"));
   const commit = "a".repeat(40);
   const serverDigest = `sha256:${"b".repeat(64)}`;
@@ -17,7 +18,7 @@ test("release artifact binds the unified Control Plane image to one commit", () 
 });
 
 test("release artifact rejects an unbound additional image", () => {
-  const root = resolve(new URL("..", import.meta.url).pathname);
+  const root = fileURLToPath(new URL("..", import.meta.url));
   const commit = "a".repeat(40);
   const digest = `sha256:${"b".repeat(64)}`;
   const additional = JSON.stringify([{ serviceId: "personal-ai-control-web", imageReference: "ghcr.io/example/personal-ai-control-web:latest", imageDigest: digest }]);
