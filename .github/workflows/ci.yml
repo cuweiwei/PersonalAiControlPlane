@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   check:
@@ -32,7 +31,12 @@ jobs:
           $source = Get-Content packaging/windows/install-worker.ps1 -Raw
           [void][scriptblock]::Create($source)
   image:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     needs: [check, windows-installer]
     runs-on: ubuntu-latest
     steps:
@@ -56,11 +60,25 @@ jobs:
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_SERVICE_ID: personal-ai-control-plane
           RELEASE_DEPLOYMENT_PROJECT_ID: PersonalAiControlPlane
-          RELEASE_IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane:sha-${{ github.sha }}
+          RELEASE_IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/personal-ai-control-plane@${{ steps.build.outputs.digest }}
           RELEASE_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: npm run release:artifact
+        run: |
+          node scripts/render-release-compose.mjs
+          cd release-artifacts
+          node ../scripts/release-artifact.mjs --output .
+          cd ..
+          node scripts/verify-release-bundle.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: personal-ai-control-plane-release-${{ github.sha }}
-          path: release-artifacts/release-manifest-${{ github.sha }}.json
+          path: release-artifacts/
           if-no-files-found: error
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: image
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image-digest: ${{ needs.image.outputs.digest }}

@@ -6,6 +6,7 @@
  * completion.
  */
 
+import { acceptanceHealthy } from './deployment-health.mjs';
 const origin = (process.env.PAI_ACCEPTANCE_ORIGIN ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const requireOffice = process.env.PAI_ACCEPTANCE_REQUIRE_OFFICE === "true";
 const requireWorker = process.env.PAI_ACCEPTANCE_REQUIRE_WORKER === "true";
@@ -17,9 +18,9 @@ const evidence = [];
 
 async function probe(name, path, predicate) {
   try {
-    const response = await fetch(`${origin}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
+    const response = await fetch(new URL(path, `${origin}/`), { redirect: 'error', headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
     const body = await response.json().catch(() => ({}));
-    const ok = response.ok && (!predicate || predicate(body));
+    const ok = response.status === 200 && (!predicate || predicate(body));
     evidence.push({ name, state: ok ? "PASS" : "FAIL", status: response.status, detail: ok ? undefined : body.error?.code ?? body.status ?? "contract mismatch" });
     return { response, body, ok };
   } catch (error) {
@@ -28,10 +29,11 @@ async function probe(name, path, predicate) {
   }
 }
 
-await probe("control-plane health", "/healthz", (body) => body.status === "ok");
-await probe("control-plane readiness", "/readyz", (body) => body.status === "ok");
+const health = await probe("control-plane health", "/healthz", (body) => body.status === "ok");
+const readiness = await probe("control-plane readiness", "/readyz", (body) => body.status === "ok");
 const acceptance = await probe("acceptance projection", "/api/v2/acceptance", (body) => body.service === "personal-ai-control-plane" && body.ready === true && body.office?.id === "office-1" && body.coordinator?.recoveryMode === false && Number(body.coordinator?.unknownExecutions ?? 0) === 0 && Number(body.coordinator?.unknownAttempts ?? 0) === 0 && Number(body.coordinator?.unknownSlots ?? 0) === 0);
 const office = await probe("office projection", "/api/v2/offices/office-1", (body) => body.id === "office-1" && body.workflowHealth?.schemaReady === true);
+evidence.push({ name: 'strict deployment acceptance', state: acceptanceHealthy(health.body, readiness.body, acceptance.body, office.body) ? 'PASS' : 'FAIL' });
 
 if (requireOffice) {
   const ok = office.body.workflowHealth?.officeEnabled === true;
@@ -61,5 +63,5 @@ if (missionId) {
 }
 
 const failed = evidence.filter((item) => item.state === "FAIL");
-console.log(JSON.stringify({ state: failed.length ? "FAIL" : "PASS", origin, evidence, acceptanceProjection: acceptance.body }, null, 2));
+console.log(JSON.stringify({ state: failed.length ? "FAIL" : "PASS", evidence }, null, 2));
 if (failed.length) process.exitCode = 1;

@@ -1,0 +1,75 @@
+name: Production approval and Gateway deployment
+on:
+  workflow_call:
+    inputs:
+      image-digest:
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: paicp-production
+  cancel-in-progress: false
+jobs:
+  production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_REPOSITORY: ${{ github.repository }}
+      RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_IMAGE_DIGEST: ${{ inputs.image-digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: personal-ai-control-plane-release-${{ github.sha }}
+          path: release-artifacts
+      - run: node scripts/verify-release-bundle.mjs
+      - name: Reject stale approval before network credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/$RELEASE_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$RELEASE_COMMIT"
+      - name: Gateway integration barrier
+        run: bash scripts/deploy-via-gateway.sh
+      # Intentionally unreachable until a reviewed adapter integrates the real
+      # fenced Gateway transaction. Do not remove the barrier just to enable CD.
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-cd
+      - name: Prepare pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.NAS_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.NAS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf 'Host *\n  BatchMode yes\n  StrictHostKeyChecking yes\n  IdentitiesOnly yes\n  ConnectTimeout 10\n' > ~/.ssh/config
+      - name: Record non-secret outcome
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: |
+          mkdir -p deployment-evidence
+          node -e 'require("fs").writeFileSync("deployment-evidence/result.json", JSON.stringify({commit:process.env.RELEASE_COMMIT,digest:process.env.RELEASE_IMAGE_DIGEST,outcome:process.env.OUTCOME,gateway:"UNINTEGRATED",liveVerified:false}))'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-evidence/
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts ~/.ssh/config
